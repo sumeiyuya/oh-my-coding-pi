@@ -21,6 +21,7 @@
       "en-US"
     ],
     "productName": "oh my coding pi",
+    "executableName": "omcp",
     "directories": {
       "output": "release"
     },

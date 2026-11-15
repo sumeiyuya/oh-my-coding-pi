@@ -57,8 +57,8 @@
 
 ```
 文件：oh my coding pi Setup 0.6.0.exe
-大小：__SIZE__ 字节
-SHA256：__SHA256__
+大小：136,831,006 字节
+SHA256：113d3c356bc70a8ed1e8cb5a94bc67024efdc85397b2ad25b8bef309326cab41
 ```
 
 Windows 上可用 `certutil -hashfile "oh my coding pi Setup 0.6.0.exe" SHA256` 核对。
