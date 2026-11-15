@@ -1,0 +1,21 @@
+# 统一换行与二进制判定
+#
+# 背景：Windows 上 `scripts/*.ps1` 必须是 UTF-8 BOM + CRLF，
+# 否则 Windows PowerShell 5.1 会把 UTF-8 无 BOM 文件按 ANSI 解析，
+# 中文注释/字符串直接报“字符串缺少终止符”。git 默认的 text=auto
+# 会把 CRLF 改写成 LF，clone 后脚本就坏。
+#
+# 注意：BOM 由文件内容决定，.gitattributes 管不到；修改 .ps1 时请保留 BOM。
+
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.asar binary

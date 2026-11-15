@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "mode": "ask",
+  "tools": {
+    "allow": ["read", "grep", "find", "ls", "glob", "edit", "write", "bash", "run_code"],
+    "deny": []
+  },
+  "paths": {
+    "allowWrite": ["<workspace>/**"],
+    "denyWrite": [".env", "**/.env", "**/.git/**", "**/node_modules/**", "C:/Windows/**"],
+    "denyRead": ["**/.ssh/**", "**/.aws/**", "**/.gnupg/**"]
+  },
+  "commands": {
+    "deny": [
+      "\\bsudo\\b",
+      "curl[^|]*\\|\\s*(sh|bash)",
+      "\\brm\\s+[^\\n|;&]*(\\s/|\\s~)(\\s|$)",
+      "[Ff]ormat\\s+[a-zA-Z]:",
+      "\\b(shutdown|reboot)\\b"
+    ],
+    "ask": [
+      "\\brm\\s+[^\\n|;&]*-[a-zA-Z]*([rR][a-zA-Z]*[fF]|[fF][a-zA-Z]*[rR])[a-zA-Z]*",
+      "\\brm\\s+[^\\n|;&]*-[a-zA-Z]*[rR][a-zA-Z]*\\s+[^\\n|;&]*-[a-zA-Z]*[fF][a-zA-Z]*",
+      "\\brm\\s+[^\\n|;&]*-[a-zA-Z]*[fF][a-zA-Z]*\\s+[^\\n|;&]*-[a-zA-Z]*[rR][a-zA-Z]*",
+      "\\brm\\s+[^\\n|;&]*--[a-zA-Z]*recursive[^\\n|;&]*--[a-zA-Z]*force",
+      "\\brm\\s+[^\\n|;&]*--[a-zA-Z]*force[^\\n|;&]*--[a-zA-Z]*recursive",
+      "\\bRemove-Item\\b[^\\n|;&]*-[a-zA-Z]*([rR]ecurse|[fF]orce)",
+      "\\brd\\s+[^\\n|;&]*\\/s\\b",
+      "\\brmdir\\s+[^\\n|;&]*\\/s\\b",
+      "\\bdel\\s+[^\\n|;&]*\\/s\\b",
+      "\\b(shutil\\s*\\.\\s*rmtree|os\\s*\\.\\s*(remove|unlink|rmdir|removedirs))\\b",
+      "\\bgit\\s+push\\b",
+      "\\bpip\\s+install\\b",
+      "\\bconda\\s+install\\b"
+    ]
+  },
+  "runCode": {
+    "requireApproval": true,
+    "timeoutSec": 120,
+    "maxOutputChars": 20000
+  },
+  "audit": {
+    "enabled": true
+  }
+}

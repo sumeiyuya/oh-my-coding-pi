@@ -1,0 +1,105 @@
+{
+  "name": "@oh-my-coding-pi/desktop",
+  "version": "0.6.0",
+  "private": true,
+  "description": "oh my coding pi desktop shell",
+  "main": "./out/main/index.js",
+  "author": "oh-my-coding-pi",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "dist": "pnpm --filter @oh-my-coding-pi/plugin-ext bundle && electron-vite build && electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.omcp.desktop",
+    "icon": "build/icon.ico",
+    "compression": "maximum",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "productName": "oh my coding pi",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/provider-catalog.json",
+        "to": "provider-catalog.json"
+      },
+      {
+        "from": "../../packages/kernel-sidecar",
+        "to": "kernel-sidecar"
+      },
+      {
+        "from": "../../packages/science-ext",
+        "to": "science-ext"
+      },
+      {
+        "from": "../../packages/permission-ext",
+        "to": "permission-ext"
+      },
+      {
+        "from": "../../packages/plugin-ext/dist",
+        "to": "plugin-ext"
+      },
+      {
+        "from": "../../vendor/pi-bundle",
+        "to": "pi",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/NOTICE.pi.md",
+        "to": "NOTICE-pi.md"
+      },
+      {
+        "from": "build/LICENSES.pi.md",
+        "to": "LICENSES-pi.md"
+      },
+      {
+        "from": "build/NOTICE.txt",
+        "to": "NOTICE.txt"
+      },
+      {
+        "from": "build/LICENSE.txt",
+        "to": "LICENSE-oh-my-coding-pi.txt"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "license": "build/LICENSE.txt"
+    }
+  },
+  "dependencies": {
+    "@oh-my-coding-pi/shared": "workspace:*",
+    "playwright-core": "^1.65.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

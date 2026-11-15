@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 本产品只支持 Windows：不要加 ubuntu/macos 矩阵，它们跑不了 NSIS 与 PowerShell 脚本
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependencies
+        run: pip install jsonschema
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Policy and version tests
+        run: node --test packages/shared/test/policy.test.ts packages/shared/test/version.test.ts
+
+      - name: Audit and grants checks
+        run: node scripts/p40-checks.mjs
+
+      - name: Diagnostics checks
+        run: node scripts/p42-checks.mjs
+
+      - name: Contract schema
+        run: python docs/check_contract.py
+
+      - name: Permission extension typecheck
+        run: pnpm --filter @oh-my-coding-pi/desktop exec tsc -p ../../packages/permission-ext --noEmit
+
+      - name: Fetch bundled pi
+        run: node scripts/fetch-pi.mjs
+
+      - name: Prepare pi bundle
+        run: node scripts/prepare-pi-bundle.mjs
+
+      - name: Bundled pi smoke
+        run: node scripts/pi-smoke.mjs
+
+      - name: Build
+        run: pnpm build

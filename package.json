@@ -1,0 +1,34 @@
+{
+  "name": "oh-my-coding-pi",
+  "version": "0.6.0",
+  "private": true,
+  "description": "本地科研分析桌面工具：pi 对话 + Python/R 常驻内核 + 审批门与审计（Windows）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sumeiyuya/oh-my-coding-pi.git"
+  },
+  "homepage": "https://github.com/sumeiyuya/oh-my-coding-pi#readme",
+  "bugs": {
+    "url": "https://github.com/sumeiyuya/oh-my-coding-pi/issues"
+  },
+  "keywords": [
+    "electron",
+    "research",
+    "jupyter",
+    "r",
+    "reproducible-analysis",
+    "permissions"
+  ],
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "dev": "pnpm --filter @oh-my-coding-pi/desktop dev",
+    "build": "pnpm --filter @oh-my-coding-pi/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "dist": "pnpm --filter @oh-my-coding-pi/desktop dist",
+    "ci": "powershell -ExecutionPolicy Bypass -File scripts/ci.ps1",
+    "fetch:pi": "node scripts/fetch-pi.mjs",
+    "license:scan": "node scripts/license-scan.mjs"
+  },
+  "piVersion": "1.5.2"
+}

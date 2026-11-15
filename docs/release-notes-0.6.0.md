@@ -1,0 +1,74 @@
+# 发布说明 0.6.0
+
+- 日期：2026-11-15
+- 安装包：`oh my coding pi Setup 0.6.0.exe`
+- 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
+- 仓库：`sumeiyuya/oh-my-coding-pi`（新仓库，首个提交即本版）
+
+---
+
+## 1. 这是一次彻底的改名
+
+项目从 **SciAgent** 改名为 **oh my coding pi**，并且**不保留旧标识**：
+
+| 项 | 新值 |
+|---|---|
+| 显示名 / 安装包 | `oh my coding pi` |
+| npm 包 | `oh-my-coding-pi` / `@oh-my-coding-pi/*` |
+| 可执行文件 | `omcp.exe` |
+| appId | `com.omcp.desktop` |
+| 用户数据 | `%APPDATA%\oh-my-coding-pi` |
+| 环境变量 | `OMCP_*` |
+| 本地存储 | `omcp.*` |
+| 审批协议 | `omcp-approval:` |
+| 工作区元数据 | `.omcp/` |
+
+**换新仓库**：旧仓库只归档、不再维护；新仓库的第一个提交就是 0.6.0，历史里没有旧名字。
+
+## 2. 需要你手动处理的三件事
+
+1. **旧工作区**：如果你有老项目，`.science/` 不会被读取。要保留路线/方案/笔记本，把目录名改成 `.omcp` 即可。
+2. **旧密钥引用**：`~/.pi/agent/models.json` 里若写着 `$SCI_KEY_*`，删掉那个 provider 条目，到「设置 → 补全当前 Provider」重新填一次；应用会按新前缀重新生成。
+3. **旧版本**：appId 变了，新安装不会覆盖旧版。请先卸载旧的 SciAgent，再装这个。
+
+## 3. 功能与上一版一致
+
+改名不改变功能。这版含此前几轮的全部能力：
+
+- 对话与工具循环、工具调用成组折叠（默认收起，点开看逐条）
+- 可拖可折叠的三栏布局、右坞四面板、底部状态栏、会话搜索与分组
+- Python / R 常驻内核、串行执行、解释器切换确认
+- 模型服务：按官方环境变量注入凭据、发送前预检、连接确认对话框
+- 三档权限、方案期门（批准绑定内容）、审计与持久授权
+- 科学计算扩展、浏览器插件、记忆
+
+## 4. 已知问题
+
+| 项 | 说明 |
+|---|---|
+| 更新检查不支持私有仓 | 本仓库为私有，检查更新会提示"仓库不可访问"；需手动下载 |
+| 本机 install 严格检查 | `pnpm install --frozen-lockfile` 会报 `ERR_PNPM_IGNORED_BUILDS`（已决定不扩大 build-script 允许面） |
+| 内核失败态 | 状态栏只有「就绪 / 未启动」两态 |
+| 产物面板 | 仍是占位空态，未接 figures/ 与 results/ 扫描 |
+| 旧数据不兼容 | 旧 `.science`、旧 `SCI_KEY_*`、旧 localStorage 一律不迁移（刻意的） |
+| 代码签名 | 安装包未签名，SmartScreen 可能提示"未知发布者" |
+
+## 5. 校验
+
+```
+文件：oh my coding pi Setup 0.6.0.exe
+大小：__SIZE__ 字节
+SHA256：__SHA256__
+```
+
+Windows 上可用 `certutil -hashfile "oh my coding pi Setup 0.6.0.exe" SHA256` 核对。
+
+## 6. 验证摘要
+
+| 项 | 结果 |
+|---|---|
+| 单元测试 | **171 pass / 0 fail** |
+| typecheck | 5 个工作区通过 |
+| 构建 | electron-vite build 通过 |
+| 残留检查 | 仓库内 `oh my coding pi` / `SciAgent` 等旧名 **0 处**（历史报告目录除外） |
+| 应用启动 | 自检实跑通过（方案门、路线页、内核与工具链未受影响） |

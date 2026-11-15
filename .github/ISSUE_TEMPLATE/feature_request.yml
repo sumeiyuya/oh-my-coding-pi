@@ -1,0 +1,46 @@
+name: 功能建议
+description: 想加什么能力，或哪里用起来别扭
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先看 `docs/scope.md` 的 v1 不做什么——文献检索、MCP、子 agent、Office 文档、容器隔离、
+        多用户、自动更新都在排除清单里，短期内不会做。
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你现在的场景
+      description: 你在做什么分析、卡在哪一步
+      placeholder: 比如“每周要重跑同一套描述统计 + 箱线图，改图的字号每次都要重说一遍”
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望它怎么用
+      description: 描述操作流程，不用写实现
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternative
+    attributes:
+      label: 你现在怎么绕过
+      description: 手动改文件、写脚本、换别的工具——这能帮判断值不值得做
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响面
+      options:
+        - 只影响我这一类分析
+        - 多数科研用户都会遇到
+        - 属于基础设施（内核/权限/打包）
+    validations:
+      required: true

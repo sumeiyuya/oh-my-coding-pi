@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安装 / 卸载问题
+    url: https://github.com/sumeiyuya/oh-my-coding-pi/blob/master/docs/installation.md
+    about: 先看安装文档：前置依赖、静默安装、卸载残留的处理方式
+  - name: 已知限制
+    url: https://github.com/sumeiyuya/oh-my-coding-pi/blob/master/docs/known-limits.md
+    about: 只读模式、脚本检查、签名、体积等已知问题都在这里
+  - name: 安全漏洞
+    url: https://github.com/sumeiyuya/oh-my-coding-pi/security/advisories/new
+    about: 不要用公开 Issue 报安全问题；请走私密渠道

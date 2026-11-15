@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oh-my-coding-pi.local/schema/policy-v1.json",
+  "title": "oh-my-coding-pi policy",
+  "description": "工作区权限策略。commands 使用 JavaScript 正则；paths 使用 glob（三种基准：<workspace>/**、绝对路径、工作区相对）。所有字段可省略，省略即回落内置默认值；写了但写错（类型/正则/mode）会让整份策略作废并 fail-closed（ADR-025）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "策略版本，当前只支持 1"
+    },
+    "mode": {
+      "enum": [
+        "ask",
+        "allow",
+        "deny",
+        "readonly"
+      ],
+      "description": "ask=按规则审批；allow=全部放行（仅调试）；deny=全部拒绝；readonly=只读工具集"
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allow",
+        "deny"
+      ],
+      "description": "工具级白名单/黑名单；deny 优先于 allow",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "uniqueItems": true
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowWrite",
+        "denyWrite",
+        "denyRead"
+      ],
+      "description": "路径 glob；deny 优先。相对路径以工作区根为基准，支持 <workspace> 占位符",
+      "properties": {
+        "allowWrite": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "denyWrite": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "denyRead": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "commands": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deny",
+        "ask"
+      ],
+      "description": "bash 命令正则；deny=直接拒绝，ask=进入审批",
+      "properties": {
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "uniqueItems": true
+        },
+        "ask": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "runCode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requireApproval",
+        "timeoutSec",
+        "maxOutputChars"
+      ],
+      "description": "内核代码执行的审批与限制",
+      "properties": {
+        "requireApproval": {
+          "type": "boolean",
+          "description": "首次执行或高风险代码是否需要审批"
+        },
+        "timeoutSec": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "maxOutputChars": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 1000000
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

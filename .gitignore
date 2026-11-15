@@ -1,0 +1,42 @@
+node_modules/
+dist/
+out/
+release/
+*.log
+.env
+.env.*
+
+# 测试工作区与备份不进版本库
+sandbox/
+backups/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+
+# 打包产物与安装测试目录
+release2/
+release3/
+installtest*/
+*.exe
+*.blockmap
+
+# 早期阶段的临时输出
+rconn.json
+rkernel.err
+rmanual.*
+rnb*.out
+rkm.log
+rstart.log
+
+# P0 spike 原始日志不随公开仓库发布（结论见 docs/go-no-go.md）
+spikes/*
+!spikes/README.md
+
+# 打包/构建产物目录（含失败残留）
+release*/
+build-output*/
+
+# 内置 pi 的依赖目录（构建时下载，不入库）
+vendor/
