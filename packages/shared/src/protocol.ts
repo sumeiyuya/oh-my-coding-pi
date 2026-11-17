@@ -1083,6 +1083,8 @@ export interface PreloadApi {
   getSessionMeta(): Promise<SessionMetaResult>;
   setSessionMeta(sessionFile: string, patch: SessionMetaPatch): Promise<{ ok: boolean; error?: string }>;
   listFiles(path: string): Promise<FileListResult>;
+  /** 产物清单：账本（工具产出）+ 约定目录（figures/、results/） */
+  listArtifacts(): Promise<ArtifactListResult>;
   statFile(path: string): Promise<FileStatResult>;
   readFile(path: string): Promise<FileReadResult>;
   getModelRegistry(): Promise<ModelRegistryView>;
@@ -1316,3 +1318,31 @@ export type IpcEvent =
   | { channel: "bridge:error"; error: AppError }
   | { channel: "workspace:changed"; info: WorkspaceInfo }
   | { channel: "kernel:event"; event: KernelRunEvent };
+
+/** 产物（参考 DAWN 的产物契约）：账本记的 + 约定目录扫出来的。 */
+export type ArtifactKind = "code" | "markdown" | "text" | "image" | "data" | "other";
+
+export interface ArtifactItem {
+  /** 工作区相对路径，统一 / 分隔 */
+  path: string;
+  name: string;
+  dir: string;
+  kind: ArtifactKind;
+  size: number | null;
+  mtime: string | null;
+  /** 刷新时现查：账本里有、磁盘上没了 → 界面显示「已不存在」 */
+  exists: boolean;
+  origin: "run" | "observed";
+  tool?: string;
+  ts?: string;
+}
+
+export interface ArtifactListResult {
+  artifacts: ArtifactItem[];
+  /** 有工具调用但产出未知的次数（bash / run_code） */
+  unknownRuns: number;
+  /** 其中来自约定目录扫描的条数 */
+  observed: number;
+  scannedAt: string;
+  error?: string;
+}

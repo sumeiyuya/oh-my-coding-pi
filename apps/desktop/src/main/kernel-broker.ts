@@ -18,6 +18,15 @@ function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
  * Localhost HTTP broker for both kernels. The pi extension and the
  * renderer go through this single broker, so chat and notebook share kernels.
  */
+export interface KernelOutcome {
+  lang: "python" | "r";
+  ok: boolean;
+  status: string;
+  durationMs: number;
+  errorClass?: string;
+  kernelPid?: number;
+}
+
 export class KernelBroker {
   private server: Server | null = null;
   url = "";
@@ -28,6 +37,8 @@ export class KernelBroker {
     private readonly onImage?: (data: string) => void,
     /** 纯文本模型下把图片转述成文字；返回 null 表示按原样透传图片 */
     private readonly describeImage?: (data: string, mimeType: string) => Promise<string | null>,
+    /** 每次 run_code 结束后报一次结果，供审计落盘（报告 P4） */
+    private readonly onOutcome?: (outcome: KernelOutcome) => void,
   ) {}
 
   async start(): Promise<void> {
@@ -88,6 +99,9 @@ export class KernelBroker {
         res.end(JSON.stringify({ ok: false, error: "code is required" }));
         return;
       }
+      const lang: "python" | "r" = body.lang === "r" ? "r" : "python";
+      const startedAt = Date.now();
+      let status = "unknown";
       res.writeHead(200, {
         "content-type": "application/x-ndjson",
         "cache-control": "no-cache",
@@ -97,6 +111,7 @@ export class KernelBroker {
         await service.execute(
           body.code,
           (ev) => {
+            if (ev.ev === "result" && typeof ev.status === "string") status = ev.status;
             if (ev.ev === "display" && ev.mime === "image/png" && ev.data) {
               this.onImage?.(ev.data);
               if (this.describeImage) {
@@ -125,17 +140,38 @@ export class KernelBroker {
           typeof body.timeoutMs === "number" ? body.timeoutMs : 120_000,
         );
         if (pending.length) await Promise.all(pending);
+        this.onOutcome?.({
+          lang,
+          ok: true,
+          status,
+          durationMs: Date.now() - startedAt,
+          kernelPid: service.pid ?? undefined,
+        });
       } catch (err) {
+        const message = (err as Error).message || String(err);
+        const errorClass = /timeout/i.test(message)
+          ? "Timeout"
+          : /kernel exited/i.test(message)
+            ? "KernelExited"
+            : "KernelError";
         res.write(
           JSON.stringify({
             ev: "error",
             id: body.id,
             ename: "KernelError",
-            evalue: (err as Error).message,
+            evalue: message,
             traceback: [],
           }) + "\n",
         );
         res.write(JSON.stringify({ ev: "result", id: body.id, status: "error" }) + "\n");
+        this.onOutcome?.({
+          lang,
+          ok: false,
+          status: "error",
+          durationMs: Date.now() - startedAt,
+          errorClass,
+          kernelPid: service.pid ?? undefined,
+        });
       }
       res.end();
       return;

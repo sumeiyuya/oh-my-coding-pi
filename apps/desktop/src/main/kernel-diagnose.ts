@@ -14,6 +14,10 @@ export type LaunchDiagnosis =
   | { kind: "no-path"; message: string }
   | { kind: "missing-executable"; message: string; executable: string }
   | { kind: "missing-kernel-package"; message: string; packageName: string; evidence: string }
+  /** 进程起来了但一个字都没说：没证据可依，只能给检查清单 */
+  | { kind: "no-output"; message: string; evidence: string }
+  /** 进程活着，但 shell/iopub 至少一条没回音：这是协议层，不是路径层 */
+  | { kind: "protocol"; message: string; evidence: string }
   | { kind: "unknown"; message: string; evidence: string };
 
 const MODULE_TO_PACKAGE: Record<string, string> = {
@@ -83,11 +87,26 @@ export function diagnoseLaunch(
   }
 
   if (stderr.trim()) {
+    // 协议层：sidecar 的握手失败带 shell=/iopub= 两个布尔值。
+    // 这类问题改路径、重装包都没用（自测报告 §7.3），别把人往错误方向引。
+    if (/握手失败|handshake failed|等 iopub 的第一声/i.test(stderr)) {
+      return {
+        kind: "protocol",
+        evidence: tail(stderr),
+        message: `${label} 进程起来了，但握手没通（shell / iopub 至少一条没回音）。这不是路径问题：先看下面两个布尔值，iopub 那条负责的是输出通道。`,
+      };
+    }
     return {
       kind: "unknown",
       evidence: tail(stderr),
       message: `${label} 内核没能起来，原因认不出。它自己说的是（末尾几行）：`,
     };
   }
-  return undefined;
+  // 进程没留下任何 stderr：至少要说清楚“它什么都没输出”，并给出可执行的下一步，
+  // 而不是给一个空冒号让人干瞪眼（报告 P7）。
+  return {
+    kind: "no-output",
+    evidence: "",
+    message: `${label} 内核没起来，而且没有留下任何 stderr。先查这两件事：① 这个解释器自己能不能装内核包（${path || "解释器"} -m pip show ipykernel / Rscript -e "requireNamespace('IRkernel')"）；② 换成绝对路径再试一次。`,
+  };
 }

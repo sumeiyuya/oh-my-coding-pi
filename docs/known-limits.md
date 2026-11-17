@@ -48,8 +48,35 @@
     不做 token、不要求把私有仓改公开。失败按 auth / not_found / ratelimit / timeout / network / parse 六类提示（D2）。
 5. **没有多窗口/多工作区**。一个应用实例一个当前工作区。
 5.1 **界面布局**：左右栏可拖宽（左 240–420、右 280–520）与折叠；宽度、折叠状态、当前右坞面板、
-    布局模式落盘（`omcp.global.*`），**右坞开/关不落盘**（重开回到展开）。
-    分隔条可聚焦，←/→ 每次 16px；快捷键 Ctrl+B / Ctrl+J / Ctrl+1–4。
+    **右坞开/合**都落盘（`omcp.global.*`）。**没有布局模式**：四个预设（对话/分析/专注/笔记本）已删除，
+    改用两个开合按钮 + 收起后右侧 40px 图标条（点哪个面板就以它展开）。
+    旧键 `omcp.global.layout-mode` 只在升级后第一次读取时换算成开合（`focus` → 收起），随后删除。
+    分隔条可聚焦，←/→ 每次 16px；快捷键 Ctrl+B / Ctrl+J / Ctrl+Alt+1–4（**Ctrl+1–4 已空置**）。
+
+---
+
+### 2.1 内核启动与执行（2026-11-16 起）
+
+1. 启动不再调 jupyter_client 的 `wait_for_ready`：改为**先订阅 iopub、再每 250 ms 换一个新 `msg_id` 重问 `kernel_info`**，shell 回复与 iopub 第一声（`iopub_welcome` 或握手的 `status`）都到才算就绪，预算 20 s。
+   旧路径在 Windows + pyzmq 27 + jupyter_client 8.10 上会 20 s 超时（实机自测 §7.3 L2）。
+2. 就绪前不发执行请求；执行完成只认 **parent 等于本轮** 的 `status:idle`。shell 已回 `execute_reply` 而 2 s 内没有 idle 时，降级收口并输出
+   `[警告] 输出通道(iopub)未响应…`——**这时输出可能不全**，需重跑该 cell，不要把它当成正常结果。
+3. 启动失败会先杀内核进程再关通道，并把内核 stderr 末尾 20 行随错误抛出；不再有“末尾为空”的 `KernelError`。
+   连续失败不再堆积内核进程（旧版会泄漏，实机自测 §8 记了 7 个）。
+4. R 的 argv 按启动器选：`Rterm` 必须带 `--args`，`Rscript` 必须不带；启动后预载 stats/graphics/grDevices/datasets/methods。
+5. 审计新增 `outcome`（ok / durationMs / status / errorClass / kernelPid）：`scope:"outcome"` 的记录才代表“跑完了没有”，
+   与 `decision:"allow"` 的放行记录区分开。
+
+### 2.2 产物面板（2026-11-16 起）
+
+1. **产物 = 账本 + 约定目录**。账本落在工作区 `.omcp/artifacts.jsonl`：每次工具结束记一条
+   「哪个工具、哪个调用、产出了哪些路径」。`write` / `edit` 能从入参精确取到路径；
+   `bash` / `run_code` 无法枚举，记为 `unknown`。
+2. **不知道就说不知道**：`unknown` 次数会显示成「另有 N 次运行产出未知」，不会画成「没有」。
+3. 约定目录 `figures/`、`results/` 每次刷新扫一遍（深度 ≤ 5、最多 400 个），补上脚本写出来的文件；
+   账本里已有的路径不重复列出，归属以账本为准。
+4. 账本里有、磁盘上没了 → 显示「已不存在」，条目保留，不静默删除。
+5. 工作区只读时记账静默失败（不影响工具结果）；面板不做科学结论解读，只回答「产出了什么文件」。
 
 ---
 

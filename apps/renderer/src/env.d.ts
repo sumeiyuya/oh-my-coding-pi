@@ -12,6 +12,7 @@ type P1Api = Pick<
   | "getSessionMeta"
   | "setSessionMeta"
   | "listFiles"
+  | "listArtifacts"
   | "statFile"
   | "readFile"
   | "getModelRegistry"

@@ -13,6 +13,17 @@ export interface AuditEntry {
   summary: string;
   sessionId?: string;
   source?: string;
+  /**
+   * 执行结果（自测报告 P4）：只记「放行」不记「结果」，日志就复盘不了哪一步失败。
+   * 放行不等于成功：ok=false 才是真失败；status=error 表示内核跑完了但代码报错。
+   */
+  outcome?: {
+    ok: boolean;
+    durationMs: number;
+    status?: string;
+    errorClass?: string;
+    kernelPid?: number;
+  };
 }
 
 const MAX_BYTES = 10 * 1024 * 1024;

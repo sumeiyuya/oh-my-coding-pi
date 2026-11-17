@@ -3,11 +3,11 @@
  *
  * 纪律（借自 DAWN 的 state/sidebar.ts 与 state/right-dock.ts）：
  * - key 里显式写作用域：`.global.` —— 宽度不属于某段会话，也不属于某个项目；
- * - 只有「偏好」落盘：宽度、折叠、当前面板、布局模式；
- * - 「窗口此刻的样子」（右坞开/关）不落盘，重开回到默认。
+ * - 只有「偏好」落盘：宽度、折叠、当前面板、右坞开合；
+ * - 2026-11-16 起没有「布局模式」：四个预设删掉了，右坞开合变成自己的偏好。
+ *   旧键 `omcp.global.layout-mode` 只在第一次读取时用来换算开合，随后删除。
  */
 
-export type LayoutMode = "chat" | "analysis" | "focus" | "notebook";
 export type DockTab = "files" | "notebook" | "artifacts" | "run";
 
 export interface UiState {
@@ -15,7 +15,7 @@ export interface UiState {
   sidebarCollapsed: boolean;
   dockWidth: number;
   dockTab: DockTab;
-  layout: LayoutMode;
+  dockOpen: boolean;
 }
 
 export const UI_LIMITS = {
@@ -30,7 +30,7 @@ export const UI_DEFAULTS: UiState = {
   sidebarCollapsed: false,
   dockWidth: 320,
   dockTab: "files",
-  layout: "chat",
+  dockOpen: true,
 };
 
 const KEYS = {
@@ -38,10 +38,12 @@ const KEYS = {
   sidebarCollapsed: "omcp.global.sidebar-collapsed",
   dockWidth: "omcp.global.dock-width",
   dockTab: "omcp.global.dock-tab",
-  layout: "omcp.global.layout-mode",
+  dockOpen: "omcp.global.dock-open",
 } as const;
 
-const LAYOUTS: LayoutMode[] = ["chat", "analysis", "focus", "notebook"];
+/** 旧版布局模式；只读一次，读完即删 */
+const LEGACY_LAYOUT_KEY = "omcp.global.layout-mode";
+
 const TABS: DockTab[] = ["files", "notebook", "artifacts", "run"];
 
 export function clampWidth(which: "sidebar" | "dock", value: number): number {
@@ -71,13 +73,17 @@ function readBool(key: string, fallback: boolean): boolean {
 }
 
 export function loadUiState(): UiState {
-  let layout: LayoutMode = UI_DEFAULTS.layout;
   let dockTab: DockTab = UI_DEFAULTS.dockTab;
+  // 旧模式的语义只保留“开/合”这一半：尺寸本来就是分开存的，不需要重算
+  let legacyDockOpen: boolean | null = null;
   try {
-    const rawLayout = localStorage.getItem(KEYS.layout) as LayoutMode | null;
-    if (rawLayout && LAYOUTS.includes(rawLayout)) layout = rawLayout;
     const rawTab = localStorage.getItem(KEYS.dockTab) as DockTab | null;
     if (rawTab && TABS.includes(rawTab)) dockTab = rawTab;
+    const legacy = localStorage.getItem(LEGACY_LAYOUT_KEY);
+    if (legacy !== null) {
+      if (localStorage.getItem(KEYS.dockOpen) === null) legacyDockOpen = legacy !== "focus";
+      localStorage.removeItem(LEGACY_LAYOUT_KEY);
+    }
   } catch {
     // 读不到就用默认
   }
@@ -86,7 +92,7 @@ export function loadUiState(): UiState {
     sidebarCollapsed: readBool(KEYS.sidebarCollapsed, UI_DEFAULTS.sidebarCollapsed),
     dockWidth: clampWidth("dock", readNumber(KEYS.dockWidth, UI_DEFAULTS.dockWidth)),
     dockTab,
-    layout,
+    dockOpen: readBool(KEYS.dockOpen, legacyDockOpen ?? UI_DEFAULTS.dockOpen),
   };
 }
 
@@ -102,23 +108,8 @@ export function saveUiState(patch: Partial<UiState>): void {
       localStorage.setItem(KEYS.sidebarCollapsed, patch.sidebarCollapsed ? "1" : "0");
     }
     if (patch.dockTab !== undefined) localStorage.setItem(KEYS.dockTab, patch.dockTab);
-    if (patch.layout !== undefined) localStorage.setItem(KEYS.layout, patch.layout);
+    if (patch.dockOpen !== undefined) localStorage.setItem(KEYS.dockOpen, patch.dockOpen ? "1" : "0");
   } catch {
     // localStorage 不可用（隐私模式）：不写入，也不阻断界面
-  }
-}
-
-/** 布局模式只是「宽度 + 展开状态」的预设，不引入第二套真实尺寸 */
-export function layoutPreset(mode: LayoutMode): { sidebarWidth: number; dockWidth: number; collapsed: boolean; dockOpen: boolean } {
-  switch (mode) {
-    case "analysis":
-      return { sidebarWidth: 240, dockWidth: 480, collapsed: false, dockOpen: true };
-    case "focus":
-      return { sidebarWidth: UI_DEFAULTS.sidebarWidth, dockWidth: UI_DEFAULTS.dockWidth, collapsed: true, dockOpen: false };
-    case "notebook":
-      return { sidebarWidth: 240, dockWidth: 520, collapsed: false, dockOpen: true };
-    case "chat":
-    default:
-      return { sidebarWidth: 280, dockWidth: 320, collapsed: false, dockOpen: true };
   }
 }

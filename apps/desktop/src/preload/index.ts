@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld("api", {
   setSessionMeta: (sessionFile: string, patch: SessionMetaPatch): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("session-meta:set", sessionFile, patch),
   listFiles: (path: string): Promise<FileListResult> => ipcRenderer.invoke("fs:list", path),
+  listArtifacts: (): Promise<import("@oh-my-coding-pi/shared").ArtifactListResult> =>
+    ipcRenderer.invoke("artifacts:list"),
   statFile: (path: string): Promise<FileStatResult> => ipcRenderer.invoke("fs:stat", path),
   readFile: (path: string): Promise<FileReadResult> => ipcRenderer.invoke("fs:read", path),
   getModelRegistry: (): Promise<unknown> => ipcRenderer.invoke("models:registry-get"),

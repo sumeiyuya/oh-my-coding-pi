@@ -52,6 +52,8 @@ import { RpcClient } from "./rpc-client";
 import { KernelService } from "./kernel-service";
 import { KernelBroker } from "./kernel-broker";
 import { PolicyService } from "./policy-service";
+import { ArtifactLedger } from "./artifact-ledger";
+import { ArtifactService } from "./artifact-service";
 import { GrantStore } from "./grants";
 import { AuditLog } from "./audit";
 import { createSkill, readSkill, scanSkills, setSkillEnabled } from "./skills";
@@ -134,6 +136,7 @@ let browserService: BrowserService | null = null;
 let grants: GrantStore | null = null;
 let auditLog: AuditLog | null = null;
 let policyService: PolicyService | null = null;
+let artifactService: ArtifactService | null = null;
 let settingsPolicyPath: string | undefined;
 const appSettings = {
   grantTtlDays: 30,
@@ -1871,6 +1874,13 @@ ipcMain.handle("kernel:save-path", async (_event, language: "python" | "r", raw:
 ipcMain.handle("fs:list", (_event, relPath: string) => {
   if (!workspaceRoot) return { path: "", entries: [], truncated: false, error: "没有打开工作区" };
   return listWorkspaceDir(workspaceRoot, relPath);
+});
+
+ipcMain.handle("artifacts:list", () => {
+  if (!artifactService) {
+    return { artifacts: [], unknownRuns: 0, observed: 0, scannedAt: new Date().toISOString(), error: "产物服务未启动" };
+  }
+  return artifactService.list();
 });
 
 ipcMain.handle("fs:stat", (_event, relPath: string) => {
@@ -4260,6 +4270,14 @@ app.whenReady().then(async () => {
   });
   await policyService.start();
 
+  // 产物账本：扩展在每次工具结束后往这里写一条「谁产出了什么」
+  artifactService = new ArtifactService(
+    new ArtifactLedger(() => workspaceRoot),
+    () => workspaceRoot,
+    () => currentSessionFile ?? "session:none",
+  );
+  await artifactService.start();
+
   const persisted = readState();
   dailyDate = persisted.dailyDate || todayISO();
   dailySpent = persisted.dailySpent ?? 0;
@@ -4299,6 +4317,28 @@ app.whenReady().then(async () => {
       const supports = await modelSupportsImage();
       if (supports) return null;
       return (await describeForVision(data, mimeType)).text;
+    },
+    // 审计补 outcome：只记 allow 的日志复盘不了“哪一步失败”（自测报告 P4）
+    (o) => {
+      auditLog?.write({
+        ts: new Date().toISOString(),
+        toolName: "run_code",
+        ruleId: "kernel:execute",
+        decision: "allow",
+        scope: "outcome",
+        summary:
+          `${o.lang === "r" ? "R" : "Python"} 执行${o.ok ? "完成" : "失败"}` +
+          ` · ${(o.durationMs / 1000).toFixed(1)}s · status=${o.status}` +
+          (o.errorClass ? ` · ${o.errorClass}` : ""),
+        sessionId: currentSessionFile ?? undefined,
+        outcome: {
+          ok: o.ok,
+          durationMs: o.durationMs,
+          status: o.status,
+          ...(o.errorClass ? { errorClass: o.errorClass } : {}),
+          ...(o.kernelPid ? { kernelPid: o.kernelPid } : {}),
+        },
+      });
     },
   );
   await kernelBroker.start();
@@ -4340,6 +4380,8 @@ app.whenReady().then(async () => {
     OMCP_KERNEL_TOKEN: kernelBroker.token,
     OMCP_POLICY_URL: policyService.url,
     OMCP_POLICY_TOKEN: policyService.token,
+    OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
+    OMCP_ARTIFACTS_TOKEN: artifactService?.token ?? "",
   });
   // 插件开关（ADR-045）：只下发真正要注册的族键；记忆不落工作区（ADR-046）
   supervisor.setEnv("OMCP_PLUGINS", JSON.stringify(enabledFamilyKeys(appSettings.plugins)));
@@ -4411,6 +4453,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  artifactService?.stop();
   void browserService?.stop().catch(() => undefined);
 });
 

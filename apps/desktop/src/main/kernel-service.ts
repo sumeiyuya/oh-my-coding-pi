@@ -23,15 +23,32 @@ export interface KernelRuntimeEvent {
   alive?: boolean;
 }
 
+export type InterpreterSource = "settings" | "OMCP_PYTHON" | "venv" | "PATH";
+
+export interface PythonResolution {
+  path: string;
+  /** 这条路径是哪来的：诊断里要能说出来，否则“路径看着对但用的是别的 python”永远查不出 */
+  source: InterpreterSource;
+}
+
+export function resolvePythonWithSource(
+  workspaceRoot: string,
+  override?: string,
+): PythonResolution {
+  const all: Array<{ path: string; source: InterpreterSource }> = [
+    { path: override ?? "", source: "settings" },
+    { path: process.env.OMCP_PYTHON ?? "", source: "OMCP_PYTHON" },
+    { path: join(workspaceRoot, ".venv", "Scripts", "python.exe"), source: "venv" },
+    { path: join(workspaceRoot, ".venv", "bin", "python"), source: "venv" },
+    { path: "python", source: "PATH" },
+  ];
+  const candidates = all.filter((c) => c.path.length > 0);
+  const hit = candidates.find((c) => c.path === "python" || existsSync(c.path));
+  return hit ?? { path: "python", source: "PATH" };
+}
+
 export function resolvePython(workspaceRoot: string, override?: string): string {
-  const candidates = [
-    override,
-    process.env.OMCP_PYTHON,
-    join(workspaceRoot, ".venv", "Scripts", "python.exe"),
-    join(workspaceRoot, ".venv", "bin", "python"),
-    "python",
-  ].filter(Boolean) as string[];
-  return candidates.find((p) => p === "python" || existsSync(p)) ?? "python";
+  return resolvePythonWithSource(workspaceRoot, override).path;
 }
 
 /**
@@ -101,6 +118,11 @@ export class KernelService extends EventEmitter {
     return resolvePython(this.workspaceRoot, this.pythonOverride || undefined);
   }
 
+  /** pythonPath 的来源（settings / OMCP_PYTHON / venv / PATH） */
+  get pythonSource(): InterpreterSource {
+    return resolvePythonWithSource(this.workspaceRoot, this.pythonOverride || undefined).source;
+  }
+
   /** 最近一次内核启动耗时（ms） */
   get startMs(): number {
     return this.readyMs;
@@ -154,12 +176,14 @@ export class KernelService extends EventEmitter {
 
   private async start(): Promise<void> {
     const startedAt = Date.now();
-    const python = resolvePython(this.workspaceRoot, this.pythonOverride || undefined);
+    const resolved = resolvePythonWithSource(this.workspaceRoot, this.pythonOverride || undefined);
+    const python = resolved.path;
     const proc = spawn(python, [this.sidecarPath], {
       cwd: this.workspaceRoot,
       env: {
         ...process.env,
         PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
         PYTHONUNBUFFERED: "1",
         MPLBACKEND:
           process.env.OMCP_MPLBACKEND || "module://matplotlib_inline.backend_inline",
@@ -186,7 +210,14 @@ export class KernelService extends EventEmitter {
     const ready = this.waitReady();
     // 显式配了路径就按它起内核；否则沿用机器注册项
     this.send({ op: "start", lang: this.language, interpreter: this.explicitInterpreter });
-    await ready;
+    try {
+      await ready;
+    } catch (err) {
+      // 启动失败必须回收：不回收的话下次 start 会再 spawn 一个侧车，内核越攒越多
+      // （自测报告 §8 记的 7 个泄漏进程就是这么来的）。
+      this.shutdown();
+      throw err;
+    }
     this.ready = true;
     this.readyMs = Date.now() - startedAt;
     this.emit("ready");
@@ -211,9 +242,22 @@ export class KernelService extends EventEmitter {
     // 能认出原因就翻成人话（缺包 / 程序不在 / 未配置）
     if (ev.ev === "error") {
       const raw = String((ev as { evalue?: unknown }).evalue ?? "内核启动失败");
-      const diagnosis = diagnoseLaunch(this.language, this.explicitInterpreter, raw, existsSync);
-      const message = diagnosis?.message ?? raw;
-      for (const w of this.readyWaiters) w.reject(new Error(message));
+      // 内核自己吐的 stderr 才是证据；sidecar 没有就退回它的异常文本
+      const kernelTail = String((ev as { stderr_tail?: unknown }).stderr_tail ?? "");
+      const diagnosis = diagnoseLaunch(
+        this.language,
+        this.explicitInterpreter,
+        kernelTail.trim() || raw,
+        existsSync,
+      );
+      let message = diagnosis?.message ?? raw;
+      // 没配置路径时要说清楚：用的是 PATH 上哪个 python —— “看起来配了”最常见的误判就在这
+      if (diagnosis?.kind === "no-path" && this.language === "python") {
+        message = `没有配置解释器路径，回退到 ${this.pythonPath}（来源：${this.pythonSource}）。它可能不是装了 ipykernel 的那个——到「设置 → 内核」填一个绝对路径。`;
+      }
+      const evidence = diagnosis && "evidence" in diagnosis ? diagnosis.evidence : undefined;
+      const withEvidence = evidence ? `${message}\n${evidence}` : message;
+      for (const w of this.readyWaiters) w.reject(new Error(withEvidence));
       this.readyWaiters = [];
       return;
     }
@@ -277,7 +321,7 @@ export class KernelService extends EventEmitter {
           reject(e);
         },
       });
-      this.send({ op: "execute", id, code });
+      this.send({ op: "execute", id, code, timeoutMs });
     });
   }
 
@@ -309,14 +353,20 @@ export class KernelService extends EventEmitter {
   }
 
   async restart(): Promise<void> {
+    // 先确保这一轮启动走完：启动中途发 restart 会和握手抢同一条通道
+    await this.ensureStarted();
     if (!this.proc) {
-      await this.ensureStarted();
       return;
     }
     this.ready = false;
     const ready = this.waitReady();
     this.send({ op: "restart" });
-    await ready;
+    try {
+      await ready;
+    } catch (err) {
+      this.shutdown();
+      throw err;
+    }
     this.ready = true;
     this.emit("ready");
   }

@@ -1,9 +1,43 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { UI_DEFAULTS, UI_LIMITS, clampWidth, layoutPreset } from "../src/ui-state.ts";
+import { UI_DEFAULTS, UI_LIMITS, clampWidth, loadUiState, saveUiState } from "../src/ui-state.ts";
 
-/** 布局状态的纯逻辑（PR1）：宽度夹紧与模式预设。持久化本身在浏览器里，单测不碰 localStorage。 */
+/**
+ * 界面状态的纯逻辑（PR1 / 2026-11-16）。
+ *
+ * 布局模式已删除，所以这里锁两件事：
+ * 1. 宽度钳制没变；
+ * 2. 旧键 `layout-mode` 只在第一次读取时换算成右坞开合，随后删除——不能把老用户弹一脸。
+ */
+
+class MemoryStorage {
+  private m = new Map<string, string>();
+  getItem(k: string): string | null {
+    return this.m.has(k) ? this.m.get(k)! : null;
+  }
+  setItem(k: string, v: string): void {
+    this.m.set(k, String(v));
+  }
+  removeItem(k: string): void {
+    this.m.delete(k);
+  }
+  clear(): void {
+    this.m.clear();
+  }
+  key(i: number): string | null {
+    return [...this.m.keys()][i] ?? null;
+  }
+  get length(): number {
+    return this.m.size;
+  }
+}
+
+function freshStorage(): MemoryStorage {
+  const s = new MemoryStorage();
+  Object.defineProperty(globalThis, "localStorage", { value: s, configurable: true });
+  return s;
+}
 
 test("左栏宽度：低于下限/高于上限都被夹住", () => {
   assert.equal(clampWidth("sidebar", 100), UI_LIMITS.sidebar.min);
@@ -22,23 +56,45 @@ test("非数字输入回落到默认值", () => {
   assert.equal(clampWidth("dock", Number.NaN), UI_DEFAULTS.dockWidth);
 });
 
-test("预设：四种模式都在合法区间内", () => {
-  for (const mode of ["chat", "analysis", "focus", "notebook"] as const) {
-    const p = layoutPreset(mode);
-    assert.equal(clampWidth("sidebar", p.sidebarWidth), p.sidebarWidth, `${mode} 左栏越界`);
-    assert.equal(clampWidth("dock", p.dockWidth), p.dockWidth, `${mode} 右坞越界`);
-  }
+test("没有旧键时：右坞默认展开", () => {
+  freshStorage();
+  assert.equal(loadUiState().dockOpen, true);
 });
 
-test("预设：专注模式收起左栏且关右坞", () => {
-  const p = layoutPreset("focus");
-  assert.equal(p.collapsed, true);
-  assert.equal(p.dockOpen, false);
+test("旧“专注”迁移成“右坞收起”，并删掉旧键", () => {
+  const s = freshStorage();
+  s.setItem("omcp.global.layout-mode", "focus");
+  const ui = loadUiState();
+  assert.equal(ui.dockOpen, false);
+  assert.equal(s.getItem("omcp.global.layout-mode"), null);
 });
 
-test("预设：分析/笔记本模式右坞更宽，且都展开", () => {
-  assert.ok(layoutPreset("analysis").dockWidth > layoutPreset("chat").dockWidth);
-  assert.ok(layoutPreset("notebook").dockWidth >= layoutPreset("analysis").dockWidth);
-  assert.equal(layoutPreset("analysis").dockOpen, true);
-  assert.equal(layoutPreset("notebook").dockOpen, true);
+test("旧“笔记本优先”迁移成“右坞展开”", () => {
+  const s = freshStorage();
+  s.setItem("omcp.global.layout-mode", "notebook");
+  assert.equal(loadUiState().dockOpen, true);
+  assert.equal(s.getItem("omcp.global.layout-mode"), null);
+});
+
+test("新键优先于旧键（迁移不覆盖用户当前状态）", () => {
+  const s = freshStorage();
+  s.setItem("omcp.global.layout-mode", "chat");
+  s.setItem("omcp.global.dock-open", "0");
+  assert.equal(loadUiState().dockOpen, false);
+});
+
+test("saveUiState 写入 dockOpen，再读回来一致", () => {
+  const s = freshStorage();
+  saveUiState({ dockOpen: false });
+  assert.equal(s.getItem("omcp.global.dock-open"), "0");
+  assert.equal(loadUiState().dockOpen, false);
+  saveUiState({ dockOpen: true });
+  assert.equal(loadUiState().dockOpen, true);
+});
+
+test("保存时宽度仍然被钳制", () => {
+  const s = freshStorage();
+  saveUiState({ sidebarWidth: 10, dockWidth: 9999 });
+  assert.equal(s.getItem("omcp.global.sidebar-width"), String(UI_LIMITS.sidebar.min));
+  assert.equal(s.getItem("omcp.global.dock-width"), String(UI_LIMITS.dock.max));
 });

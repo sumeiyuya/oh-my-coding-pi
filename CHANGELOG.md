@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## 0.6.1 — 2026-11-17
+
+### 内核
+
+- **启动握手重写**：不再用 `jupyter_client.wait_for_ready`。先订阅 iopub，再每 250 ms 换一个新
+  `msg_id` 重发 `kernel_info`；shell 回复与 iopub 第一声都到才算就绪（20 s 预算）。
+  修掉“第一次 run_code 必超时”的问题；`重启`走同一条路径。
+- **执行收口**：只认 parent 等于本轮 `execute` 的 `status:idle`；`shell` 已答而 iopub 2 s 无回音时
+  收口并输出 `[警告] 输出通道(iopub)未响应…`，不再静默拖到 120 s。
+- **R**：argv 按启动器选（Rterm 必须带 `--args`，Rscript 必须不带——两者规则相反）；
+  启动后预载 stats/graphics/grDevices/datasets/methods。
+- **失败即回收**：启动失败先杀内核进程再关通道，连续失败不再堆积孤儿内核（旧版会泄漏）；
+  `restart` 先等启动完成；启动串行化。
+- **可诊断**：内核 stderr 进环形缓冲，错误时带出末尾 20 行；诊断新增“协议超时”“零输出”两类；
+  没配路径时说明回退到了哪个 `python`（settings / OMCP_PYTHON / .venv / PATH）。
+- **审计补 outcome**：`run_code` 每次执行记 `ok / 耗时 / status / errorClass / kernelPid`，
+  与“放行”记录区分。
+- **变量面板**：改用 `user_expressions`（silent、不进历史、不占输出）；R 侧有回落。
+- **编码**：子进程补 `PYTHONUTF8=1`。
+
+### 界面
+
+- **移除布局模式**：顶栏的「对话为主 / 分析为主 / 专注 / 笔记本优先」下拉删除，改为两个开合按钮；
+  右坞收起时右侧留 40px 图标条（文件 / 笔记本 / 产物 / 运行），点哪个面板就以它展开。
+- 右坞开/合状态落盘（`omcp.global.dock-open`）；旧 `layout-mode` 一次性迁移后删除。
+- `Ctrl+1–4` 空出（不再切布局）；`Ctrl+B` / `Ctrl+J` / `Ctrl+Alt+1–4` 保留。
+
+### 产物
+
+- 产物面板接入：账本（工具调用产出）+ `figures/`、`results/` 目录扫描；
+  `bash` / `run_code` 的产出记为「未知」并显式计数；已删除文件显示「已不存在」。
+  `write` / `edit` 精确到路径，面板按目录分组、类型徽标、可过滤、可点开预览。
+
+### 工程
+
+- 新增 `scripts/kernel-acceptance.mjs`：一条命令重跑 F0–F12 内核验收（失败非零退出），CI 里可选执行。
+- 新增 `apps/desktop/test/artifact-ledger.test.ts`（7 条）、`kernel-diagnose.test.ts`（9 条）；
+  `ui-state.test.ts` 改写为 10 条（含旧布局键迁移）。
+- 文档：`known-limits` 补内核启动/输出口径与产物账本；`r-kernel.md` 补 argv 矩阵。
+
 ## 0.6.0 — 2026-11-15（改名 oh my coding pi，新仓库第一个版本）
 
 这是项目的第一次提交，也是一次彻底改名：**旧名字不进历史**。

@@ -79,7 +79,12 @@ print(p)
 
 ## 4. 变量列表
 
-应用通过 `ls(globalenv())` 获取变量名。R 启动时可能加载 `.Rprofile`，因此会看到一些包函数（如 `nat_*`），这是正常的；只关心自己定义的变量即可。
+应用取变量名走 `user_expressions`（`silent=True, store_history=False`）：不执行用户可见的代码、
+不产生输出、不增加执行计数。R 侧若解释器不支持 `user_expressions`，回落到一次普通 `ls(globalenv())`，
+但只收 parent 等于本次请求的输出。
+
+R 启动时可能加载 `.Rprofile`，因此会看到一些包函数（如 `nat_*`），这是正常的；只关心自己定义的变量即可。
+以下划线开头（Python `_x`）的变量不会出现在列表里。
 
 ---
 
@@ -93,12 +98,25 @@ print(p)
 | 中文乱码 | Windows 编码/字体 | 图里用 `family="Microsoft YaHei"`；源码 UTF-8 |
 | R 内核启动慢 | IRkernel 首次加载包 | 正常 3–5 秒；不要重复点运行 |
 | 找不到 `sci-ir` kernelspec | 未生成本应用专用 R 规格 | 在设置里填 R 路径（推荐），或按旧方案跑脚本 |
+| `cannot open file '--args'` | 用的是 **Rscript**，却传了 `--args` | Rscript 要去掉 `--args`（连接文件作为位置参数）；Rterm 反而必须保留它 |
+| `could not find function "sd"` / `"png"` / `object 'mtcars' not found` | 启动时没预载基础包（`--default-packages` 在部分安装上不生效） | 已由应用在启动时预载 stats/graphics/grDevices/datasets；若仍报错，检查 `OMCP_R_LAUNCHER` 是否强制成了别的启动器 |
 
 ---
 
 ## 6. 已知限制
 
 1. **R 的两种起法**：填了路径就用应用生成的 `omcp-r`；留空才用机器上的 `sci-ir`（旧方案需手工脚本生成）。
-2. 只验证了 R 4.5.2 + IRkernel 1.3.2。
+1.1 **argv 规则随启动器而变**（2026-11-16 实测，R 4.5.2）：
+
+   | 启动器 | argv | `commandArgs(TRUE)` |
+   |---|---|---|
+   | Rterm | `--slave -e 'IRkernel::main()' --args <file>` | `"<file>"` ✅ |
+   | Rterm | `--slave -e 'IRkernel::main()' <file>` | `character(0)` ❌ |
+   | Rscript | `-e 'IRkernel::main()' <file>` | `"<file>"` ✅ |
+   | Rscript | `-e 'IRkernel::main()' --args <file>` | `"--args"` ❌ |
+
+   应用默认用同目录的 `Rterm.exe`（能按 PID 杀，见 §1），所以**保留 `--args`**；
+   用 `OMCP_R_LAUNCHER=rscript` 切换时才去掉。
+2. 只验证了 R 4.5.2 + IRkernel 1.3.2（自测报告里那台是 R 4.6.2，需按上表复跑一次）。
 3. 没有做 `renv` 自动激活；工作区 `.Rprofile` 会按 R 默认行为加载。
 4. R 与 Python 不共享变量；跨语言传数据请写文件或重新读入。

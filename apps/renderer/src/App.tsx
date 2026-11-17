@@ -6,15 +6,14 @@ import PermissionPill from "./PermissionPill";
 import ModelPicker from "./ModelPicker";
 import Sash from "./Sash";
 import RightDock from "./RightDock";
+import ArtifactsPane from "./ArtifactsPane";
 import StatusBar from "./StatusBar";
 import {
   UI_LIMITS,
   clampWidth,
-  layoutPreset,
   loadUiState,
   saveUiState,
   type DockTab,
-  type LayoutMode,
 } from "./ui-state";
 import ProviderSetupDialog from "./ProviderSetupDialog";
 import ContextMeter from "./ContextMeter";
@@ -234,9 +233,9 @@ export default function App() {
       return "dark";
     }
   });
-  /** 右坞开/关不落盘：它是这个窗口此刻的样子，不是设置（借自 DAWN state/dock.ts） */
-  const [dockOpen, setDockOpen] = useState(true);
+  /** 右坞开/合是自己的偏好（无布局模式后不再靠“选模式”顺带打开），随 ui-state 落盘 */
   const [ui, setUi] = useState(loadUiState);
+  const [dockOpen, setDockOpen] = useState(ui.dockOpen);
   const [sessionQuery, setSessionQuery] = useState("");
   const [filePath, setFilePath] = useState("");
   const [fileList, setFileList] = useState<FileListResult | null>(null);
@@ -972,7 +971,18 @@ export default function App() {
     saveUiState({ dockTab: tab });
   };
 
-  const toggleDock = () => setDockOpen((open) => !open);
+  const toggleDock = () =>
+    setDockOpen((open) => {
+      const next = !open;
+      saveUiState({ dockOpen: next });
+      return next;
+    });
+
+  const openDock = (tab?: DockTab) => {
+    if (tab) setDockTab(tab);
+    setDockOpen(true);
+    saveUiState({ dockOpen: true });
+  };
 
   /** 会话列表的可见集合：搜索 + 归档过滤 + 按更新时间倒序（PR3） */
   const visibleSessions = sessions
@@ -993,28 +1003,7 @@ export default function App() {
     });
   };
 
-  const applyLayout = (mode: LayoutMode) => {
-    const preset = layoutPreset(mode);
-    setDockOpen(preset.dockOpen);
-    setUi((cur) => {
-      const next: typeof cur = {
-        ...cur,
-        layout: mode,
-        sidebarWidth: preset.sidebarWidth,
-        dockWidth: preset.dockWidth,
-        sidebarCollapsed: preset.collapsed,
-      };
-      saveUiState({
-        layout: mode,
-        sidebarWidth: next.sidebarWidth,
-        dockWidth: next.dockWidth,
-        sidebarCollapsed: next.sidebarCollapsed,
-      });
-      return next;
-    });
-  };
-
-  /** 快捷键：Ctrl+B 左栏 / Ctrl+J 右坞 / Ctrl+1..4 布局 / Ctrl+Alt+1..4 右坞面板 */
+  /** 快捷键：Ctrl+B 左栏 / Ctrl+J 右坞 / Ctrl+Alt+1..4 右坞面板（Ctrl+1..4 空置） */
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
@@ -1038,21 +1027,10 @@ export default function App() {
       const tab: DockTab = (["files", "notebook", "artifacts", "run"] as DockTab[])[idx - 1]!;
       setDockTab(tab);
     };
-    const onPlain = (e: globalThis.KeyboardEvent) => {
-      if (!e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      const idx = Number(e.key);
-      if (!Number.isInteger(idx) || idx < 1 || idx > 4) return;
-      e.preventDefault();
-      applyLayout((["chat", "analysis", "focus", "notebook"] as LayoutMode[])[idx - 1]!);
-    };
     window.addEventListener("keydown", onAlt);
-    window.addEventListener("keydown", onPlain);
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onAlt);
-      window.removeEventListener("keydown", onPlain);
       window.removeEventListener("keydown", onKey);
     };
   }, []);
@@ -1256,18 +1234,6 @@ export default function App() {
             >
               {theme === "dark" ? "亮色" : "深色"}
             </button>
-            <select
-              className="layout-select"
-              value={ui.layout}
-              onChange={(e) => applyLayout(e.target.value as LayoutMode)}
-              title="布局：Ctrl+1 对话 / Ctrl+2 分析 / Ctrl+3 专注 / Ctrl+4 笔记本"
-              aria-label="布局模式"
-            >
-              <option value="chat">对话为主</option>
-              <option value="analysis">分析为主</option>
-              <option value="focus">专注</option>
-              <option value="notebook">笔记本优先</option>
-            </select>
             <button
               className="dock-toggle"
               onClick={toggleSidebar}
@@ -1597,6 +1563,7 @@ export default function App() {
         open={dockOpen}
         tab={ui.dockTab}
         onTab={setDockTab}
+        onOpen={() => openDock()}
         files={(
 
               <div className="dock-files">
@@ -1669,11 +1636,13 @@ export default function App() {
               </div>
         )}
         artifacts={(
-
-              <div className="dock-empty">
-                <b>产物列表还没接入</b>
-                <p>以后只扫描 figures/ 和 results/，不解释科学结论。</p>
-              </div>
+          <ArtifactsPane
+            active={dockOpen && ui.dockTab === "artifacts"}
+            onOpen={(path) => {
+              setDockTab("files");
+              void selectFile(path);
+            }}
+          />
         )}
         run={(
               <div className="dock-run">
