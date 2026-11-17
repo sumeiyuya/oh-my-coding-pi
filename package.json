@@ -1,6 +1,6 @@
 {
   "name": "oh-my-coding-pi",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "description": "本地科研分析桌面工具：pi 对话 + Python/R 常驻内核 + 审批门与审计（Windows）",
   "license": "MIT",

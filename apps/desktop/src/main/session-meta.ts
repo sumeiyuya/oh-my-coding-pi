@@ -40,7 +40,9 @@ function entryOf(raw: unknown): SessionMetaEntry | null {
   ) {
     entry.permissionMode = obj.permissionMode;
   }
-  if (!entry.title && !entry.archived && !entry.lastOpenedAt && !entry.permissionMode) return null;
+  if (!entry.title && !entry.renamed && !entry.archived && !entry.lastOpenedAt && !entry.permissionMode) {
+    return null;
+  }
   return entry;
 }
 
@@ -112,7 +114,36 @@ export function patchSessionMeta(
     else delete next.permissionMode;
   }
   const sessions = { ...loaded.sessions };
-  if (!next.title && !next.archived && !next.lastOpenedAt && !next.permissionMode) delete sessions[key];
+  if (!next.title && !next.renamed && !next.archived && !next.lastOpenedAt && !next.permissionMode) {
+    delete sessions[key];
+  }
   else sessions[key] = next;
   return writeMeta(workspaceRoot, { version: 1, sessions });
+}
+
+/**
+ * 自动标题：只在“还没有标题、也没被手动改过”时写入。
+ * 批量版本只读写一次文件，供会话列表回填用。
+ */
+export function applyAutoTitles(
+  workspaceRoot: string,
+  titles: Record<string, string>,
+): { ok: boolean; applied: number } {
+  const keys = Object.keys(titles);
+  if (!keys.length) return { ok: true, applied: 0 };
+  const loaded = loadSessionMeta(workspaceRoot);
+  if (loaded.ignored) return { ok: false, applied: 0 };
+  const sessions = { ...loaded.sessions };
+  let applied = 0;
+  for (const key of keys) {
+    if (!sessionMetaKey(key)) continue;
+    const entry = sessions[key] ?? {};
+    if (entry.title || entry.renamed) continue;
+    const title = String(titles[key] ?? "").replace(/[\r\n\t]/g, " ").trim().slice(0, TITLE_MAX);
+    if (!title) continue;
+    sessions[key] = { ...entry, title };
+    applied += 1;
+  }
+  if (!applied) return { ok: true, applied: 0 };
+  return { ok: writeMeta(workspaceRoot, { version: 1, sessions }).ok, applied };
 }

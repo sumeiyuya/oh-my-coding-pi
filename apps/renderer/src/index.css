@@ -3152,3 +3152,57 @@ body.sash-dragging {
 .art-gone { flex: none; font-size: 9.5px; color: #b91c1c; background: #fef2f2; border-radius: 4px; padding: 0 4px; }
 .art-size { flex: none; font-size: 9.5px; color: #94a3b8; }
 .art-foot { padding: 6px 10px; border-top: 1px solid #eef2f6; font-size: 9.5px; color: #94a3b8; }
+
+/* 产物预览（修改 1）：面板内换视图，不跳页签 */
+.art-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef2f6;
+  font-size: 11.5px;
+  min-width: 0;
+}
+.art-back {
+  flex: none;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--blue);
+}
+.art-back:hover { background: #eff6ff; border-color: #bfdbfe; }
+.art-preview-name {
+  font-weight: 700;
+  color: #334155;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.art-preview-meta { flex: none; color: var(--muted); font-size: 10.5px; }
+.art-preview-body { flex: 1; min-height: 0; overflow: auto; padding: 10px; }
+.art-preview-note { color: var(--muted); font-size: 12px; padding: 12px 4px; }
+.art-preview-md { font-size: 12.5px; line-height: 1.65; }
+.art-preview-md img { max-width: 100%; height: auto; }
+
+/* 待发队列（修改 2）：运行中发送的消息先排在这里 */
+.queue-bar {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fbfcfe;
+  padding: 7px 9px;
+  margin: 0 0 8px;
+  font-size: 11.5px;
+}
+.queue-head { display: flex; align-items: center; gap: 8px; color: #475569; }
+.queue-state { font-size: 10px; color: #94a3b8; }
+.queue-spacer { flex: 1; }
+.queue-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; color: #334155; }
+.queue-idx { flex: none; font-size: 9.5px; border-radius: 4px; padding: 0 5px; background: #eef2f7; color: #475569; }
+.queue-idx.steer { background: #eff6ff; color: #1d4ed8; }
+.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-act { border: 1px solid #e2e8f0; background: #fff; border-radius: 5px; padding: 1px 6px; font-size: 10px; color: #475569; }
+.queue-act:hover { border-color: #bfdbfe; color: #1d4ed8; }
+.queue-more { color: #94a3b8; font-size: 10.5px; padding-top: 2px; }

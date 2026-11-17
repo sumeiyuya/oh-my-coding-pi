@@ -28,8 +28,10 @@ import type {
 } from "@oh-my-coding-pi/shared";
 
 contextBridge.exposeInMainWorld("api", {
-  prompt: (text: string, images?: unknown): Promise<PromptResult> =>
-    ipcRenderer.invoke("pi:prompt", text, images),
+  prompt: (text: string, images?: unknown, opts?: unknown): Promise<PromptResult> =>
+    ipcRenderer.invoke("pi:prompt", text, images, opts),
+  clearQueue: (): Promise<import("@oh-my-coding-pi/shared").ClearQueueResult> =>
+    ipcRenderer.invoke("pi:clear-queue"),
   steer: (text: string): Promise<PromptResult> => ipcRenderer.invoke("pi:steer", text),
   followUp: (text: string): Promise<PromptResult> => ipcRenderer.invoke("pi:follow-up", text),
   abort: (): Promise<boolean> => ipcRenderer.invoke("pi:abort"),

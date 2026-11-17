@@ -72,7 +72,8 @@ import {
   type ModelRegistry,
   type RegistryModel,
 } from "./model-registry";
-import { loadSessionMeta, patchSessionMeta, sessionMetaKey } from "./session-meta";
+import { applyAutoTitles, loadSessionMeta, patchSessionMeta, sessionMetaKey } from "./session-meta";
+import { briefTitle, extractUserText, uniqueTitle } from "./session-title";
 import { listWorkspaceDir, readWorkspaceFile, statWorkspacePath } from "./file-service";
 import { discoverKernelSpecs, specCandidates } from "./kernel-specs";
 import { loadProviderCatalog, type CatalogProvider } from "./provider-catalog";
@@ -527,10 +528,35 @@ function syncRegistryToPi(reg?: ModelRegistry, removeIds: string[] = []): SyncRe
 }
 
 
+/** 读会话文件前 256 KB，找第一条用户文本（回填标题用） */
+function firstUserText(file: string): string | null {
+  try {
+    const head = readFileSync(file, "utf8").slice(0, 256 * 1024);
+    for (const line of head.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const text = extractUserText(JSON.parse(line));
+        if (text && text.trim()) return text;
+      } catch {
+        // 坏行跳过
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function listSessions(): SessionSummary[] {
   if (!sessionDir) return [];
   mkdirSync(sessionDir, { recursive: true });
   const out: SessionSummary[] = [];
+  // 老会话没有标题：列表加载时补一次（写进 meta 缓存，重启不重算）
+  const meta = workspaceRoot ? loadSessionMeta(workspaceRoot) : null;
+  const taken = Object.values(meta?.sessions ?? {})
+    .map((e) => e.title)
+    .filter((t): t is string => Boolean(t));
+  const autoTitles: Record<string, string> = {};
   for (const name of readdirSync(sessionDir)) {
     if (!name.endsWith(".jsonl")) continue;
     const file = join(sessionDir, name);
@@ -550,7 +576,19 @@ function listSessions(): SessionSummary[] {
       // ignore
     }
     out.push({ sessionId, sessionFile: file, updatedAt });
+
+    const known = meta?.sessions[name];
+    if (workspaceRoot && !known?.title && !known?.renamed) {
+      const source = firstUserText(file);
+      const base = source ? briefTitle(source) : null;
+      if (base) {
+        const title = uniqueTitle(base, taken);
+        taken.push(title);
+        autoTitles[name] = title;
+      }
+    }
   }
+  if (workspaceRoot && Object.keys(autoTitles).length) applyAutoTitles(workspaceRoot, autoTitles);
   return out.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
 
@@ -1311,30 +1349,68 @@ async function transcribeImages(images: ImageAttachment[]): Promise<string> {
   return parts.join("\n\n");
 }
 
+/**
+ * 首条消息后给会话起名（R2）。失败静默：标题只是列表里的辅助信息，
+ * 不值得为它阻断一次真实发送。
+ */
+function maybeAutoTitle(text: string): void {
+  if (!workspaceRoot || !currentSessionFile) return;
+  const key = sessionMetaKey(currentSessionFile);
+  if (!key) return;
+  const meta = loadSessionMeta(workspaceRoot);
+  const entry = meta.sessions[key];
+  if (entry?.title || entry?.renamed) return;
+  const base = briefTitle(text);
+  if (!base) return;
+  const taken = Object.values(meta.sessions)
+    .map((e) => e.title)
+    .filter((t): t is string => Boolean(t));
+  applyAutoTitles(workspaceRoot, { [key]: uniqueTitle(base, taken) });
+}
+
 ipcMain.handle(
   "pi:prompt",
-  async (_event, text: string, images?: ImageAttachment[]): Promise<PromptResult> => {
+  async (
+    _event,
+    text: string,
+    images?: ImageAttachment[],
+    opts?: { streamingBehavior?: "steer" | "followUp" },
+  ): Promise<PromptResult> => {
     if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
     const list = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
+    const behavior = opts?.streamingBehavior;
 
     if (list.length === 0) {
-      return promptResult(await rpc.request({ type: "prompt", message: text }));
+      const res = await rpc.request(
+        behavior
+          ? { type: "prompt", message: text, streamingBehavior: behavior }
+          : { type: "prompt", message: text },
+      );
+      if (res.success) maybeAutoTitle(text);
+      return promptResult(res);
     }
 
     for (const img of list) saveAttachment(img.data, img.mimeType);
 
     const supports = await modelSupportsImage();
     if (supports) {
-      return promptResult(await rpc.request({ type: "prompt", message: text, images: list }));
+      const res = await rpc.request(
+        behavior
+          ? { type: "prompt", message: text, images: list, streamingBehavior: behavior }
+          : { type: "prompt", message: text, images: list },
+      );
+      if (res.success) maybeAutoTitle(text);
+      return promptResult(res);
     }
 
     const description = await transcribeImages(list);
-    return promptResult(
-      await rpc.request({
-        type: "prompt",
-        message: text + "\\n\\n" + description,
-      }),
-    );
+    const res = await rpc.request({
+      type: "prompt",
+      message: text + "\n\n" + description,
+      ...(behavior ? { streamingBehavior: behavior } : {}),
+    });
+    if (res.success) maybeAutoTitle(text);
+    return promptResult(res);
   },
 );
 
@@ -1574,6 +1650,18 @@ ipcMain.handle("pi:steer", async (_event, text: string): Promise<PromptResult> =
 ipcMain.handle("pi:follow-up", async (_event, text: string): Promise<PromptResult> => {
   if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
   return promptResult(await rpc.request({ type: "follow_up", message: text }));
+});
+
+ipcMain.handle("pi:clear-queue", async () => {
+  const res = await rpc.request({ type: "clear_queue" });
+  const data = res.data as { steering?: unknown; followUp?: unknown } | undefined;
+  const steering = Array.isArray(data?.steering)
+    ? data!.steering.filter((x): x is string => typeof x === "string")
+    : [];
+  const followUp = Array.isArray(data?.followUp)
+    ? data!.followUp.filter((x): x is string => typeof x === "string")
+    : [];
+  return { ok: Boolean(res.success), steering, followUp };
 });
 
 ipcMain.handle("pi:abort", async () => {

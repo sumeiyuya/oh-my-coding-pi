@@ -4,6 +4,7 @@ type P1Api = Pick<
   PreloadApi,
   | "prompt"
   | "steer"
+  | "clearQueue"
   | "followUp"
   | "abort"
   | "restart"

@@ -7,6 +7,8 @@ import ModelPicker from "./ModelPicker";
 import Sash from "./Sash";
 import RightDock from "./RightDock";
 import ArtifactsPane from "./ArtifactsPane";
+import QueueBar from "./QueueBar";
+import { EMPTY_QUEUE, flattenQueue, joinTakeBack, planRedirect, removeQueuedMessages, type QueueSnapshot } from "./queue";
 import StatusBar from "./StatusBar";
 import {
   UI_LIMITS,
@@ -74,6 +76,22 @@ type Msg =
       interrupted?: boolean;
     }
   | { kind: "system"; text: string };
+
+/** 相对时间（修改 3）：2m / 3h / 2d；超过一周回落到日期 */
+function formatRelative(iso: string | undefined): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "刚刚";
+  const min = Math.floor(diff / 60_000);
+  if (min < 60) return `${min}m`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}h`;
+  const day = Math.floor(hour / 24);
+  if (day <= 7) return `${day}d`;
+  return new Date(t).toLocaleDateString();
+}
 
 /** 会话分组：今天 / 昨天 / 更早（PR3） */
 function sessionGroupOf(updatedAt: string | undefined): string {
@@ -211,6 +229,9 @@ export default function App() {
   /** 用户按「停止」的时刻：用于把随后结束的工具记为「已停止」而不是失败 */
   const abortedAt = useRef<number | null>(null);
   const [input, setInput] = useState("");
+  /** 待发队列以 pi 的 queue_update 为准（修改 2） */
+  const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
+  const newSessionIntent = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<BridgeStatus>("starting");
   const [stats, setStats] = useState<SessionStats | null>(null);
@@ -397,17 +418,35 @@ export default function App() {
       const ev = raw as PiEvent;
 
       switch (ev.type) {
+        case "queue_update":
+          setQueue({ steering: ev.steering ?? [], followUp: ev.followUp ?? [] });
+          return;
         case "agent_start":
           setBusy(true);
           return;
-        case "agent_settled":
+        case "agent_settled": {
           setBusy(false);
+          const intent = newSessionIntent.current;
+          if (intent) {
+            newSessionIntent.current = null;
+            void (async () => {
+              const ok = await window.api.newSession().catch(() => false);
+              if (ok) {
+                setMessages((prev) => [...prev, { kind: "user", text: intent }]);
+                await window.api.prompt(intent).catch(() => undefined);
+              } else {
+                setInput((prev) => joinTakeBack([intent], prev));
+                setNotice("新开会话失败，这句已放回输入框");
+              }
+            })();
+          }
           void refreshStats();
           void refreshState();
           void refreshSessions();
           void refreshTree();
           void refreshBudget();
           return;
+        }
         case "message_start":
           if (ev.message.role === "assistant") {
             discardPendingText();
@@ -744,6 +783,39 @@ export default function App() {
     }
   }
 
+  /** 取回待发：文本回到输入框，转写里对应的气泡一起撤掉 */
+  async function takeBackQueue(toInput = true): Promise<string[]> {
+    const res = await window.api.clearQueue().catch(() => ({ ok: false, steering: [], followUp: [] }));
+    const texts = [...res.steering, ...res.followUp];
+    if (!texts.length) return [];
+    setQueue(EMPTY_QUEUE);
+    if (toInput) setInput((prev) => joinTakeBack(texts, prev));
+    setMessages((prev) => removeQueuedMessages(prev, texts) as typeof prev);
+    return texts;
+  }
+
+  /** 某一条立刻转向：取回全部，再按原顺序重投（pi 的队列没有单条 id） */
+  async function redirectQueued(index: number) {
+    const texts = await takeBackQueue(false);
+    if (!texts.length) return;
+    const plan = planRedirect({ steering: [], followUp: texts }, index);
+    if (!plan) return;
+    setMessages((prev) => [...prev, ...texts.map((text) => ({ kind: "user" as const, text }))]);
+    await window.api.steer(plan.steer).catch(() => undefined);
+    for (const text of plan.followUp) await window.api.followUp(text).catch(() => undefined);
+  }
+
+  /** 这一轮结束后另起会话：其余几条放回输入框，不静默丢 */
+  async function queueToNewSession(index: number) {
+    const texts = await takeBackQueue(false);
+    const target = texts[index];
+    if (!target) return;
+    const rest = texts.filter((_, i) => i !== index);
+    if (rest.length) setInput((prev) => joinTakeBack(rest, prev));
+    newSessionIntent.current = target;
+    setNotice("这一轮结束后会新开会话并发送这句");
+  }
+
   async function changeModel(provider: string, modelId: string): Promise<{ ok: boolean; error?: string }> {
     // 只有 pi 真的接受了才更新界面：没配 key 或模型不存在时不能显示成换过了
     const res = await window.api.setModel(provider, modelId).catch((err: unknown) => ({
@@ -963,7 +1035,9 @@ export default function App() {
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     if (!input.trim()) return;
-    void send(busy ? "steer" : "prompt");
+    // 运行中：Enter 排队，Ctrl/Cmd+Enter 立刻转向（修改 2）
+    const redirect = e.ctrlKey || e.metaKey;
+    void send(busy ? (redirect ? "steer" : "followUp") : "prompt");
   }
 
   const setDockTab = (tab: DockTab) => {
@@ -1146,7 +1220,7 @@ export default function App() {
                         <span className="sid">{label}</span>
                         <span className="stamp">
                           {entry?.archived ? "归档 · " : ""}
-                          {s.updatedAt ? new Date(s.updatedAt).toLocaleString() : ""}
+                          {formatRelative(s.updatedAt)}
                         </span>
                       </button>
                     )}
@@ -1418,6 +1492,12 @@ export default function App() {
 
         {view === "chat" && (
         <footer className="composer">
+          <QueueBar
+            queue={queue}
+            onTakeBack={() => void takeBackQueue(true)}
+            onRedirect={(i) => void redirectQueued(i)}
+            onNewSession={(i) => void queueToNewSession(i)}
+          />
           <div className="cost">
             {stats ? (
               <>
@@ -1525,8 +1605,8 @@ export default function App() {
           </div>
           {busy ? (
             <div className="send-group">
-              <button onClick={() => send("steer")} disabled={!input.trim()}>
-                插入
+              <button onClick={() => send("followUp")} disabled={!input.trim()}>
+                排队
               </button>
               <button className="secondary" onClick={() => send("followUp")} disabled={!input.trim()}>
                 追加
@@ -1638,7 +1718,7 @@ export default function App() {
         artifacts={(
           <ArtifactsPane
             active={dockOpen && ui.dockTab === "artifacts"}
-            onOpen={(path) => {
+            onReveal={(path) => {
               setDockTab("files");
               void selectFile(path);
             }}

@@ -759,6 +759,8 @@ export interface SessionSummary {
 /** 旁路元数据。不写进 pi 的 jsonl。键是会话文件名，不是绝对路径。 */
 export interface SessionMetaEntry {
   title?: string;
+  /** 用户手动改过名：自动标题不再覆盖（R5） */
+  renamed?: boolean;
   archived?: boolean;
   lastOpenedAt?: string;
   /** 这一段会话自己的权限档；缺省 = 跟随应用默认 */
@@ -1072,9 +1074,22 @@ export interface AppSettings {
 /* UI ↔ 主进程                                                         */
 /* ------------------------------------------------------------------ */
 
+export interface PromptOptions {
+  /** 运行中投递：steer = 立刻转向，followUp = 排到这一轮后面 */
+  streamingBehavior?: "steer" | "followUp";
+}
+
+export interface ClearQueueResult {
+  ok: boolean;
+  steering: string[];
+  followUp: string[];
+}
+
 export interface PreloadApi {
-  prompt(text: string, images?: ImageAttachment[]): Promise<PromptResult>;
+  prompt(text: string, images?: ImageAttachment[], opts?: PromptOptions): Promise<PromptResult>;
   steer(text: string): Promise<PromptResult>;
+  /** 撤掉 pi 的待发队列，返回被撤回的文本（修改 2） */
+  clearQueue(): Promise<ClearQueueResult>;
   followUp(text: string): Promise<PromptResult>;
   abort(): Promise<boolean>;
   restart(): Promise<boolean>;
