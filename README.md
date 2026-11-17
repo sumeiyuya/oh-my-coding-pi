@@ -14,7 +14,7 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 - 当前版本：**0.6.4**（2026-11-17）
 - 发布说明：[`docs/release-notes-0.6.4.md`](docs/release-notes-0.6.4.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.4](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.4)（私有仓库，未登录会 404）
+- 安装包：[GitHub Release v0.6.4](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.4)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么

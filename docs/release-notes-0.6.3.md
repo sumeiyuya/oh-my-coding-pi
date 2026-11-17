@@ -11,8 +11,6 @@
 - [oh my coding pi Setup 0.6.3.exe](https://github.com/sumeiyuya/oh-my-coding-pi/releases/download/v0.6.3/oh.my.coding.pi.Setup.0.6.3.exe)
 - [SHA256SUMS.txt](https://github.com/sumeiyuya/oh-my-coding-pi/releases/download/v0.6.3/SHA256SUMS.txt)
 
-> 仓库是**私有**的：未登录、或登录账号没有该仓库权限时，上面两个链接都会返回 404——那不是文件缺失。
-
 ---
 
 ## 1. 内核：修掉“时好时坏”的启动失败

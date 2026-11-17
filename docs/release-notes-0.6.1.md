@@ -11,8 +11,6 @@
 - [oh my coding pi Setup 0.6.1.exe](https://github.com/sumeiyuya/oh-my-coding-pi/releases/download/v0.6.1/oh.my.coding.pi.Setup.0.6.1.exe)（136,839,083 字节）
 - [SHA256SUMS.txt](https://github.com/sumeiyuya/oh-my-coding-pi/releases/download/v0.6.1/SHA256SUMS.txt)
 
-> 仓库是**私有**的：未登录、或登录账号没有该仓库权限时，上面两个链接都会返回 404——那不是文件缺失。
-
 ---
 
 ## 1. 内核：从“起不来”到“起得来、说清楚”
