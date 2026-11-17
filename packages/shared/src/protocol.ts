@@ -244,6 +244,37 @@ export type PiEvent =
 export type PiStreamItem = PiEvent | PiResponse;
 
 /* ------------------------------------------------------------------ */
+/* 回合时序（主进程 → renderer）：只描述阶段，不携带正文                */
+/* ------------------------------------------------------------------ */
+
+export type TurnPhase =
+  | "accepted"
+  | "preparing"
+  | "started"
+  | "first_token"
+  | "tool_start"
+  | "tool_end"
+  | "settled"
+  | "failed";
+
+export interface TurnPhaseDetail {
+  tool?: string;
+  ok?: boolean;
+  reason?: string;
+  ms?: number;
+}
+
+export interface TurnPhaseEvent {
+  turnId: string;
+  phase: TurnPhase;
+  /** 墙钟时间，仅用于展示 */
+  at: number;
+  /** 相对 accepted 的毫秒数 */
+  elapsedMs: number;
+  detail?: TurnPhaseDetail;
+}
+
+/* ------------------------------------------------------------------ */
 /* 审批                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1185,6 +1216,10 @@ export interface PreloadApi {
   setPermission(mode: PermissionMode, asDefault: boolean): Promise<PermissionState>;
   exportHtml(outputPath?: string): Promise<string | null>;
   onEvent(cb: (item: PiStreamItem) => void): () => void;
+  onTurnPhase(cb: (event: TurnPhaseEvent) => void): () => void;
+  /** pi 进程已启动但可能还在初始化；true 表示 RPC 已经真正响应过 */
+  isPiReady(): Promise<boolean>;
+  onPiReady(cb: (ready: boolean) => void): () => void;
   onApproval(cb: (req: ApprovalRequest) => void): () => void;
   onStatus(cb: (status: BridgeStatus) => void): () => void;
   onError(cb: (error: AppError) => void): () => void;
@@ -1326,6 +1361,8 @@ export interface BudgetStatus {
 
 export type IpcEvent =
   | { channel: "pi:event"; item: PiStreamItem }
+  | { channel: "pi:turn"; event: TurnPhaseEvent }
+  | { channel: "bridge:pi-ready"; ready: boolean }
   | { channel: "approval:request"; request: ApprovalRequest }
   | { channel: "approval:resolved"; requestId: string; scope: ApprovalScope }
   | { channel: "policy:changed"; info: PolicyInfo }
