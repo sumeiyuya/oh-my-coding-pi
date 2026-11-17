@@ -26,6 +26,7 @@ import FilePreview from "./FilePreview";
 import Markdown from "./Markdown";
 import ToolCard from "./ToolCard";
 import ToolGroup from "./ToolGroup";
+import { messagesFromAgent } from "./tool-rebuild";
 import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
@@ -160,14 +161,10 @@ function textOf(content: ContentBlock[] | string | undefined): string {
 }
 
 function toMsgs(list: AgentMessage[]): Msg[] {
-  const out: Msg[] = [];
-  for (const m of list) {
-    const text = textOf(m.content);
-    if (m.role === "user" && text) out.push({ kind: "user", text });
-    if (m.role === "assistant" && text) out.push({ kind: "assistant", text });
-  }
-  return out;
+  // 工具调用是转写的一部分：从 tool_use / tool_result 块重建（修改 4）
+  return messagesFromAgent(list) as Msg[];
 }
+
 
 function TreeNodeView({
   node,

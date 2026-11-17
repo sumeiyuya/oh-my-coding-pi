@@ -34,6 +34,7 @@ const PYTHON = arg("python", "");
 const RSCRIPT = arg("r", "");
 const WORKSPACE = resolve(arg("workspace", join(repo, "sandbox", "acceptance")));
 const PER_CELL_MS = Number(arg("cell-timeout", "60000"));
+const COLDSTARTS = Number(arg("coldstarts", "0"));
 const QUIET = process.argv.includes("--quiet");
 
 mkdirSync(join(WORKSPACE, "figures"), { recursive: true });
@@ -81,6 +82,7 @@ class Kernel {
     }
     if (ev.ev === "ready") {
       this.pid = ev.pid ?? null;
+      this.lastReady = ev;
       this.startMs = Date.now() - this.startedAt;
       this.readyResolve?.(ev);
       this.readyResolve = null;
@@ -322,8 +324,56 @@ async function rSuite() {
   }
 }
 
+
+/**
+ * 冷启动 ×N（修改 5 / S4）：这次故障是概率性的，单次成功说明不了问题。
+ * 每次都是独立进程 + 独立侧车，失败时把 evalue 与 stderr_tail 一起记下来。
+ */
+async function coldStartSuite(n) {
+  if (!PYTHON || n <= 0) return;
+  const readyMs = [];
+  const portMs = [];
+  const failures = [];
+  for (let i = 0; i < n; i++) {
+    const k = new Kernel("python", PYTHON);
+    try {
+      await k.start(60000);
+      readyMs.push(k.startMs);
+      if (typeof k.lastReady?.port_wait_ms === "number") portMs.push(k.lastReady.port_wait_ms);
+      const ev = await k.execute("print('cold-ok')");
+      if (status(ev) !== "ok" || !text(ev).includes("cold-ok")) {
+        failures.push({ i, why: `execute status=${status(ev)}` });
+      }
+    } catch (err) {
+      failures.push({
+        i,
+        why: err.message,
+        tail: String(err.detail?.stderr_tail ?? "").slice(-300),
+      });
+    } finally {
+      await k.shutdown();
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  const median = readyMs.length
+    ? readyMs.slice().sort((a, b) => a - b)[Math.floor(readyMs.length / 2)]
+    : 0;
+  const medianPort = portMs.length
+    ? portMs.slice().sort((a, b) => a - b)[Math.floor(portMs.length / 2)]
+    : 0;
+  record(
+    "F37",
+    `冷启动 ×${n}`,
+    failures.length === 0 && readyMs.length === n && median <= 5000,
+    `成功 ${readyMs.length}/${n}，ready 中位数 ${(median / 1000).toFixed(2)} s，` +
+      `等端口中位数 ${medianPort} ms` +
+      (failures.length ? `；失败：${JSON.stringify(failures).slice(0, 400)}` : ""),
+  );
+}
+
 console.log(`驱动：${DRIVER}\nPython：${PYTHON || "（跳过）"}\nR：${RSCRIPT || "（跳过）"}\n工作区：${WORKSPACE}\n`);
 await pythonSuite();
+await coldStartSuite(COLDSTARTS);
 await rSuite();
 
 const failed = results.filter((r) => !r.pass);

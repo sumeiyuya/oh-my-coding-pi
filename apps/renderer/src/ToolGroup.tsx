@@ -22,11 +22,12 @@ import {
 export default function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const summary = summarizeTools(tools);
   const [open, setOpen] = useState(false);
+  const runningId = summary.running?.id ?? null;
 
-  // 运行中必须看得见：一开跑就展开；跑完保持原来的展开状态（不清洗用户的选择）
+  // 运行中展开（看得见进度），跑完一律收起（修改 4）：组头只留条数/失败/耗时
   useEffect(() => {
-    if (summary.running) setOpen(true);
-  }, [summary.running?.id]);
+    setOpen(Boolean(runningId));
+  }, [runningId]);
 
   const running = summary.running;
   const sentence = groupSentence(tools);

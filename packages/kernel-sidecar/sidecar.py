@@ -38,6 +38,7 @@ shell 已回 execute_reply 而 2 s 内没有 idle 时降级收口并显式告警
 import base64
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -59,6 +60,9 @@ _write_lock = threading.Lock()
 # DAWN 的两个常数：重问节奏 250 ms，握手预算 20 s
 REPROBE_S = float(os.environ.get("OMCP_KERNEL_REPROBE_MS", "250")) / 1000.0
 HANDSHAKE_S = float(os.environ.get("OMCP_KERNEL_HANDSHAKE_S", "20"))
+# 等内核把端口 bind 完再建通道；见 _wait_ports_ready 的注释
+PORT_WAIT_S = float(os.environ.get("OMCP_KERNEL_PORT_WAIT_S", "10"))
+PORT_SETTLE_S = 0.1
 # 内核自己的 stderr/stdout：诊断全靠它（DAWN 的 STDERR_TAIL = 4000 字符）
 TAIL_LINES = 200
 
@@ -270,6 +274,52 @@ class Kernel:
         self._drain_shell()
         self._drain_iopub()
 
+    def _wait_ports_ready(self, timeout=None):
+        """等内核把 shell/iopub 端口 bind 完，再建客户端通道。
+
+        报告实测（2026-11-17，Windows + pyzmq 27.2 / libzmq 4.3.5）：
+        connect() 早于 bind() 的 socket 会停在 CONNECT_DELAYED 且不再重试，
+        哪条通道哑是随机的。不加这一步成功率 1/13；加了 10/11，ready 从 20 s 降到 ≈2 s。
+        """
+        wait = PORT_WAIT_S if timeout is None else timeout
+        if wait <= 0:
+            return 0
+        path = getattr(self.km, "connection_file", None)
+        if not path or not os.path.exists(path):
+            return 0
+        try:
+            with open(path, encoding="utf-8") as f:
+                conn = json.load(f)
+            ports = [int(conn["shell_port"]), int(conn["iopub_port"])]
+        except Exception:
+            return 0
+        started = time.time()
+        end = started + wait
+        process = getattr(getattr(self.km, "provisioner", None), "process", None)
+        while time.time() < end:
+            if process is not None and process.poll() is not None:
+                raise StartFailure("内核进程在端口就绪前退出了", self._tail())
+            ok = 0
+            for port in ports:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe.settimeout(0.15)
+                try:
+                    if probe.connect_ex(("127.0.0.1", port)) == 0:
+                        ok += 1
+                finally:
+                    probe.close()
+            if ok == len(ports):
+                time.sleep(PORT_SETTLE_S)  # 让 ROUTER 完成 peer 注册
+                return int((time.time() - started) * 1000)
+            time.sleep(0.05)
+        raise StartFailure(
+            "等内核端口就绪超时（%.0f s）：%s" % (wait, ports), self._tail()
+        )
+
+    def _open_channels(self):
+        self.kc = self.km.client()
+        self.kc.start_channels()
+
     def _kill_kernel_tree(self):
         """失败即回收：先杀进程，再关通道（顺序反了 Windows 上会从 native 回调抛错）。"""
         pid = self._pid()
@@ -325,10 +375,21 @@ class Kernel:
             self.km = KernelManager(kernel_name=self.kernel_name)
             # stdout/stderr 必须接住：不接就永远不知道内核死于什么（报告 P7）
             self.km.start_kernel(cwd=os.getcwd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.kc = self.km.client()
-            self.kc.start_channels()
-            self._pump_kernel_output()
-            self._handshake()
+            self._pump_kernel_output()  # 先接住 stderr：等端口期间内核可能已经死了
+            self.port_wait_ms = self._wait_ports_ready()
+            self._open_channels()
+            try:
+                self._handshake()
+            except StartFailure:
+                # 内核已起来、端口已 bind：重建一条通道不会再早连接（报告 §6.2 的兜底）
+                log("handshake failed, rebuilding channels once")
+                try:
+                    self.kc.stop_channels()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                self._open_channels()
+                self._handshake(timeout=8.0)
             if self.lang == "r":
                 # Rscript/Rterm 下 search() 只有 utils+base，--default-packages 本机不生效，
                 # 所以由我们预载常用包，用户不必每格写 library(stats)。
@@ -349,6 +410,7 @@ class Kernel:
             "interpreter": interpreter or None,
             "pid": self._pid(),
             "argv": self.argv,
+            "port_wait_ms": getattr(self, "port_wait_ms", 0),
         })
 
     def _run_plain(self, code, timeout=30.0, silent=True, collect=False):
@@ -575,9 +637,9 @@ class Kernel:
             except Exception:
                 pass
             self.km.restart_kernel(now=True, newports=True)
-            self.kc = self.km.client()
-            self.kc.start_channels()
             self._pump_kernel_output()
+            self.port_wait_ms = self._wait_ports_ready()
+            self._open_channels()
             self._handshake()
             if self.lang == "r":
                 self._run_plain(R_PRELOAD, timeout=30.0)

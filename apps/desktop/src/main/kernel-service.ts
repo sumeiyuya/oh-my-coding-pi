@@ -242,12 +242,14 @@ export class KernelService extends EventEmitter {
     // 能认出原因就翻成人话（缺包 / 程序不在 / 未配置）
     if (ev.ev === "error") {
       const raw = String((ev as { evalue?: unknown }).evalue ?? "内核启动失败");
-      // 内核自己吐的 stderr 才是证据；sidecar 没有就退回它的异常文本
-      const kernelTail = String((ev as { stderr_tail?: unknown }).stderr_tail ?? "");
+      const kernelTail = String((ev as { stderr_tail?: unknown }).stderr_tail ?? "").trim();
+      // 两边都留：sidecar 的 evalue 带 shell=/iopub= 布尔值，内核 stderr 带缺包/崩溃原话。
+      // 只留一边就会像实机报告那样，把「握手失败」认成「原因认不出」（修改 5 / S3）。
+      const evidence = [raw, kernelTail].filter(Boolean).join("\n");
       const diagnosis = diagnoseLaunch(
         this.language,
         this.explicitInterpreter,
-        kernelTail.trim() || raw,
+        evidence,
         existsSync,
       );
       let message = diagnosis?.message ?? raw;
@@ -255,8 +257,17 @@ export class KernelService extends EventEmitter {
       if (diagnosis?.kind === "no-path" && this.language === "python") {
         message = `没有配置解释器路径，回退到 ${this.pythonPath}（来源：${this.pythonSource}）。它可能不是装了 ipykernel 的那个——到「设置 → 内核」填一个绝对路径。`;
       }
-      const evidence = diagnosis && "evidence" in diagnosis ? diagnosis.evidence : undefined;
-      const withEvidence = evidence ? `${message}\n${evidence}` : message;
+      // protocol 这一类的证据在 raw 的第一行（握手布尔值），不在 stderr 尾巴里
+      const protocolLine = evidence
+        .split("\n")
+        .find((line) => /握手失败|handshake failed|等 iopub 的第一声/.test(line));
+      const shown =
+        diagnosis?.kind === "protocol"
+          ? protocolLine ?? raw
+          : diagnosis && "evidence" in diagnosis && diagnosis.evidence
+            ? diagnosis.evidence
+            : "";
+      const withEvidence = shown ? `${message}\n${shown}` : message;
       for (const w of this.readyWaiters) w.reject(new Error(withEvidence));
       this.readyWaiters = [];
       return;
