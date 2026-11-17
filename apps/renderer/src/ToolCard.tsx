@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { foldOutput, formatDuration, toolCommandLine } from "./tool-summary";
 
 /**
@@ -7,7 +7,7 @@ import { foldOutput, formatDuration, toolCommandLine } from "./tool-summary";
  * 与成组时的行保持同一套说法：工具名 + 一行命令 + 耗时；输出默认只显示前 8 行，
  * 并写明"还有 N 行"——不靠省略号暗示。
  */
-export default function ToolCard({
+function ToolCardView({
   name,
   args,
   done,
@@ -64,3 +64,6 @@ export default function ToolCard({
     </div>
   );
 }
+
+/** 参数与结果不变就不重渲染：流式期间旧工具卡片不参与每帧协调。 */
+export default memo(ToolCardView);

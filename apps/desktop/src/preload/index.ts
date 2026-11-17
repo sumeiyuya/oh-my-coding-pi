@@ -23,6 +23,7 @@ import type {
   SessionSummary,
   SessionSwitchResult,
   SessionTreeResult,
+  TurnPhaseEvent,
   WorkspaceInfo,
   WorkspaceOpenResult,
 } from "@oh-my-coding-pi/shared";
@@ -100,6 +101,17 @@ contextBridge.exposeInMainWorld("api", {
     const listener = (_event: unknown, item: PiStreamItem) => cb(item);
     ipcRenderer.on("pi:event", listener);
     return () => ipcRenderer.removeListener("pi:event", listener);
+  },
+  onTurnPhase: (cb: (event: TurnPhaseEvent) => void): (() => void) => {
+    const listener = (_event: unknown, ev: TurnPhaseEvent) => cb(ev);
+    ipcRenderer.on("pi:turn", listener);
+    return () => ipcRenderer.removeListener("pi:turn", listener);
+  },
+  isPiReady: (): Promise<boolean> => ipcRenderer.invoke("pi:ready"),
+  onPiReady: (cb: (ready: boolean) => void): (() => void) => {
+    const listener = (_event: unknown, ready: boolean) => cb(ready);
+    ipcRenderer.on("bridge:pi-ready", listener);
+    return () => ipcRenderer.removeListener("bridge:pi-ready", listener);
   },
   onStatus: (cb: (status: BridgeStatus) => void): (() => void) => {
     const listener = (_event: unknown, status: BridgeStatus) => cb(status);

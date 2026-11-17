@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -25,7 +26,7 @@ export function CodeBlock({ code, lang }: { code: string; lang: string }) {
  * 助手回复的渲染。表格走 GFM，公式走 KaTeX。
  * 链接只显示、不导航：渲染进程跳转会顶掉整个界面，v1 还没接系统浏览器。
  */
-export default function Markdown({ text }: { text: string }) {
+function MarkdownView({ text }: { text: string }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -72,3 +73,6 @@ export default function Markdown({ text }: { text: string }) {
     </div>
   );
 }
+
+/** 文本不变就不重解析：长会话里历史消息不随每个 delta 重跑 GFM/KaTeX。 */
+export default memo(MarkdownView);

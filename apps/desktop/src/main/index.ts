@@ -32,6 +32,7 @@ import type {
   NotebookCell,
   PiEvent,
   PiStreamItem,
+  PiResponse,
   PersistentGrant,
   PermissionMode,
   PermissionState,
@@ -49,6 +50,8 @@ import type {
 import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
 import { RpcClient } from "./rpc-client";
+import { TurnTrace } from "./turn-trace";
+import { EventPump } from "./event-pump";
 import { KernelService } from "./kernel-service";
 import { KernelBroker } from "./kernel-broker";
 import { PolicyService } from "./policy-service";
@@ -182,6 +185,71 @@ function send(channel: string, payload: unknown): void {
   if (win && !win.isDestroyed()) {
     win.webContents.send(channel, payload);
   }
+}
+
+/** 回合时序：只记阶段与长度，不记正文；OMCP_PERF_TRACE=0 可关闭写盘。 */
+const turnTrace = new TurnTrace({
+  file: () => (workspaceRoot ? join(workspaceRoot, ".omcp", "logs", "perf.jsonl") : null),
+  enabled: process.env.OMCP_PERF_TRACE !== "0",
+});
+turnTrace.setPhaseSink((ev) => send("pi:turn", ev));
+
+/** 合并逐 token 的 text/thinking 增量；OMCP_EVENT_PUMP=0 时退化为逐条转发。 */
+const eventPump = new EventPump({
+  emit: (ev) => {
+    turnTrace.countIpcSent();
+    send("pi:event", ev as PiStreamItem);
+  },
+  enabled: process.env.OMCP_EVENT_PUMP !== "0",
+});
+
+/**
+ * pi 进程“已启动”与“已响应”不是一回事：spawn 成功只代表进程起来了，
+ * 扩展加载/首次编译期间 RPC 可能几十秒不响应。这里以第一次成功响应为准，
+ * 未就绪时 prompt 直接返回可读错误，而不是让预算查询干等 30 秒。
+ */
+let piReady = false;
+let piProbeTimer: NodeJS.Timeout | null = null;
+let piProbeAttempts = 0;
+
+function setPiReady(next: boolean): void {
+  if (piReady === next) return;
+  piReady = next;
+  console.log("[pi] ready=" + next);
+  send("bridge:pi-ready", next);
+}
+
+function stopPiProbe(): void {
+  if (piProbeTimer) {
+    clearTimeout(piProbeTimer);
+    piProbeTimer = null;
+  }
+}
+
+function startPiProbe(): void {
+  stopPiProbe();
+  piProbeAttempts = 0;
+  const tick = async (): Promise<void> => {
+    piProbeTimer = null;
+    if (piReady) return;
+    piProbeAttempts += 1;
+    try {
+      await rpc.request({ type: "get_state" }, 1500);
+      setPiReady(true);
+      return;
+    } catch (err) {
+      if (piProbeAttempts <= 3) {
+        console.log("[pi] probe fail #" + piProbeAttempts + ": " + (err instanceof Error ? err.message : String(err)));
+      }
+      if (piProbeAttempts >= 120) return; // 约 60 秒仍无响应，停止探测
+      piProbeTimer = setTimeout(() => void tick(), 500);
+      piProbeTimer.unref?.();
+    }
+  };
+  const delayRaw = Number(process.env.OMCP_PI_PROBE_DELAY_MS ?? 300);
+  const delay = Number.isFinite(delayRaw) ? Math.min(60_000, Math.max(0, delayRaw)) : 300;
+  piProbeTimer = setTimeout(() => void tick(), delay);
+  piProbeTimer.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -700,6 +768,31 @@ function migrateSessions(destination: string): number {
   return copied;
 }
 
+/**
+ * 可选：打开工作区后延迟预热当前语言的内核。
+ * 默认关闭——只有显式设置 OMCP_KERNEL_PREWARM=python|r 才生效；
+ * 没有实测数据证明冷启动占主导之前，不默认占用常驻内存。
+ */
+let prewarmTimer: NodeJS.Timeout | null = null;
+function scheduleKernelPrewarm(): void {
+  const want = process.env.OMCP_KERNEL_PREWARM;
+  if (want !== "python" && want !== "r") return;
+  if (prewarmTimer) clearTimeout(prewarmTimer);
+  prewarmTimer = setTimeout(() => {
+    prewarmTimer = null;
+    const target = want === "python" ? pythonKernel : rKernel;
+    if (!target || !workspaceRoot) return;
+    const t0 = Date.now();
+    void target
+      .ensureStarted()
+      .then(() => console.log(`[kernel] prewarm ${want} ready in ${Date.now() - t0} ms`))
+      .catch((err) =>
+        console.warn(`[kernel] prewarm ${want} failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+  }, 3000);
+  prewarmTimer.unref?.();
+}
+
 async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const resolved = resolve(root);
   mkdirSync(resolved, { recursive: true });
@@ -742,6 +835,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   planGate.digest = null;
   pythonKernel?.setWorkspace(resolved);
   rKernel?.setWorkspace(resolved);
+  scheduleKernelPrewarm();
   sessionDir = newSessionDir;
   workspaceStateFile = join(science, "state.json");
   supervisor.setSessionDir(sessionDir);
@@ -888,9 +982,48 @@ function loadSettings(): void {
   }
 }
 
-async function getStats(): Promise<SessionStats> {
-  const res = await rpc.request({ type: "get_session_stats" });
-  return res.data as SessionStats;
+/**
+ * 会话统计：同一时刻只允许一个 get_session_stats 在飞，结果缓存 250 ms。
+ * - 展示路径（footer、budget、上下文仪表）共用这一份，回合末 4 次调用收敛成 1 次；
+ * - 发送前的预算判断用 getStats(true) 强制取权威值，缓存不能放行超预算的请求；
+ * - 收到 usage/entry_appended/agent_settled 或切会话时立刻失效。
+ */
+let statsCache: { at: number; value: SessionStats } | null = null;
+/** 失效代数：飞行中的请求若早于最近一次失效，不允许被复用 */
+let statsGen = 0;
+let statsInFlight: { gen: number; p: Promise<SessionStats> } | null = null;
+/** 自上次 prompt 以来实际发出的 get_session_stats 次数（验证 4→1） */
+let statsQueryCount = 0;
+
+function invalidateStats(): void {
+  statsCache = null;
+  statsGen += 1;
+}
+
+async function getStats(force = false, timeoutMs = piReady ? 30_000 : 3_000): Promise<SessionStats> {
+  const now = Date.now();
+  if (!force) {
+    if (statsCache && now - statsCache.at < 250) return statsCache.value;
+    if (statsInFlight && statsInFlight.gen === statsGen) return statsInFlight.p;
+  }
+  const gen = statsGen;
+  statsQueryCount += 1;
+  const run = (async () => {
+    const res = await rpc.request({ type: "get_session_stats" }, timeoutMs);
+    const value = res.data as SessionStats;
+    if (gen === statsGen) statsCache = { at: Date.now(), value };
+    return value;
+  })();
+  if (force) return run; // 预算门不排队、不复用可能早于最新 usage 的飞行请求
+  statsInFlight = { gen, p: run };
+  void run
+    .finally(() => {
+      if (statsInFlight?.gen === gen) statsInFlight = null;
+    })
+    .catch(() => {
+      // 调用方各自处理错误；这里只负责清理飞行状态，避免未处理拒绝
+    });
+  return run;
 }
 
 function reportError(error: AppError): void {
@@ -1004,7 +1137,7 @@ function promptResult(res: { success: boolean; error?: string }): PromptResult {
 
 async function checkBudget(): Promise<boolean> {
   try {
-    const stats = await getStats();
+    const stats = await getStats(true);
     const status = budgetStatus(stats.cost ?? 0);
     if (status.sessionUsd >= status.sessionLimit) {
       reportError({
@@ -1056,11 +1189,19 @@ async function syncCurrentSession(): Promise<void> {
   }
 }
 
-supervisor.on("spawn", (proc) => rpc.attach(proc));
+supervisor.on("spawn", (proc) => {
+  rpc.attach(proc);
+  setPiReady(false);
+  startPiProbe();
+});
 supervisor.on("exit", (info: { code: number | null; signal: NodeJS.Signals | null }) => {
+  setPiReady(false);
+  stopPiProbe();
   rpc.detach();
   cancelPendingApprovals();
   grants?.clearSession();
+  turnTrace.abort("pi-exit");
+  eventPump.dispose();
   if (!supervisor.isStopping && info.code !== 0) {
     reportError({
       code: "E_PI_EXIT",
@@ -1100,7 +1241,19 @@ supervisor.on("error", (err: Error) => {
   send("bridge:status", "error" satisfies BridgeStatus);
 });
 
+rpc.on("response", () => setPiReady(true));
+
 rpc.on("event", (ev: PiEvent) => {
+  turnTrace.countIpc();
+  if (ev.type === "message_end" || ev.type === "entry_appended") invalidateStats();
+  if (ev.type === "agent_start") turnTrace.phase("started");
+  if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+    turnTrace.phase("first_token");
+  }
+  if (ev.type === "tool_execution_start") turnTrace.phase("tool_start", { tool: ev.toolName });
+  if (ev.type === "tool_execution_end") {
+    turnTrace.phase("tool_end", { tool: ev.toolName, ok: !ev.isError });
+  }
   if (
     tokenProbe &&
     ev.type === "message_update" &&
@@ -1111,10 +1264,11 @@ rpc.on("event", (ev: PiEvent) => {
     tokenProbe = null;
   }
   if (ev.type === "extension_ui_request") {
+    eventPump.flush();
     handleExtensionUi(ev);
     return;
   }
-  send("pi:event", ev as PiStreamItem);
+  eventPump.push(ev);
   if (ev.type === "agent_start") {
     void syncCurrentSession();
   }
@@ -1151,6 +1305,8 @@ rpc.on("event", (ev: PiEvent) => {
   }
   if (ev.type === "agent_settled") {
     clearAbortTimer();
+    invalidateStats();
+    turnTrace.settle();
     void syncCurrentSession();
     void updateBudget();
     const autoFinishModes = new Set(["", "tree", "fork", "clone", "export", "recover", "window"]);
@@ -1246,7 +1402,7 @@ async function createWindow(): Promise<void> {
   win = new BrowserWindow({
     width: 1180,
     height: 760,
-    show: !SELFTEST || SELFTEST_MODE === "window",
+    show: !SELFTEST || SELFTEST_MODE === "window" || SELFTEST_MODE === "perflong",
     backgroundColor: "#0b1220",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -1376,40 +1532,71 @@ ipcMain.handle(
     images?: ImageAttachment[],
     opts?: { streamingBehavior?: "steer" | "followUp" },
   ): Promise<PromptResult> => {
-    if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+    if (!piReady) {
+      console.log("[pi] prompt blocked: not ready");
+      return { ok: false, error: "pi 正在启动，请稍候再发送" };
+    }
     const list = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
     const behavior = opts?.streamingBehavior;
-
-    if (list.length === 0) {
-      const res = await rpc.request(
-        behavior
-          ? { type: "prompt", message: text, streamingBehavior: behavior }
-          : { type: "prompt", message: text },
-      );
-      if (res.success) maybeAutoTitle(text);
-      return promptResult(res);
-    }
-
-    for (const img of list) saveAttachment(img.data, img.mimeType);
-
-    const supports = await modelSupportsImage();
-    if (supports) {
-      const res = await rpc.request(
-        behavior
-          ? { type: "prompt", message: text, images: list, streamingBehavior: behavior }
-          : { type: "prompt", message: text, images: list },
-      );
-      if (res.success) maybeAutoTitle(text);
-      return promptResult(res);
-    }
-
-    const description = await transcribeImages(list);
-    const res = await rpc.request({
-      type: "prompt",
-      message: text + "\n\n" + description,
-      ...(behavior ? { streamingBehavior: behavior } : {}),
+    // 只有没有进行中的回合时才开新记录；排队/追加不另起一条，避免把计时算到别人头上
+    const turnId = turnTrace.begin("prompt", {
+      textLen: text.length,
+      images: list.length,
+      ...(behavior ? { behavior } : {}),
     });
-    if (res.success) maybeAutoTitle(text);
+    const own = turnId !== null;
+    if (own) {
+      // 上一次 prompt 之后一共扫了几次会话账本；接入缓存后应接近 1
+      turnTrace.note("statsQueriesSinceLastPrompt", statsQueryCount);
+      statsQueryCount = 0;
+    }
+
+    const budgetStart = performance.now();
+    const budgetOk = await checkBudget();
+    if (own) turnTrace.note("budgetMs", performance.now() - budgetStart);
+    if (!budgetOk) {
+      if (own) turnTrace.fail("budget");
+      return { ok: false, error: "预算已用完，先调整上限或等明天" };
+    }
+    if (own) turnTrace.phase("preparing");
+
+    let res: PiResponse;
+    const ackStart = performance.now();
+    try {
+      if (list.length === 0) {
+        res = await rpc.request(
+          behavior
+            ? { type: "prompt", message: text, streamingBehavior: behavior }
+            : { type: "prompt", message: text },
+        );
+      } else {
+        for (const img of list) saveAttachment(img.data, img.mimeType);
+        const supports = await modelSupportsImage();
+        if (supports) {
+          res = await rpc.request(
+            behavior
+              ? { type: "prompt", message: text, images: list, streamingBehavior: behavior }
+              : { type: "prompt", message: text, images: list },
+          );
+        } else {
+          const description = await transcribeImages(list);
+          res = await rpc.request({
+            type: "prompt",
+            message: text + "\n\n" + description,
+            ...(behavior ? { streamingBehavior: behavior } : {}),
+          });
+        }
+      }
+    } catch (err) {
+      if (own) turnTrace.fail("rpc-error");
+      throw err;
+    }
+    if (own) turnTrace.note("promptAckMs", performance.now() - ackStart);
+    if (res.success) {
+      maybeAutoTitle(text);
+    } else if (own) {
+      turnTrace.fail("rejected");
+    }
     return promptResult(res);
   },
 );
@@ -1598,6 +1785,7 @@ async function piRuntimeInfo(): Promise<PiRuntimeInfo> {
 }
 
 ipcMain.handle("pi:info", (): Promise<PiRuntimeInfo> => piRuntimeInfo());
+ipcMain.handle("pi:ready", () => piReady);
 
 ipcMain.handle("vision:get", (): VisionSettingsView => visionView());
 
@@ -1643,11 +1831,13 @@ ipcMain.handle(
 );
 
 ipcMain.handle("pi:steer", async (_event, text: string): Promise<PromptResult> => {
+  if (!piReady) return { ok: false, error: "pi 正在启动，请稍候再发送" };
   if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
   return promptResult(await rpc.request({ type: "steer", message: text }));
 });
 
 ipcMain.handle("pi:follow-up", async (_event, text: string): Promise<PromptResult> => {
+  if (!piReady) return { ok: false, error: "pi 正在启动，请稍候再发送" };
   if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
   return promptResult(await rpc.request({ type: "follow_up", message: text }));
 });
@@ -1665,6 +1855,7 @@ ipcMain.handle("pi:clear-queue", async () => {
 });
 
 ipcMain.handle("pi:abort", async () => {
+  turnTrace.abort("user");
   // Optimistic: do not wait for the RPC abort response.
   rpc.send({ type: "abort" });
   clearAbortTimer();
@@ -1678,6 +1869,7 @@ ipcMain.handle("pi:abort", async () => {
 });
 
 ipcMain.handle("pi:new-session", async () => {
+  invalidateStats();
   const res = await rpc.request({ type: "new_session" });
   if (res.success) {
     currentSessionFile = null;
@@ -2003,11 +2195,12 @@ ipcMain.handle("workspace:open", async (_event, root: string) => {
 });
 
 ipcMain.handle("pi:tree", async () => {
-  const res = await rpc.request({ type: "get_tree" });
+  const res = await rpc.request({ type: "get_tree" }, piReady ? 30_000 : 3_000);
   return res.data as SessionTreeResult;
 });
 
 ipcMain.handle("pi:fork", async (_event, entryId: string) => {
+  invalidateStats();
   const res = await rpc.request({ type: "fork", entryId });
   const data = (res.data ?? {}) as ForkResult;
   await syncCurrentSession();
@@ -2016,6 +2209,7 @@ ipcMain.handle("pi:fork", async (_event, entryId: string) => {
 });
 
 ipcMain.handle("pi:clone", async () => {
+  invalidateStats();
   const res = await rpc.request({ type: "clone" });
   const data = (res.data ?? {}) as SessionSwitchResult;
   await syncCurrentSession();
@@ -2066,7 +2260,7 @@ ipcMain.handle("shell:open-external", async (_event, url: string) => {
 });
 
 ipcMain.handle("pi:models", async () => {
-  const res = await rpc.request({ type: "get_available_models" });
+  const res = await rpc.request({ type: "get_available_models" }, piReady ? 30_000 : 3_000);
   const data = res.data as { models?: ModelInfo[] } | undefined;
   return data?.models ?? [];
 });
@@ -2363,13 +2557,13 @@ ipcMain.handle(
 );
 
 ipcMain.handle("pi:messages", async () => {
-  const res = await rpc.request({ type: "get_messages" });
+  const res = await rpc.request({ type: "get_messages" }, piReady ? 30_000 : 3_000);
   const data = res.data as { messages?: AgentMessage[] } | undefined;
   return data?.messages ?? [];
 });
 
 ipcMain.handle("pi:state", async () => {
-  const res = await rpc.request({ type: "get_state" });
+  const res = await rpc.request({ type: "get_state" }, piReady ? 30_000 : 3_000);
   const state = res.data as SessionState;
   const file = normalizeSessionFile(state?.sessionFile);
   if (file) {
@@ -2388,8 +2582,8 @@ ipcMain.handle("pi:state", async () => {
 const PI_COMPACT_RESERVE = 16384;
 
 ipcMain.handle("pi:stats", async () => {
-  const res = await rpc.request({ type: "get_session_stats" });
-  const data = res.data as SessionStats;
+  // 走共享缓存/单飞：回合末 footer、预算、上下文仪表不再各自扫一遍账本
+  const data = await getStats();
   const usage = data?.contextUsage;
   if (usage) {
     usage.usedTokens = usage.tokens;
@@ -2834,6 +3028,7 @@ ipcMain.handle("audit:export", (): string | null => {
 });
 
 ipcMain.handle("pi:switch-session", async (_event, file: string) => {
+  invalidateStats();
   const target = normalizeSessionFile(file) ?? file;
   const res = await rpc.request({ type: "switch_session", sessionPath: target });
   const data = res.data as { cancelled?: boolean } | undefined;
@@ -2858,8 +3053,19 @@ async function runSelftestMode(): Promise<void> {
   const body = () => js<string>("document.body.innerText");
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  const waitPiReady = async (): Promise<void> => {
+    for (let i = 0; i < 240; i++) {
+      const ready = await js<boolean>("window.api.isPiReady().then((v) => v === true)").catch(
+        () => false,
+      );
+      if (ready === true) return;
+      await sleep(250);
+    }
+  };
+
   try {
     if (SELFTEST_MODE === "perf") {
+      await waitPiReady();
       const waitIdle = async (): Promise<void> => {
         for (let i = 0; i < 240; i++) {
           if (!(await js<boolean>('!!document.querySelector("button.abort")'))) return;
@@ -2915,6 +3121,85 @@ async function runSelftestMode(): Promise<void> {
             memMb,
           }),
       );
+      await turnTrace.flush();
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "kernelbench") {
+      // 在页面内直接循环调用，排除 executeJavaScript 每格一次的往返开销
+      await js('window.api.runCell("kb-warm", "x = 0")');
+      const r = await js<{ ms: number; fail: number; first10: number; last10: number; p50: number; p95: number }>(
+        `(async () => {
+          const t0 = performance.now();
+          const lat = [];
+          let fail = 0;
+          for (let i = 0; i < 50; i++) {
+            const a = performance.now();
+            const ok = await window.api.runCell("kb" + i, "x = " + i);
+            lat.push(performance.now() - a);
+            if (!ok) fail++;
+          }
+          const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+          const sorted = [...lat].sort((a, b) => a - b);
+          const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+          return {
+            ms: Math.round(performance.now() - t0),
+            fail,
+            first10: Math.round(sum(lat.slice(0, 10))),
+            last10: Math.round(sum(lat.slice(-10))),
+            p50: Math.round(q(0.5)),
+            p95: Math.round(q(0.95)),
+          };
+        })()`,
+      );
+      console.log("P3_KERNELBENCH " + JSON.stringify(r));
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "ready") {
+      // 验证就绪门：未就绪时应立刻返回可读错误，而不是等 30 秒
+      const t0 = Date.now();
+      const res = await js<{ ok: boolean; error?: string }>('window.api.prompt("只回复：ok")');
+      const ready = await js<boolean>("window.api.isPiReady()");
+      console.log("P3_READY " + JSON.stringify({ ...res, ms: Date.now() - t0, ready }));
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "perflong") {
+      // 长回复基线：量 ipcEvents / ipcSent 的合并率与首 token
+      await waitPiReady();
+      const waitIdle = async (): Promise<void> => {
+        for (let i = 0; i < 600; i++) {
+          try {
+            const st = await js<{ isStreaming?: boolean } | null>("window.api.getState()");
+            if (st && !st.isStreaming) return;
+          } catch {
+            // pi 还没就绪，继续等
+          }
+          await sleep(300);
+        }
+      };
+      await waitIdle();
+      await js("window.__omcpPerfEnabled = true");
+      await js(
+        'window.api.prompt("请写一段约 1200 字的中文说明，分 6 段，每段一个小标题；只输出正文，不要使用任何工具。")',
+      );
+      await sleep(800);
+      await waitIdle();
+      await sleep(500);
+      const clientPerf = await js<unknown>("window.__omcpPerf ?? null");
+      console.log("P3_PERF_CLIENT " + JSON.stringify(clientPerf));
+      await turnTrace.flush();
+      const perfFile = join(workspaceRoot, ".omcp", "logs", "perf.jsonl");
+      const lines = existsSync(perfFile)
+        ? readFileSync(perfFile, "utf8")
+            .trim()
+            .split(String.fromCharCode(10))
+            .map((l) => l.trim())
+            .filter(Boolean)
+        : [];
+      console.log("P3_PERF_LONG " + (lines.at(-1) ?? "{}"));
+      app.quit();
     }
 
     if (SELFTEST_MODE === "a2a5") {
@@ -4496,7 +4781,7 @@ app.whenReady().then(async () => {
   applyPermissionMode();
   await createWindow();
 
-  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
+  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "perflong", "ready", "kernelbench", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
     setTimeout(() => void runSelftestMode(), 3200);
   }
 
@@ -4527,7 +4812,7 @@ app.whenReady().then(async () => {
       console.log("P1_SELFTEST_TEXT_END");
       console.log("P1_SELFTEST_OK false");
       app.quit();
-    }, ["timeout", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "a3", "a4", "perf"].includes(SELFTEST_MODE) ? 300_000 : 120_000);
+    }, ["timeout", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "a3", "a4", "perf", "perflong"].includes(SELFTEST_MODE) ? 300_000 : 120_000);
   }
 
   app.on("activate", () => {

@@ -3206,3 +3206,35 @@ body.sash-dragging {
 .queue-act { border: 1px solid #e2e8f0; background: #fff; border-radius: 5px; padding: 1px 6px; font-size: 10px; color: #475569; }
 .queue-act:hover { border-color: #bfdbfe; color: #1d4ed8; }
 .queue-more { color: #94a3b8; font-size: 10.5px; padding-top: 2px; }
+
+/* 提交阶段（PR3）：发送后到模型出字前的可见状态 */
+.submit-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 2px 2px 8px;
+}
+.submit-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: submit-pulse 1.2s ease-in-out infinite;
+}
+@keyframes submit-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.msg-failed {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 99px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+  font-size: 10.5px;
+  vertical-align: middle;
+}

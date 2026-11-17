@@ -59,8 +59,8 @@ import type {
   WorkspaceInfo,
 } from "@oh-my-coding-pi/shared";
 
-type Msg =
-  | { kind: "user"; text: string }
+type Msg = { id?: string } & (
+  | { kind: "user"; text: string; /** pi 没有接受这条消息 */ failed?: boolean }
   | { kind: "assistant"; text: string }
   | {
       kind: "tool";
@@ -76,7 +76,26 @@ type Msg =
       /** 被用户停下：不算失败 */
       interrupted?: boolean;
     }
-  | { kind: "system"; text: string };
+  | { kind: "system"; text: string }
+);
+
+/** 提交阶段：只覆盖“用户按下发送 → 模型开始出字”这一段，出字后交给 busy/流式 */
+type SubmitPhase = "idle" | "submitting" | "accepted" | "preparing" | "running" | "streaming";
+
+const SUBMIT_LABEL: Record<SubmitPhase, string> = {
+  idle: "",
+  submitting: "正在发送…",
+  accepted: "正在检查预算…",
+  preparing: "正在准备上下文（可能包含自动压缩）…",
+  running: "模型处理中…",
+  streaming: "",
+};
+
+let msgSeq = 0;
+function nextMsgId(): string {
+  msgSeq = (msgSeq + 1) % 1_000_000;
+  return `m${Date.now().toString(36)}-${msgSeq.toString(36)}`;
+}
 
 /** 相对时间（修改 3）：2m / 3h / 2d；超过一周回落到日期 */
 function formatRelative(iso: string | undefined): string {
@@ -160,6 +179,14 @@ function textOf(content: ContentBlock[] | string | undefined): string {
     .join("");
 }
 
+/** 工具输出只看尾部：长命令的进展在最后几行 */
+function tailText(text: string, max: number): string {
+  return text.length <= max
+    ? text
+    : `…（较早输出已省略）
+${text.slice(-max)}`;
+}
+
 function toMsgs(list: AgentMessage[]): Msg[] {
   // 工具调用是转写的一部分：从 tool_use / tool_result 块重建（修改 4）
   return messagesFromAgent(list) as Msg[];
@@ -230,7 +257,18 @@ export default function App() {
   const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
   const newSessionIntent = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 提交阶段：发送锁与“准备中”文案都看它 */
+  const [submitPhase, setSubmitPhase] = useState<SubmitPhase>("idle");
+  /** 本轮待确认的用户消息：失败时标记未送达并回填输入框 */
+  const pendingUser = useRef<{
+    id: string;
+    text: string;
+    attachments: Array<{ id: string; data: string; mimeType: string }>;
+  } | null>(null);
   const [status, setStatus] = useState<BridgeStatus>("starting");
+  /** pi 进程已启动但可能仍在初始化；只有 RPC 真正响应过才允许发送 */
+  const [piReady, setPiReady] = useState(false);
+  const piReadyRef = useRef(false);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelKey, setModelKey] = useState("");
@@ -274,6 +312,19 @@ export default function App() {
   >([]);
   const [policy, setPolicy] = useState<PolicyInfo | null>(null);
   const pendingText = useRef("");
+  /** 工具中间输出节流：同一 toolCallId 最快 150 ms 更新一次 */
+  const toolUpdateAt = useRef<Record<string, number>>({});
+  /** 流式期间的客户端性能采样（长任务 + 帧间隔），只写 window.__omcpPerf 供自检读取 */
+  const clientPerf = useRef<{
+    start: number;
+    longTasks: number;
+    longMs: number;
+    frames: number;
+    maxGap: number;
+    over50: number;
+  } | null>(null);
+  const clientRaf = useRef<number | null>(null);
+  const clientObserver = useRef<PerformanceObserver | null>(null);
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -301,17 +352,23 @@ export default function App() {
     }
   }, []);
 
+  /** 当前助手消息的字符数：用于长回复降频（不是精确 token 数，只做阈值判断） */
+  const streamChars = useRef(0);
+
   const appendAssistantText = useCallback((chunk: string) => {
     setMessages((prev) => {
       const next = [...prev];
       for (let i = next.length - 1; i >= 0; i--) {
         const cur = next[i];
         if (cur.kind === "assistant") {
-          next[i] = { kind: "assistant", text: cur.text + chunk };
+          const text = cur.text + chunk;
+          streamChars.current = text.length;
+          next[i] = { ...cur, text };
           return next;
         }
       }
-      return [...next, { kind: "assistant", text: chunk }];
+      streamChars.current = chunk.length;
+      return [...next, { kind: "assistant", text: chunk, id: nextMsgId() }];
     });
   }, []);
 
@@ -329,12 +386,15 @@ export default function App() {
     (chunk: string) => {
       pendingText.current += chunk;
       if (flushTimer.current) return;
+      // 长回复降频：解析成本随文本增长，尾部仍保持流式感
+      const chars = streamChars.current;
+      const delay = chars > 12000 ? 90 : chars > 6000 ? 60 : 40;
       flushTimer.current = setTimeout(() => {
         flushTimer.current = null;
         const text = pendingText.current;
         pendingText.current = "";
         if (text) appendAssistantText(text);
-      }, 40);
+      }, delay);
     },
     [appendAssistantText],
   );
@@ -387,6 +447,7 @@ export default function App() {
   const refreshSession = useCallback(async () => {
     // 切会话前把未落屏的 delta 丢掉，否则它会拼到新会话的最后一条回复上
     discardPendingText();
+    streamChars.current = 0;
     try {
       const list = await window.api.getMessages();
       setMessages(toMsgs(list));
@@ -420,9 +481,14 @@ export default function App() {
           return;
         case "agent_start":
           setBusy(true);
+          setSubmitPhase("running");
+          startClientPerf();
           return;
         case "agent_settled": {
+          stopClientPerf();
           setBusy(false);
+          setSubmitPhase("idle");
+          toolUpdateAt.current = {};
           const intent = newSessionIntent.current;
           if (intent) {
             newSessionIntent.current = null;
@@ -447,7 +513,9 @@ export default function App() {
         case "message_start":
           if (ev.message.role === "assistant") {
             discardPendingText();
-            setMessages((prev) => [...prev, { kind: "assistant", text: "" }]);
+            setSubmitPhase("streaming");
+            streamChars.current = 0;
+            setMessages((prev) => [...prev, { kind: "assistant", text: "", id: nextMsgId() }]);
           }
           return;
         case "message_update": {
@@ -473,8 +541,10 @@ export default function App() {
             for (let i = next.length - 1; i >= 0; i--) {
               const cur = next[i];
               if (cur.kind === "assistant") {
-                if (text) next[i] = { kind: "assistant", text };
-                else if (!cur.text) next.splice(i, 1);
+                if (text) {
+                  streamChars.current = text.length;
+                  next[i] = { ...cur, text };
+                } else if (!cur.text) next.splice(i, 1);
                 return next;
               }
             }
@@ -495,12 +565,27 @@ export default function App() {
             },
           ]);
           return;
+        case "tool_execution_update": {
+          const now = Date.now();
+          const last = toolUpdateAt.current[ev.toolCallId] ?? 0;
+          if (now - last < 150) return;
+          toolUpdateAt.current[ev.toolCallId] = now;
+          const partial = textOf(ev.partialResult.content);
+          if (!partial) return;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.kind === "tool" && m.id === ev.toolCallId ? { ...m, result: tailText(partial, 1200) } : m,
+            ),
+          );
+          return;
+        }
         case "tool_execution_end":
           setMessages((prev) => {
             const next = [...prev];
             for (let i = next.length - 1; i >= 0; i--) {
               const cur = next[i];
               if (cur.kind === "tool" && cur.id === ev.toolCallId) {
+                delete toolUpdateAt.current[ev.toolCallId];
                 const endedAt = Date.now();
                 // 用户在本条开始之后按过停止 → 记为「已停止」，不计入失败
                 const interrupted = abortedAt.current !== null && abortedAt.current >= (cur.startedAt ?? 0);
@@ -526,8 +611,51 @@ export default function App() {
       }
     });
 
+    const offTurn = window.api.onTurnPhase((ev) => {
+      switch (ev.phase) {
+        case "accepted":
+          setSubmitPhase((p) => (p === "idle" ? p : "accepted"));
+          return;
+        case "preparing":
+          setSubmitPhase((p) => (p === "idle" ? p : "preparing"));
+          return;
+        case "started":
+          setSubmitPhase("running");
+          setBusy(true);
+          return;
+        case "first_token":
+          setSubmitPhase("streaming");
+          return;
+        case "settled":
+          setSubmitPhase("idle");
+          return;
+        case "failed":
+          // 具体原因由 prompt 返回值收尾（未送达标记 + 输入恢复）；这里只解除锁定
+          setSubmitPhase("idle");
+          return;
+        default:
+          return;
+      }
+    });
+
+    const applyReady = (ready: boolean) => {
+      const was = piReadyRef.current;
+      piReadyRef.current = ready;
+      setPiReady(ready);
+      // 第一次真正可响应时补拉一次：启动期的请求多半已经超时
+      if (ready && !was) {
+        void refreshSession();
+        void refreshModels();
+      }
+    };
+    const offPiReady = window.api.onPiReady(applyReady);
+    void window.api.isPiReady().then(applyReady).catch(() => undefined);
+
     const offStatus = window.api.onStatus((s) => {
       setStatus(s);
+      if (s === "starting" || s === "restarting" || s === "stopped" || s === "error") {
+        applyReady(false);
+      }
       // pi 重启完成后模型列表可能变了（例如刚加了 provider）
       if (s === "ready") void refreshModels();
     });
@@ -547,6 +675,8 @@ export default function App() {
     setStatus("ready");
     return () => {
       offEvent();
+      offTurn();
+      offPiReady();
       offStatus();
       offError();
       offWorkspace();
@@ -701,9 +831,84 @@ export default function App() {
     el.scrollTop = el.scrollHeight;
   }, [messages, currentFile]);
 
+  function startClientPerf() {
+    // 默认不采样：只有自检/诊断显式打开 window.__omcpPerfEnabled 才跑
+    if ((window as unknown as { __omcpPerfEnabled?: boolean }).__omcpPerfEnabled !== true) return;
+    if (clientPerf.current) return;
+    const state = { start: performance.now(), longTasks: 0, longMs: 0, frames: 0, maxGap: 0, over50: 0 };
+    clientPerf.current = state;
+    try {
+      const po = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          state.longTasks += 1;
+          state.longMs += entry.duration;
+        }
+      });
+      po.observe({ entryTypes: ["longtask"] });
+      clientObserver.current = po;
+    } catch {
+      // 老 Chromium 没有 longtask，只保留帧间隔
+    }
+    let last = performance.now();
+    const tick = () => {
+      const now = performance.now();
+      const gap = now - last;
+      last = now;
+      state.frames += 1;
+      if (gap > state.maxGap) state.maxGap = gap;
+      if (gap > 50) state.over50 += 1;
+      clientRaf.current = requestAnimationFrame(tick);
+    };
+    clientRaf.current = requestAnimationFrame(tick);
+  }
+
+  function stopClientPerf() {
+    const s = clientPerf.current;
+    clientPerf.current = null;
+    if (clientRaf.current !== null) cancelAnimationFrame(clientRaf.current);
+    clientRaf.current = null;
+    clientObserver.current?.disconnect();
+    clientObserver.current = null;
+    if (!s) return;
+    const elapsedMs = Math.round(performance.now() - s.start);
+    const metrics = {
+      elapsedMs,
+      frames: s.frames,
+      avgFrameGapMs: s.frames > 0 ? Math.round((elapsedMs / s.frames) * 10) / 10 : null,
+      longTasks: s.longTasks,
+      longMs: Math.round(s.longMs),
+      longTaskSupported:
+        typeof PerformanceObserver !== "undefined" &&
+        PerformanceObserver.supportedEntryTypes.includes("longtask"),
+      maxFrameGapMs: Math.round(s.maxGap),
+      framesOver50ms: s.over50,
+    };
+    (window as unknown as { __omcpPerf?: unknown }).__omcpPerf = metrics;
+  }
+
+  /** 失败收尾：标记未送达、把文字放回输入框；预检失败时不再重复追加系统消息 */
+  function failSend(detail: string, hint = "", addSystem = true) {
+    const pending = pendingUser.current;
+    pendingUser.current = null;
+    setSubmitPhase("idle");
+    if (pending) {
+      setMessages((prev) =>
+        prev.map((m) => (m.kind === "user" && m.id === pending.id ? { ...m, failed: true } : m)),
+      );
+      setInput((prev) => joinTakeBack([pending.text], prev));
+      if (currentFile) draftsRef.current[currentFile] = pending.text;
+      if (pending.attachments.length) setAttachments(pending.attachments);
+    }
+    if (addSystem) setMessages((prev) => [...prev, { kind: "system", text: detail + hint }]);
+  }
+
   async function send(mode: "prompt" | "steer" | "followUp") {
     const text = input.trim();
     if (!text) return;
+    if (!piReady) {
+      setNotice("pi 正在启动，请稍候再发送");
+      return;
+    }
     if (!modelKey) {
       // 默认不预置模型：先让用户选，避免发出去只拿到一个底层报错
       setNotice(
@@ -715,39 +920,54 @@ export default function App() {
       else modelSelectRef.current?.focus();
       return;
     }
-    // 发送前预检：缺凭据 / 地址不对 / 模型不存在就别发，直接告诉用户怎么修
-    const [provider, ...modelParts] = modelKey.split("/");
-    const modelId = modelParts.join("/");
-    try {
-      const pf = (await window.api.modelPreflight(provider, modelId)) as {
-        ok: boolean;
-        reason: string;
-        message: string;
-        fix?: string;
-      };
-      if (!pf.ok) {
-        setModelError(describeModelError(pf.message) ?? { kind: "unknown", title: pf.message, detail: "" });
-        if (pf.fix === "add_key" || pf.fix === "confirm_connection") {
-          setNotice(pf.message + "：已打开连接设置");
-          setSetupProvider(provider);
-        } else {
-          setNotice(pf.message);
-          modelSelectRef.current?.focus();
-        }
-        return;
-      }
-    } catch {
-      // 预检自身失败不阻断发送：pi 那边还有一道真实校验
-    }
+    const isPrompt = mode === "prompt";
+    // 提交期间锁住发送：连续点击会让 pi 报 “Agent is already processing”
+    if (isPrompt && (submitPhase !== "idle" || busy)) return;
 
-    setModelError(null);
-    setMessages((prev) => [...prev, { kind: "user", text }]);
+    const msgId = nextMsgId();
+    const pendingAttachments = attachments;
+    if (isPrompt) {
+      pendingUser.current = { id: msgId, text, attachments: pendingAttachments };
+      setSubmitPhase("submitting");
+    }
+    setMessages((prev) => [...prev, { kind: "user", text, id: msgId }]);
     setInput("");
     setMention(null);
     setMentionEntries([]);
     // 发出去就不再算草稿，否则切走再切回来会把已发送的文字又填回输入框
     if (currentFile) draftsRef.current[currentFile] = "";
     setAttachments([]);
+
+    if (isPrompt) {
+      // 发送前预检：缺凭据 / 地址不对 / 模型不存在就别发，直接告诉用户怎么修
+      const [provider, ...modelParts] = modelKey.split("/");
+      const modelId = modelParts.join("/");
+      try {
+        const pf = (await window.api.modelPreflight(provider, modelId)) as {
+          ok: boolean;
+          reason: string;
+          message: string;
+          fix?: string;
+        };
+        if (!pf.ok) {
+          setModelError(describeModelError(pf.message) ?? { kind: "unknown", title: pf.message, detail: "" });
+          if (pf.fix === "add_key" || pf.fix === "confirm_connection") {
+            setNotice(pf.message + "：已打开连接设置");
+            setSetupProvider(provider);
+          } else {
+            setNotice(pf.message);
+            modelSelectRef.current?.focus();
+          }
+          failSend(pf.message, "", false);
+          return;
+        }
+      } catch {
+        // 预检自身失败不阻断发送：pi 那边还有一道真实校验
+      }
+      setModelError(null);
+      setSubmitPhase("accepted");
+    }
+
     try {
       const res =
         mode === "steer"
@@ -756,8 +976,8 @@ export default function App() {
             ? await window.api.followUp(text)
             : await window.api.prompt(
                 text,
-                attachments.length
-                  ? attachments.map((a): ImageAttachment => ({
+                pendingAttachments.length
+                  ? pendingAttachments.map((a): ImageAttachment => ({
                       type: "image",
                       data: a.data,
                       mimeType: a.mimeType,
@@ -769,14 +989,20 @@ export default function App() {
         // 只说“消息未被接受”等于把唯一有用的信息丢掉。
         const detail = res.error ?? "pi 未说明原因";
         const hint = /no api key/i.test(detail)
-          ? "\n提示：去「设置 → 模型注册表」给这个 provider 保存密钥；改完密钥会自动重启 pi。"
+          ? `
+提示：去「设置 → 模型注册表」给这个 provider 保存密钥；改完密钥会自动重启 pi。`
           : /unknown provider|model not found/i.test(detail)
-            ? "\n提示：pi 不认识这个 provider/模型，去「设置 → 模型注册表」确认已保存并同步到 models.json。"
+            ? `
+提示：pi 不认识这个 provider/模型，去「设置 → 模型注册表」确认已保存并同步到 models.json。`
             : "";
-        setMessages((prev) => [...prev, { kind: "system", text: `消息未被接受：${detail}${hint}` }]);
+        if (isPrompt) failSend(`消息未被接受：${detail}`, hint);
+        else setMessages((prev) => [...prev, { kind: "system", text: `消息未被接受：${detail}${hint}` }]);
+        return;
       }
+      if (isPrompt) pendingUser.current = null;
     } catch {
-      setMessages((prev) => [...prev, { kind: "system", text: "发送失败，请检查 pi 状态" }]);
+      if (isPrompt) failSend("发送失败，请检查 pi 状态");
+      else setMessages((prev) => [...prev, { kind: "system", text: "发送失败，请检查 pi 状态" }]);
     }
   }
 
@@ -1439,15 +1665,22 @@ export default function App() {
             const i = block.index;
             if (m.kind === "user") {
               return (
-                <div className="msg user" key={i}>
+                <div className="msg user" key={m.id ?? i}>
                   <div className="who">你</div>
-                  <div className="bubble">{m.text}</div>
+                  <div className="bubble">
+                    {m.text}
+                    {m.failed && (
+                      <span className="msg-failed" title="这条消息没有被 pi 接受">
+                        未送达
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             }
             if (m.kind === "assistant") {
               return (
-                <div className="msg assistant" key={i}>
+                <div className="msg assistant" key={m.id ?? i}>
                   <div className="who-row">
                     <span className="who">pi</span>
                     <button className="mini" onClick={() => copyText(m.text)}>
@@ -1463,7 +1696,7 @@ export default function App() {
             if (m.kind === "tool") {
               return (
                 <ToolCard
-                  key={i}
+                  key={m.id ?? i}
                   name={m.name}
                   args={m.args}
                   done={m.done}
@@ -1489,6 +1722,28 @@ export default function App() {
 
         {view === "chat" && (
         <footer className="composer">
+          {!piReady && (
+            <div className="submit-state" role="status">
+              <span className="submit-dot" aria-hidden="true" />
+              <span>pi 正在启动…（首次启动可能需要几十秒）</span>
+            </div>
+          )}
+          {piReady && (submitPhase === "submitting" || submitPhase === "accepted" || submitPhase === "preparing") && (
+            <div className="submit-state" role="status">
+              <span className="submit-dot" aria-hidden="true" />
+              <span>{SUBMIT_LABEL[submitPhase]}</span>
+              <button
+                type="button"
+                className="mini"
+                onClick={() => {
+                  abortedAt.current = Date.now();
+                  void window.api.abort();
+                }}
+              >
+                停止
+              </button>
+            </div>
+          )}
           <QueueBar
             queue={queue}
             onTakeBack={() => void takeBackQueue(true)}
@@ -1610,7 +1865,11 @@ export default function App() {
               </button>
             </div>
           ) : (
-            <button onClick={() => send("prompt")} disabled={!input.trim()}>
+            <button
+              onClick={() => send("prompt")}
+              disabled={!input.trim() || submitPhase !== "idle" || !piReady}
+              title={!piReady ? "pi 正在启动" : submitPhase !== "idle" ? SUBMIT_LABEL[submitPhase] : undefined}
+            >
               发送
             </button>
           )}
