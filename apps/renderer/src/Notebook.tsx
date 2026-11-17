@@ -28,6 +28,8 @@ export default function Notebook() {
   const [saved, setSaved] = useState(true);
   const loaded = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 变量刷新合并：连续执行多格时不要每格都问两次内核 */
+  const variablesTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     loaded.current = false;
@@ -105,15 +107,23 @@ export default function Notebook() {
       );
       if (ev.ev === "result") {
         setRunningId(null);
-        Promise.all([
-          window.api.getVariables("python"),
-          window.api.getVariables("r"),
-        ])
-          .then(([python, r]) => setVariables({ python, r }))
-          .catch(() => undefined);
+        // 300 ms 合并：批量执行时只在末尾问一次，避免每格两次 IPC
+        if (variablesTimer.current) clearTimeout(variablesTimer.current);
+        variablesTimer.current = setTimeout(() => {
+          variablesTimer.current = null;
+          Promise.all([window.api.getVariables("python"), window.api.getVariables("r")])
+            .then(([python, r]) => setVariables({ python, r }))
+            .catch(() => undefined);
+        }, 300);
       }
     });
-    return off;
+    return () => {
+      off();
+      if (variablesTimer.current) {
+        clearTimeout(variablesTimer.current);
+        variablesTimer.current = null;
+      }
+    };
   }, []);
 
   async function run(cell: Cell) {
