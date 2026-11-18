@@ -1,8 +1,8 @@
 # 安装与运行
 
-- 版本：0.6.4
+- 版本：0.6.5
 - 平台：Windows 10/11 x64
-- 日期：2026-11-17
+- 日期：2026-11-18
 
 ---
 
@@ -14,7 +14,7 @@
 | 运行时 | 应用自带 Electron 45（无需单独安装） |
 | pi | **已内置 1.5.2**（无需单独安装） |
 | 模型凭据 | `~/.pi/agent/auth.json`，或在应用「设置 → 模型注册表」里配置 |
-| 磁盘 | 安装包约 136.9 MB（0.6.4）；安装后约 400 MB；会话/导出另计 |
+| 磁盘 | 安装包约 136.9 MB（0.6.5）；安装后约 400 MB；会话/导出另计 |
 
 > 应用本身不弹登录框；它使用 `~/.pi/agent/auth.json` 里的 provider 配置（内置 pi 与系统 pi 默认共用）。
 > 首次使用前可用系统 pi 的 `pi -p "只回复 ok"` 验证凭据是否可用；没有系统 pi 时，只要能保证 `auth.json` 已存在即可。
@@ -23,7 +23,7 @@
 
 ## 2. 安装
 
-1. 拿到 `oh my coding pi Setup 0.6.4.exe`。
+1. 拿到 `oh my coding pi Setup 0.6.5.exe`。
 2. 双击运行。安装器为 **当前用户安装**，不需要管理员权限。
 3. 默认安装到：
 
@@ -36,9 +36,9 @@
 静默安装（部署/测试）：
 
 ```powershell
-Start-Process "oh my coding pi Setup 0.6.4.exe" -ArgumentList "/S" -Wait
+Start-Process "oh my coding pi Setup 0.6.5.exe" -ArgumentList "/S" -Wait
 # 指定目录（/D 必须放最后，且不能加引号）
-Start-Process "oh my coding pi Setup 0.6.4.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
+Start-Process "oh my coding pi Setup 0.6.5.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
 ```
 
 卸载时若安装目录被其它程序占用（编辑器/索引服务），卸载器会重试并登记

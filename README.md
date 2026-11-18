@@ -12,9 +12,9 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 ## 版本
 
-- 当前版本：**0.6.4**（2026-11-17）
-- 发布说明：[`docs/release-notes-0.6.4.md`](docs/release-notes-0.6.4.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.4](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.4)
+- 当前版本：**0.6.5**（2026-11-18）
+- 发布说明：[`docs/release-notes-0.6.5.md`](docs/release-notes-0.6.5.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
+- 安装包：[GitHub Release v0.6.5](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.5)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么
@@ -22,25 +22,26 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 | 方面 | 能力 |
 |---|---|
 | 对话 | pi 工具循环、流式输出、工具调用分组折叠、运行中排队/立刻转向、会话树与 fork、技能、分析路线、方案期只读门 |
+| 上传 | 输入框 `＋`：上传文件 / 图片 / 数据；工作区内引用、工作区外复制到 `.omcp/uploads`；审计与进度 |
 | 内核 | Python / R 常驻内核、串行执行队列、变量面板、图片自动落 `figures/`、表格由分析代码写 `results/tables/` |
 | 笔记本 | cell 执行与输出、语言切换、只读模式下可配置是否允许执行 |
 | 权限 | 三档权限（自动拦截 / 请求批准 / 完全访问）、只读模式、方案期门、审批超时按拒绝、持久授权、审计 JSONL |
 | 模型 | 模型注册表、发送前预检、连接信息确认、纯文本模型的图片转述（可选视觉端点） |
-| 工作区 | 左栏会话、右坞四面板（文件 / 笔记本 / 产物 / 运行）、产物就地预览、可拖宽与折叠 |
+| 工作区 | 新建任务、工作区树与会话行菜单、最近工作区计数、右坞四面板（文件 / 笔记本 / 产物 / 运行）、产物就地预览 |
 | 诊断 | 回合级 `perf.jsonl`、错误分类、诊断包导出、内部自检模式 |
 
-0.6.4 的重点是**等待可见、启动不空等、每回合少做重复功**：提交阶段状态、启动期就绪门控、会话统计去重、事件合并与渲染 memo。细节见发布说明。
+0.6.5 的重点是**把文件带进对话、把工作区理成树、把左右栏简化**：输入框上传（引用/复制/审计）、工作区侧栏与最近工作区计数、左栏常驻与右坞 DAWN 化。细节见发布说明。
 
 ## 安装
 
-1. 从 [Release v0.6.4](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.4) 下载 `oh.my.coding.pi.Setup.0.6.4.exe` 与 `SHA256SUMS.txt`。
+1. 从 [Release v0.6.5](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.5) 下载 `oh.my.coding.pi.Setup.0.6.5.exe` 与 `SHA256SUMS.txt`。
 2. 双击安装；默认装到 `%LOCALAPPDATA%\Programs\oh my coding pi\`。
 3. 静默安装（PowerShell）：
 
 ```powershell
-Start-Process "oh my coding pi Setup 0.6.4.exe" -ArgumentList "/S" -Wait
+Start-Process "oh my coding pi Setup 0.6.5.exe" -ArgumentList "/S" -Wait
 # 指定目录：/D 必须放最后，且不能加引号
-Start-Process "oh my coding pi Setup 0.6.4.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
+Start-Process "oh my coding pi Setup 0.6.5.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
 ```
 
 > 不要在 Git Bash 里直接传 `/S`，MSYS 会把它当路径。用 PowerShell。
@@ -114,7 +115,7 @@ Start-Process "oh my coding pi Setup 0.6.4.exe" -ArgumentList '/S', '/D=C:\Tools
 - `ipcEvents` / `ipcSent`：收到 / 实际发给界面的 pi 事件数，用来判断合并率；
 - `statsQueriesSinceLastPrompt`：上一回合之后扫了几次会话账本（正常为 2）。
 
-本机 0.6.4 实测（`opencode-go/deepseek-v4.1-flash`）：首 token p50 2.6–3.9 s、预算 0.4–0.6 ms、pi 接受 1–3 ms、50 次 execute 2.3 s、长回复流式 0 长任务。
+本机 0.6.5 实测（`opencode-go/deepseek-v4.1-flash`）：首 token p50 2.6–3.9 s、预算 0.4–0.6 ms、pi 接受 1–3 ms、50 次 execute 2.3 s、长回复流式 0 长任务。
 
 内部自检模式（需要桌面环境与可用模型）：
 
@@ -158,7 +159,7 @@ pnpm dev
 测试与 CI：
 
 ```powershell
-# 全量：install → typecheck → 223 项单测 → 契约 schema → 扩展 typecheck → build
+# 全量：install → typecheck → 233 项单测 → 契约 schema → 扩展 typecheck → build
 powershell -File scripts/ci.ps1
 
 # 只跑单测
@@ -210,6 +211,8 @@ powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Sign
 - 笔记本只保存 cell 代码，输出不落盘，重开需重跑。
 - 审批超时按拒绝；长时间任务在用户离开时会被挡住。
 - 首次启动 pi 可能需要几十秒（扩展加载），界面会明确显示启动状态。
+- 最近工作区展开只显示“切换到此工作区”，不列出该工作区的会话；会话列表只加载当前工作区。
+- 删除会话是移到 `.omcp/trash/sessions/`，不是永久删除。
 
 完整列表见 [`docs/known-limits.md`](docs/known-limits.md)。
 
