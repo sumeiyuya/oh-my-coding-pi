@@ -26,7 +26,13 @@ const UPDATE_HINT: Record<UpdateErrorKind, string> = {
   parse: "发布信息格式异常，可能与 GitHub API 变化有关。",
 };
 
-export default function Settings() {
+export default function Settings({
+  theme,
+  onThemeChange,
+}: {
+  theme: "dark" | "light";
+  onThemeChange: (theme: "dark" | "light") => void;
+}) {
   const [settings, setSettings] = useState<AppSettingsDetail | null>(null);
   const [draft, setDraft] = useState<Draft>({});
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -132,6 +138,37 @@ export default function Settings() {
 
   return (
     <div className="perm">
+      <section className="perm-card">
+        <div className="perm-head">
+          <b>外观</b>
+        </div>
+        <div className="perm-row">
+          <span>界面颜色</span>
+          <span className="seg" role="group" aria-label="界面颜色">
+            <button
+              type="button"
+              className={theme === "dark" ? "on" : ""}
+              aria-pressed={theme === "dark"}
+              onClick={() => onThemeChange("dark")}
+            >
+              深色
+            </button>
+            <button
+              type="button"
+              className={theme === "light" ? "on" : ""}
+              aria-pressed={theme === "light"}
+              onClick={() => onThemeChange("light")}
+            >
+              浅色
+            </button>
+          </span>
+        </div>
+        <div className="perm-row">
+          <span />
+          <span className="perm-note">切换立即生效，并记住到下次启动（原来在顶栏的按钮已移到这里）。</span>
+        </div>
+      </section>
+
       <section className="perm-card">
         <div className="perm-head">
           <b>模型与预算</b>

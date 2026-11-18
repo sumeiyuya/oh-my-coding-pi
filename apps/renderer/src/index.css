@@ -131,6 +131,15 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
   min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 面板开关独立固定区：bar-right 换行时也不被挤走 */
+.bar-fixed {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 /* 顶栏控件一律不压缩：宁可换行，也不要出现竖排的「收起左栏」 */
@@ -2881,6 +2890,14 @@ body.sash-dragging {
 }
 .perm-pill-default input { accent-color: var(--accent); }
 .perm-pill-hint { color: var(--muted); }
+/* 设置里的分段控件（外观：深色/浅色） */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  border: none; background: transparent; color: var(--muted);
+  padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.seg button:hover { background: var(--hover); }
+.seg button.on { background: var(--chip); color: var(--text); }
 .perm-pill-note {
   margin: 6px 8px 4px; padding-top: 6px; border-top: 1px solid var(--line);
   font-size: 11px; color: var(--muted); line-height: 1.55;
@@ -2888,6 +2905,47 @@ body.sash-dragging {
 
 /* ── 模型选择面板（B2–B4）── */
 .model-picker { position: relative; }
+/* 模型 + 推理强度连体按钮：左侧圆角只给模型，右侧只给推理 */
+.model-group { display: inline-flex; align-items: center; min-width: 0; }
+.model-group .model-picker-trigger {
+  border-radius: 7px 0 0 7px;
+  border-right: none;
+  max-width: 220px;
+}
+.thinking-picker { position: relative; }
+.thinking-picker-trigger {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  border: 1px solid var(--line); border-left: none; background: var(--bg); color: var(--text);
+  border-radius: 0 7px 7px 0; padding: 3px 8px; font-size: 12px; cursor: pointer;
+}
+.thinking-picker-trigger:hover { background: var(--hover); }
+.thinking-picker-trigger:disabled { opacity: .6; cursor: default; }
+.thinking-picker-caret { font-size: 9px; opacity: .7; }
+.thinking-picker-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; width: 226px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .45); padding: 9px 8px 8px;
+}
+.thinking-picker-head { font-size: 12.5px; font-weight: 600; padding: 0 8px 2px; }
+.thinking-picker-note { font-size: 11.5px; color: var(--muted); padding: 0 8px 6px; }
+.thinking-picker-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; border: none; background: transparent; color: var(--text);
+  padding: 5px 8px; border-radius: 6px; font: inherit; font-size: 12.5px; cursor: pointer; text-align: left;
+}
+.thinking-picker-item:hover { background: var(--hover); }
+.thinking-picker-item.selected { color: var(--accent); }
+.thinking-picker-item:disabled { cursor: default; opacity: .7; }
+.thinking-picker-check { color: var(--accent); }
+.thinking-picker-pending { color: var(--muted); }
+.thinking-picker-empty { color: var(--muted); font-size: 11.5px; line-height: 1.5; padding: 6px 8px; }
+.thinking-picker-retry {
+  margin: 4px 0 2px; padding: 3px 10px; font: inherit; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent;
+  color: var(--text); cursor: pointer;
+}
+.thinking-picker-retry:hover { background: var(--hover); }
+.thinking-picker-error { color: var(--red); font-size: 11.5px; padding: 6px 8px 2px; }
 .model-picker-trigger {
   display: inline-flex; align-items: center; gap: 6px; max-width: 240px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);

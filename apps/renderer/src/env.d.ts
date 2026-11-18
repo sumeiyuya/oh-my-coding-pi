@@ -43,6 +43,8 @@ type P1Api = Pick<
   | "clone"
   | "exportHtml"
   | "getAvailableModels"
+  | "getThinkingLevels"
+  | "setThinkingLevel"
   | "setModel"
   | "getPermission"
   | "setPermission"
@@ -113,6 +115,8 @@ type P1Api = Pick<
 >;
 
 declare global {
+  /** electron.vite.config.ts 从 apps/desktop/package.json 注入 */
+  const __APP_VERSION__: string;
   interface Window {
     api: P1Api;
   }

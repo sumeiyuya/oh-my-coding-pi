@@ -104,6 +104,7 @@ export type PiCommand =
   | { type: "set_model"; provider: string; modelId: string }
   | { type: "cycle_model" }
   | { type: "get_available_models" }
+  | { type: "get_available_thinking_levels" }
   | { type: "set_thinking_level"; level: ThinkingLevel }
   | { type: "compact"; customInstructions?: string }
   | { type: "switch_session"; sessionPath: SessionFile }
@@ -121,6 +122,21 @@ export type ThinkingLevel =
   | "high"
   | "xhigh"
   | "max";
+
+/** 运行期校验用：主进程收 IPC 时先过一遍，不把任意字符串转给 pi */
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
 
 export type PiRequestEnvelope = PiCommand & { id: string };
 
@@ -551,6 +567,8 @@ export interface AppSettingsDetail {
   readonlyNotebook: boolean;
   /** 三档权限；会话可单独覆盖（见 SessionMetaEntry.permissionMode） */
   permissionMode: PermissionMode;
+  /** 推理强度默认档：新会话/重启 pi 时沿用 */
+  thinkingLevel: ThinkingLevel;
 }
 
 /** 切模型的结果：失败时带上 pi 的原文，界面不能假装换过了。 */
@@ -783,6 +801,8 @@ export interface SessionState {
   messageCount: number;
   isStreaming: boolean;
   model: { provider: string; id: string } | null;
+  /** pi 当前会话实际生效的推理档（模型可能把请求的档钳制过） */
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface SessionStats {
@@ -1261,10 +1281,13 @@ export interface PreloadApi {
   getEntries(since?: EntryId): Promise<SessionEntriesResult>;
   getForkMessages(): Promise<ForkMessage[]>;
   getAvailableModels(): Promise<ModelInfo[]>;
+  /** 当前模型可用的推理档位（顺序以 pi 为准） */
+  getThinkingLevels(): Promise<ThinkingLevel[]>;
   switchSession(sessionFile: SessionFile): Promise<SessionSwitchResult>;
   fork(entryId: EntryId): Promise<ForkResult>;
   clone(): Promise<SessionSwitchResult>;
   setModel(provider: string, modelId: string): Promise<SetModelResult>;
+  setThinkingLevel(level: ThinkingLevel): Promise<SetModelResult>;
   getPermission(): Promise<PermissionState>;
   setPermission(mode: PermissionMode, asDefault: boolean): Promise<PermissionState>;
   exportHtml(outputPath?: string): Promise<string | null>;

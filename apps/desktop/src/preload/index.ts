@@ -17,6 +17,7 @@ import type {
   PermissionState,
   SessionState,
   SetModelResult,
+  ThinkingLevel,
   SessionStats,
   SessionMetaPatch,
   SessionMetaResult,
@@ -91,6 +92,9 @@ contextBridge.exposeInMainWorld("api", {
   exportHtml: (outputPath?: string): Promise<string | null> =>
     ipcRenderer.invoke("pi:export-html", outputPath),
   getAvailableModels: (): Promise<ModelInfo[]> => ipcRenderer.invoke("pi:models"),
+  getThinkingLevels: (): Promise<ThinkingLevel[]> => ipcRenderer.invoke("pi:thinking-levels"),
+  setThinkingLevel: (level: ThinkingLevel): Promise<SetModelResult> =>
+    ipcRenderer.invoke("pi:set-thinking-level", level),
   setModel: (provider: string, modelId: string): Promise<SetModelResult> =>
     ipcRenderer.invoke("pi:set-model", provider, modelId),
   getState: (): Promise<SessionState> => ipcRenderer.invoke("pi:state"),

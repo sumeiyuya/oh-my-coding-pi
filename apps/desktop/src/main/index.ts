@@ -43,6 +43,7 @@ import type {
   PromptResult,
   SessionState,
   SetModelResult,
+  ThinkingLevel,
   SessionStats,
   SessionSummary,
   SessionSwitchResult,
@@ -52,6 +53,7 @@ import type {
   WorkspaceOpenResult,
 } from "@oh-my-coding-pi/shared";
 import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX, UPLOAD_IMAGE_MAX_BYTES, UPLOAD_IMAGE_MAX_COUNT } from "@oh-my-coding-pi/shared";
+import { isThinkingLevel } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
@@ -175,6 +177,8 @@ const appSettings = {
   plugins: defaultFlags() as PluginFlags,
   /** 三档权限的应用默认值；会话可单独覆盖 */
   permissionMode: "ask-risky" as PermissionMode,
+  /** 推理强度默认档：新会话与 pi 重启后沿用（pi 自带默认值是 medium，这里保持一致） */
+  thinkingLevel: "medium" as ThinkingLevel,
 };
 interface PendingApproval {
   request: ApprovalRequest;
@@ -867,6 +871,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
     // defaults
   }
   supervisor.setModel(provider, model);
+  supervisor.setThinkingLevel(appSettings.thinkingLevel);
   try {
     writeFileSync(
       join(science, "workspace.json"),
@@ -920,6 +925,7 @@ function saveAppSettings(): void {
     existing.dailyLimit = appSettings.dailyLimit;
     existing.plugins = appSettings.plugins;
     existing.permissionMode = appSettings.permissionMode;
+    existing.thinkingLevel = appSettings.thinkingLevel;
     writeFileSync(settingsFile, JSON.stringify(existing, null, 2) + "\n", "utf8");
   } catch (err) {
     // 保存失败不阻断；但要让日志里留下痕迹，否则用户会以为设置已生效
@@ -951,6 +957,7 @@ function loadSettings(): void {
       dailyLimit?: number;
       plugins?: Record<string, unknown>;
       permissionMode?: unknown;
+      thinkingLevel?: unknown;
     };
     if (typeof data.policyPath === "string" && data.policyPath.trim()) {
       settingsPolicyPath = data.policyPath.trim();
@@ -978,6 +985,9 @@ function loadSettings(): void {
       data.permissionMode === "allow-all"
     ) {
       appSettings.permissionMode = data.permissionMode;
+    }
+    if (isThinkingLevel(data.thinkingLevel)) {
+      appSettings.thinkingLevel = data.thinkingLevel;
     }
     if (data.plugins && typeof data.plugins === "object") {
       // 只认插件册里登记过的键，且只接受 "0"/"1"：旧版本多出来的键直接丢弃
@@ -1893,6 +1903,10 @@ ipcMain.handle("pi:new-session", async () => {
     supervisor.setSessionFile(null);
     writeWorkspaceState({ lastSessionFile: null });
     void resetBudgetBaseline();
+    // 新会话沿用“设为默认”的推理档（旧会话各自保留自己的记录）
+    await rpc
+      .request({ type: "set_thinking_level", level: appSettings.thinkingLevel })
+      .catch(() => null);
   }
   return res.success;
 });
@@ -2783,6 +2797,30 @@ ipcMain.handle(
   },
 );
 
+ipcMain.handle("pi:thinking-levels", async (): Promise<ThinkingLevel[]> => {
+  // 失败必须抛错：空数组是合法结果（模型没有可调档位），两者不能混
+  const res = await rpc.request({ type: "get_available_thinking_levels" }, 8000);
+  if (!res.success) throw new Error(String(res.error ?? "pi 没有返回可用档位"));
+  const levels = (res.data as { levels?: unknown } | undefined)?.levels;
+  if (!Array.isArray(levels)) throw new Error("pi 返回的档位格式不正确");
+  return levels.filter(isThinkingLevel);
+});
+
+ipcMain.handle(
+  "pi:set-thinking-level",
+  async (_event, level: unknown): Promise<SetModelResult> => {
+    if (!isThinkingLevel(level)) return { ok: false, error: "未知的推理档位" };
+    const res = await rpc.request({ type: "set_thinking_level", level });
+    if (!res.success) {
+      return { ok: false, error: String(res.error ?? "").trim() || "pi 未说明原因" };
+    }
+    appSettings.thinkingLevel = level;
+    supervisor.setThinkingLevel(level);
+    saveAppSettings();
+    return { ok: true };
+  },
+);
+
 ipcMain.handle("pi:messages", async () => {
   const res = await rpc.request({ type: "get_messages" }, piReady ? 30_000 : 3_000);
   const data = res.data as { messages?: AgentMessage[] } | undefined;
@@ -2998,6 +3036,7 @@ ipcMain.handle(
     grantTtlDays: appSettings.grantTtlDays,
     readonlyNotebook: appSettings.readonlyNotebook,
     permissionMode: appSettings.permissionMode,
+    thinkingLevel: appSettings.thinkingLevel,
   }),
 );
 
@@ -3071,6 +3110,13 @@ ipcMain.handle(
       // 当前会话若没有单独覆盖，立即生效；有覆盖时保持会话档
       if (!sessionPermissionOverride()) policyService?.setMode(appSettings.permissionMode);
     }
+    if (isThinkingLevel(patch.thinkingLevel)) {
+      appSettings.thinkingLevel = patch.thinkingLevel;
+      supervisor.setThinkingLevel(patch.thinkingLevel);
+      await rpc
+        .request({ type: "set_thinking_level", level: patch.thinkingLevel })
+        .catch(() => null);
+    }
 
     const providerChanged = appSettings.provider !== beforeProvider;
     const modelChanged = appSettings.model !== beforeModel;
@@ -3119,6 +3165,7 @@ ipcMain.handle(
       grantTtlDays: appSettings.grantTtlDays,
       readonlyNotebook: appSettings.readonlyNotebook,
       permissionMode: appSettings.permissionMode,
+      thinkingLevel: appSettings.thinkingLevel,
     };
   },
 );

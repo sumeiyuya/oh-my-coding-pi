@@ -4,6 +4,7 @@ import Permissions from "./Permissions";
 import Settings from "./Settings";
 import PermissionPill from "./PermissionPill";
 import ModelPicker from "./ModelPicker";
+import ThinkingPicker from "./ThinkingPicker";
 import Sash from "./Sash";
 import RightDock from "./RightDock";
 import ArtifactsPane from "./ArtifactsPane";
@@ -64,6 +65,7 @@ import type {
   FileReadResult,
   FileStatResult,
   ImageAttachment,
+  ThinkingLevel,
   WorkspaceInfo,
   WorkspaceIndexEntry,
 } from "@oh-my-coding-pi/shared";
@@ -287,6 +289,8 @@ export default function App() {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelKey, setModelKey] = useState("");
+  /** pi 当前会话实际生效的推理档；null = 还没读到 state */
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
   /** 预检不通过时，就地打开「确认连接信息 + 存 key」对话框（PR2） */
   const [setupProvider, setSetupProvider] = useState<string | null>(null);
   const [tab, setTab] = useState<"sessions" | "tree">("sessions");
@@ -447,6 +451,7 @@ export default function App() {
       const m = state.model;
       const usable = m && m.provider && m.id && m.provider !== "unknown" && m.id !== "unknown";
       setModelKey(usable ? `${m.provider}/${m.id}` : "");
+      setThinkingLevel(state.thinkingLevel ?? null);
     } catch {
       // ignore
     }
@@ -1109,6 +1114,35 @@ export default function App() {
     return { ok: false, error: res.error ?? "切换模型失败" };
   }
 
+  /** 顶栏推理强度：只有 pi 接受才更新显示（与切模型同一纪律） */
+  async function changeThinkingLevel(level: ThinkingLevel): Promise<{ ok: boolean; error?: string }> {
+    const res = await window.api.setThinkingLevel(level).catch((err: unknown) => ({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    if (res.ok) {
+      setThinkingLevel(level);
+      return { ok: true };
+    }
+    return { ok: false, error: res.error ?? "切换推理强度失败" };
+  }
+
+  const loadThinkingLevels = useCallback((): Promise<ThinkingLevel[]> => {
+    // 不在这里吞异常：「pi 未响应」与「模型没有可调档位」必须能被组件区分
+    return window.api.getThinkingLevels();
+  }, []);
+
+  /** 模型明确标 reasoning:false 时隐藏下拉；列表里查不到就保留（不拿“未知”当“不支持”） */
+  const thinkingSupported = useMemo(() => {
+    if (!modelKey) return false;
+    const cut = modelKey.indexOf("/");
+    if (cut <= 0) return false;
+    const provider = modelKey.slice(0, cut);
+    const id = modelKey.slice(cut + 1);
+    const hit = models.find((m) => m.provider === provider && m.id === id);
+    return hit ? hit.reasoning !== false : true;
+  }, [modelKey, models]);
+
   async function abort() {
     abortedAt.current = Date.now();
     setBusy(false);
@@ -1232,6 +1266,7 @@ export default function App() {
       setStats(null);
       setCurrentFile(null);
       await refreshSessions();
+      await refreshState();
     }
   }
 
@@ -1615,7 +1650,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="side-head">
           <strong>oh my coding pi</strong>
-          <span className="tag">P2</span>
+          <span className="tag">v{__APP_VERSION__}</span>
         </div>
         <button className="side-new" onClick={() => void newSession()} disabled={busy}>
           ＋ 新建任务
@@ -1886,20 +1921,31 @@ export default function App() {
           <div className="bar-right">
             <PermissionPill />
             <ContextMeter sessionKey={currentFile} busy={busy} />
-            <ModelPicker
-              models={models}
-              value={modelKey}
-              disabled={busy}
-              onPick={changeModel}
-              triggerRef={modelSelectRef}
-            />
-            <button
-              className="dock-toggle"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              title="切换深色 / 亮色"
-            >
-              {theme === "dark" ? "亮色" : "深色"}
-            </button>
+            <span className="model-group">
+              <ModelPicker
+                models={models}
+                value={modelKey}
+                disabled={busy}
+                onPick={changeModel}
+                triggerRef={modelSelectRef}
+              />
+              {thinkingSupported && (
+                <ThinkingPicker
+                  level={thinkingLevel}
+                  disabled={busy}
+                  onOpenLevels={loadThinkingLevels}
+                  onPick={changeThinkingLevel}
+                />
+              )}
+            </span>
+            <span className={`status ${status}`}>{status}</span>
+            {busy && (
+              <button className="abort" onClick={abort}>
+                停止
+              </button>
+            )}
+          </div>
+          <div className="bar-fixed">
             <button
               ref={dockSwitchRef}
               className="dock-toggle dock-switch"
@@ -1910,12 +1956,6 @@ export default function App() {
             >
               {dockOpen ? `面板：${DOCK_LABEL[ui.dockTab]}` : "面板"}
             </button>
-            <span className={`status ${status}`}>{status}</span>
-            {busy && (
-              <button className="abort" onClick={abort}>
-                停止
-              </button>
-            )}
           </div>
         </header>
         {openTabs.length > 0 && (
@@ -2408,7 +2448,7 @@ export default function App() {
               {policy?.mode === "readonly" && <ReadonlyBanner />}
               {overlay === "permissions" && <Permissions />}
               {overlay === "skills" && <Skills />}
-              {overlay === "settings" && <Settings />}
+              {overlay === "settings" && <Settings theme={theme} onThemeChange={setTheme} />}
             </div>
           </div>
         </div>

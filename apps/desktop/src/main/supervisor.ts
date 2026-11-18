@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import type { BridgeStatus } from "@oh-my-coding-pi/shared";
+import type { BridgeStatus, ThinkingLevel } from "@oh-my-coding-pi/shared";
 import { expectedVersion, resolvePi, runVersion } from "./pi-runtime";
 
 export interface PiExit {
@@ -26,6 +26,8 @@ export class PiSupervisor extends EventEmitter {
   private cwd: string | null = null;
   /** 是否信任项目级资源（.pi/ 设置、项目扩展、.agents/skills） */
   private trustProject = false;
+  /** 推理强度默认档；启动时作为 --thinking 传给 pi */
+  private thinkingLevel: ThinkingLevel | null = null;
   private lastVersion: string | null = null;
 
   constructor(
@@ -88,6 +90,15 @@ export class PiSupervisor extends EventEmitter {
     return this.trustProject;
   }
 
+  /** 只影响下次启动；当前会话的档位由 RPC set_thinking_level 立即改 */
+  setThinkingLevel(level: ThinkingLevel | null): void {
+    this.thinkingLevel = level;
+  }
+
+  getThinkingLevel(): ThinkingLevel | null {
+    return this.thinkingLevel;
+  }
+
   getVersion(): string | null {
     return this.lastVersion;
   }
@@ -125,6 +136,7 @@ export class PiSupervisor extends EventEmitter {
     const args = ["--mode", "rpc"];
     if (this.provider) args.push("--provider", this.provider);
     if (this.model) args.push("--model", this.model);
+    if (this.thinkingLevel && !this.sessionFile) args.push("--thinking", this.thinkingLevel);
     if (this.sessionDir) args.push("--session-dir", this.sessionDir);
     if (this.sessionFile) args.push("--session", this.sessionFile);
     for (const ext of this.extensionPaths) args.push("--extension", ext);

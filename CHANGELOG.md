@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## 0.6.6 — 2026-11-18
+
+### 顶栏与外观
+
+- 「面板：X」移入独立固定区：控件换行时仍贴主区右缘，不被挤到第二行。
+- 顶栏「深色/浅色」按钮移入设置 → 新增「外观」卡（分段控件），切换立即生效并落 `localStorage`。
+- 侧栏标题旁徽章由写死的 `P2` 改为构建期注入的 `v0.6.6`（来源 `apps/desktop/package.json`）。
+
+### 推理强度
+
+- 模型按钮右侧新增推理强度下拉 `ThinkingPicker`；档位来自 pi 的 `get_available_thinking_levels`，不硬编码。
+- 改档立即生效并写入设置作为默认：新会话沿用，旧会话保留自己的档位记录；不支持推理的模型隐藏按钮。
+- 空态区分：pi 未响应（可重试）与模型无可用档位（建议换模型）；空态下不再渲染“点了没反应”的当前档。
+
+### 工程
+
+- 协议新增 `get_available_thinking_levels` 命令、`SessionState.thinkingLevel`、`ThinkingLevel` 校验常量；主进程新增 `pi:thinking-levels` / `pi:set-thinking-level`。
+- `supervisor` 仅在无旧会话可恢复时传 `--thinking`，避免覆盖会话记录。
+- 验证：`pnpm typecheck` / `pnpm build` / `layoutcheck` / 真机 CDP（推理菜单、切档回读、空态两分支、外观切换）。
+
 ## 0.6.5 — 2026-11-18
 
 ### 输入与上传
