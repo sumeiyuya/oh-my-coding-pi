@@ -12,9 +12,9 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 ## 版本
 
-- 当前版本：**0.6.6**（2026-11-18）
-- 发布说明：[`docs/release-notes-0.6.6.md`](docs/release-notes-0.6.6.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.6](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.6)
+- 当前版本：**0.6.7**（2026-11-18）
+- 发布说明：[`docs/release-notes-0.6.7.md`](docs/release-notes-0.6.7.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
+- 安装包：[GitHub Release v0.6.7](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.7)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么
@@ -30,18 +30,18 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 | 工作区 | 新建任务、工作区树与会话行菜单、最近工作区计数、右坞四面板（文件 / 笔记本 / 产物 / 运行）、产物就地预览 |
 | 诊断 | 回合级 `perf.jsonl`、错误分类、诊断包导出、内部自检模式 |
 
-0.6.6 的重点是**顶栏收口与推理强度**：面板按钮固定最右、颜色开关移入设置「外观」、模型旁新增推理强度下拉（档位来自 pi，改档即生效并记为默认）。细节见发布说明。
+0.6.7 的重点是**文件区树形折叠与顶栏布局收口**：文件区改为可展开的树（懒加载、键盘导航、展开状态保留）；控件栏贴会话区左缘；面板按钮真正固定在窗口最右，开合右坞不再移动。细节见发布说明。
 
 ## 安装
 
-1. 从 [Release v0.6.6](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.6) 下载 `oh.my.coding.pi.Setup.0.6.6.exe` 与 `SHA256SUMS.txt`。
+1. 从 [Release v0.6.7](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.7) 下载 `oh.my.coding.pi.Setup.0.6.7.exe` 与 `SHA256SUMS.txt`。
 2. 双击安装；默认装到 `%LOCALAPPDATA%\Programs\oh my coding pi\`。
 3. 静默安装（PowerShell）：
 
 ```powershell
-Start-Process "oh my coding pi Setup 0.6.6.exe" -ArgumentList "/S" -Wait
+Start-Process "oh my coding pi Setup 0.6.7.exe" -ArgumentList "/S" -Wait
 # 指定目录：/D 必须放最后，且不能加引号
-Start-Process "oh my coding pi Setup 0.6.6.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
+Start-Process "oh my coding pi Setup 0.6.7.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
 ```
 
 > 不要在 Git Bash 里直接传 `/S`，MSYS 会把它当路径。用 PowerShell。

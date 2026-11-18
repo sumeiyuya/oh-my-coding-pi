@@ -100,6 +100,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  grid-column: 2 / -1;
+  grid-row: 1;
+  height: 48px;
   padding: 0 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bar);
@@ -129,7 +132,8 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  /* 控件栏贴会话区左缘；面板按钮在 .bar-fixed 里用 margin-left:auto 占最右 */
+  justify-content: flex-start;
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -468,6 +472,8 @@ body {
   height: 100%;
   display: grid;
   grid-template-columns: var(--side-w, 280px) minmax(420px, 1fr) 0;
+  /* 第一行是横跨「主区 + 右坞」的顶栏，右坞从第二行开始 */
+  grid-template-rows: 48px minmax(0, 1fr);
 }
 
 .shell.dock-open {
@@ -487,7 +493,7 @@ body {
 }
 
 .sash.left { left: calc(var(--side-w, 280px) - 2px); }
-.sash.right { right: calc(var(--dock-w, 320px) - 2px); }
+.sash.right { top: 48px; right: calc(var(--dock-w, 320px) - 2px); }
 
 .sash::before {
   content: "";
@@ -618,6 +624,8 @@ body.sash-dragging {
 }
 
 .dock {
+  grid-column: 3;
+  grid-row: 2;
   border-left: 1px solid var(--line);
   background: var(--side);
   display: flex;
@@ -867,6 +875,67 @@ body.sash-dragging {
   font-size: 11px;
   margin-top: 10px;
 }
+/* ── 文件树（右坞「文件」页）── */
+.file-tree {
+  padding: 2px 0 4px;
+  max-height: 46vh;
+  overflow: auto;
+  outline: none;
+  border-radius: 6px;
+}
+.file-tree:focus-visible { box-shadow: inset 0 0 0 1px var(--focus); }
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tree-row:hover { background: var(--hover); }
+.tree-row.selected { background: var(--chip); }
+.tree-row.active { box-shadow: inset 0 0 0 1px var(--focus); }
+.tree-row.root .tree-name { font-weight: 600; }
+.tree-caret {
+  width: 14px; height: 14px; flex: 0 0 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted);
+}
+/* CSS 三角：不同字体下不会缩成一团 */
+.tree-caret::before {
+  content: "";
+  width: 0; height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.1s;
+}
+.tree-caret.open::before { transform: rotate(90deg); }
+.tree-caret.blank::before { display: none; }
+.tree-ico { width: 15px; height: 15px; flex: 0 0 15px; color: var(--muted); }
+.tree-ico.dir { color: #d8a94a; }
+:root[data-theme="light"] .tree-ico.dir { color: #b8862b; }
+.tree-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tree-size {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tree-link { color: var(--muted); font-size: 10.5px; }
+.tree-note { color: var(--muted); font-size: 11px; padding: 2px 6px; }
+.tree-note.error { color: var(--red); }
+.dock-preview { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+
 
 .dock-info {
   margin-top: 10px;
@@ -983,6 +1052,8 @@ body.sash-dragging {
 }
 
 .sidebar {
+  grid-column: 1;
+  grid-row: 1 / -1;
   border-right: 1px solid var(--line);
   background: var(--side);
   display: flex;
@@ -1174,6 +1245,8 @@ body.sash-dragging {
 }
 
 .main {
+  grid-column: 2;
+  grid-row: 2;
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-width: 0;
@@ -1378,6 +1451,11 @@ body.sash-dragging {
   .dock,
   .dock-toggle {
     display: none;
+  }
+  /* 单列时顶栏与主区都回到第 1 列 */
+  .bar,
+  .main {
+    grid-column: 1;
   }
 }
 

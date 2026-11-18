@@ -5,6 +5,7 @@ import Settings from "./Settings";
 import PermissionPill from "./PermissionPill";
 import ModelPicker from "./ModelPicker";
 import ThinkingPicker from "./ThinkingPicker";
+import FileTree from "./FileTree";
 import Sash from "./Sash";
 import RightDock from "./RightDock";
 import ArtifactsPane from "./ArtifactsPane";
@@ -61,7 +62,6 @@ import type {
   PickedUpload,
   UploadKind,
   FileEntry,
-  FileListResult,
   FileReadResult,
   FileStatResult,
   ImageAttachment,
@@ -129,6 +129,13 @@ function workspaceLabel(root: string | undefined): string {
   if (!root) return "未打开工作区";
   const parts = root.split(String.fromCharCode(92)).join("/").split("/").filter(Boolean);
   return parts[parts.length - 1] || root;
+}
+
+/** 文件树展开状态的存储键：路径太长，取短哈希避免 localStorage 键失控 */
+function fileTreeKey(root: string): string {
+  let hash = 5381;
+  for (let i = 0; i < root.length; i++) hash = ((hash << 5) + hash + root.charCodeAt(i)) | 0;
+  return `omcp.fileTree.${Math.abs(hash).toString(36)}`;
 }
 
 function sessionFileKey(file: string): string {
@@ -312,9 +319,9 @@ export default function App() {
   const [ui, setUi] = useState(loadUiState);
   const [dockOpen, setDockOpen] = useState(ui.dockOpen);
   const [sessionQuery, setSessionQuery] = useState("");
-  const [filePath, setFilePath] = useState("");
-  const [fileList, setFileList] = useState<FileListResult | null>(null);
-  const [fileLoading, setFileLoading] = useState(false);
+  /** 文件树：展开的目录（根 "" 总在）、选中的文件；按工作区持久化 */
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([""]));
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<FileStatResult | null>(null);
   const [preview, setPreview] = useState<FileReadResult | null>(null);
   const [modelError, setModelError] = useState<ModelErrorInfo | null>(null);
@@ -792,29 +799,70 @@ export default function App() {
     }
   }, [openTabs]);
 
-  const loadDir = useCallback(async (path: string) => {
-    setFileLoading(true);
-    setFileInfo(null);
-    setPreview(null);
-    try {
-      const res = await window.api.listFiles(path);
-      setFileList(res);
-      if (!res.error) setFilePath(res.path);
-    } catch {
-      setFileList({ path, entries: [], truncated: false, error: "读取失败" });
-    } finally {
-      setFileLoading(false);
-    }
+  const loadTreeDir = useCallback((path: string) => window.api.listFiles(path), []);
+
+  const toggleDir = useCallback((path: string) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   }, []);
 
-  // 打开右坞文件页、或换工作区时，回到根目录重新列
+  function openFromTree(path: string) {
+    setSelectedPath(path);
+    void selectFile(path);
+  }
+
+  /** 产物面板的「在文件中显示」：先逐级展开父目录，再选中并预览 */
+  function revealInTree(path: string) {
+    const segments = path.split("/").filter(Boolean);
+    const parents = [""];
+    for (let i = 1; i < segments.length; i++) parents.push(segments.slice(0, i).join("/"));
+    setExpandedDirs((prev) => new Set([...prev, ...parents]));
+    setSelectedPath(path);
+    setDockTab("files");
+    void selectFile(path);
+  }
+
+  /** 读过的存储键：避免“加载前”的初始值把旧展开状态覆盖掉 */
+  const fileTreeLoaded = useRef<string | null>(null);
+
+  // 换工作区：展开状态按工作区分键读取；选中与预览清空
   useEffect(() => {
-    if (!dockOpen || ui.dockTab !== "files" || !workspace?.root) return;
-    setFilePath("");
-    setFileInfo(null);
+    const root = workspace?.root ?? "";
+    setSelectedPath(null);
     setPreview(null);
-    void loadDir("");
-  }, [dockOpen, ui.dockTab, workspace?.root, loadDir]);
+    setFileInfo(null);
+    if (!root) {
+      fileTreeLoaded.current = null;
+      setExpandedDirs(new Set([""]));
+      return;
+    }
+    let next = new Set<string>([""]);
+    try {
+      const raw = localStorage.getItem(fileTreeKey(root));
+      const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) if (typeof item === "string") next.add(item);
+      }
+    } catch {
+      // 坏数据就当没存过
+    }
+    fileTreeLoaded.current = root;
+    setExpandedDirs(next);
+  }, [workspace?.root]);
+
+  useEffect(() => {
+    const root = workspace?.root;
+    if (!root || fileTreeLoaded.current !== root) return;
+    try {
+      localStorage.setItem(fileTreeKey(root), JSON.stringify([...expandedDirs].slice(0, 200)));
+    } catch {
+      // 写不进去只影响下次展开状态
+    }
+  }, [expandedDirs, workspace?.root]);
 
   async function selectFile(path: string) {
     setPreviewLoading(true);
@@ -1915,8 +1963,6 @@ export default function App() {
         onCommit={(next) => saveUiState({ sidebarWidth: clampWidth("sidebar", next) })}
       />
 
-      <div className="main">
-        <div className="top">
         <header className="bar">
           <div className="bar-right">
             <PermissionPill />
@@ -1958,6 +2004,10 @@ export default function App() {
             </button>
           </div>
         </header>
+
+      <div className="main">
+        <div className="top">
+
         {openTabs.length > 0 && (
           <div className="session-tabs" role="tablist" aria-label="已打开的会话">
             {openTabs.map((file) => {
@@ -2342,83 +2392,51 @@ export default function App() {
           saveUiState({ dockWidth: 320 });
         }}
         files={(
-
-              <div className="dock-files">
-                <div className="dock-crumbs">
-                  <button onClick={() => void loadDir("")} title="工作区根目录">
-                    根
+          <div className="dock-files">
+            {previewLoading && <div className="dock-empty">读取文件…</div>}
+            {workspace?.root ? (
+              <FileTree
+                rootName={workspaceLabel(workspace.root)}
+                expanded={expandedDirs}
+                selected={selectedPath}
+                onToggle={toggleDir}
+                onSelect={openFromTree}
+                load={loadTreeDir}
+              />
+            ) : (
+              <div className="dock-empty">没有打开工作区</div>
+            )}
+            {preview && (
+              <div className="dock-preview">
+                <div className="preview-head">
+                  <button
+                    onClick={() => {
+                      setPreview(null);
+                      setFileInfo(null);
+                      setSelectedPath(null);
+                    }}
+                    title="关闭预览"
+                  >
+                    ×
                   </button>
-                  {filePath.split("/").filter(Boolean).map((seg, i, arr) => (
-                    <span key={`${i}-${seg}`}>
-                      <span className="crumb-sep">/</span>
-                      <button onClick={() => void loadDir(arr.slice(0, i + 1).join("/"))}>{seg}</button>
-                    </span>
-                  ))}
+                  <span className="preview-name" title={preview.path}>
+                    {preview.path.split("/").pop() || preview.path}
+                  </span>
                 </div>
-                {fileLoading && <div className="dock-empty">读取中…</div>}
-                {previewLoading && <div className="dock-empty">读取文件…</div>}
-                {preview ? (
-                  <>
-                    <div className="preview-head">
-                      <button
-                        onClick={() => {
-                          setPreview(null);
-                          setFileInfo(null);
-                        }}
-                      >
-                        ← 列表
-                      </button>
-                      <span className="preview-name" title={preview.path}>
-                        {preview.path.split("/").pop() || preview.path}
-                      </span>
-                    </div>
-                    <div className="preview-meta">
-                      {formatSize(preview.size)}
-                      {fileInfo?.mtime ? ` · ${new Date(fileInfo.mtime).toLocaleString()}` : ""}
-                    </div>
-                    <FilePreview result={preview} />
-                  </>
-                ) : (
-                  <>
-                    {fileList?.error && <div className="dock-error">{fileList.error}</div>}
-                    {fileList && !fileList.error && (
-                      <>
-                        {fileList.entries.length === 0 && <div className="dock-empty">空目录</div>}
-                        <ul className="dock-list">
-                          {fileList.entries.map((e) => (
-                            <li key={e.path}>
-                              <button
-                                className={`dock-entry ${e.type}`}
-                                title={e.path}
-                                onClick={() => (e.type === "dir" ? void loadDir(e.path) : void selectFile(e.path))}
-                              >
-                                <span className="dock-name">
-                                  {e.type === "dir" ? "▸ " : ""}
-                                  {e.name}
-                                  {e.symlink ? " ↗" : ""}
-                                </span>
-                                {e.type === "file" && e.size !== undefined && (
-                                  <span className="dock-meta">{formatSize(e.size)}</span>
-                                )}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                        {fileList.truncated && <div className="dock-note">只列出前 1000 条</div>}
-                      </>
-                    )}
-                  </>
-                )}
-                <div className="dock-note">只读。不列 .git、node_modules、.omcp。</div>
+                <div className="preview-meta">
+                  {formatSize(preview.size)}
+                  {fileInfo?.mtime ? ` · ${new Date(fileInfo.mtime).toLocaleString()}` : ""}
+                </div>
+                <FilePreview result={preview} />
               </div>
+            )}
+            <div className="dock-note">只读。不列 .git、node_modules、.omcp。</div>
+          </div>
         )}
         artifacts={(
           <ArtifactsPane
             active={dockOpen && ui.dockTab === "artifacts"}
-            onReveal={(path) => {
-              setDockTab("files");
-              void selectFile(path);
-            }}
+            onReveal={revealInTree}
           />
         )}
         run={(
