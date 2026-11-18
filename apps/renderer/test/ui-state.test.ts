@@ -98,3 +98,19 @@ test("保存时宽度仍然被钳制", () => {
   assert.equal(s.getItem("omcp.global.sidebar-width"), String(UI_LIMITS.sidebar.min));
   assert.equal(s.getItem("omcp.global.dock-width"), String(UI_LIMITS.dock.max));
 });
+
+test("修改3：旧左栏折叠键被删除，状态里不再有 sidebarCollapsed", () => {
+  const s = freshStorage();
+  s.setItem("omcp.global.sidebar-collapsed", "1");
+  const ui = loadUiState();
+  assert.equal((ui as Record<string, unknown>).sidebarCollapsed, undefined);
+  assert.equal(s.getItem("omcp.global.sidebar-collapsed"), null);
+});
+
+test("展开的工作区分组可保存/读回", () => {
+  const s = freshStorage();
+  saveUiState({ expandedWorkspaces: ["D:\a", "D:\b"] });
+  assert.deepEqual(loadUiState().expandedWorkspaces, ["D:\a", "D:\b"]);
+  s.setItem("omcp.global.expanded-workspaces", "not json");
+  assert.deepEqual(loadUiState().expandedWorkspaces, []);
+});

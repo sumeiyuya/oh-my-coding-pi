@@ -1,28 +1,27 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DockTab } from "./ui-state";
 
 /**
- * 右坞（PR2）：从「一个开关」变成「一组房客」。
- *
- * 借自 DAWN 的 `state/right-dock.ts`：
- * - 房客（文件 / 笔记本 / 产物 / 运行）各自独立，切换只改当前房客；
- * - 坞不随左侧视图（对话/路线/设置）收起——"一边看设置一边看图"是成立的动线；
- * - 收起后右侧留下 40px 图标条：点哪个房客就以它展开（2026-11-16，无布局模式后）；
+ * 右坞（修改3，参照 DAWN）：
+ * - 顶部是标签条 + `⋯` 更多 + `×` 关闭；
+ * - 关闭后不保留 40px 图标条，主区占满；顶栏「面板：X」负责重新打开；
  * - 面板只藏不卸，笔记本只能存在一份。
  */
 
-const TABS: Array<{ id: DockTab; label: string; hint: string; icon: string }> = [
-  { id: "files", label: "文件", hint: "浏览工作区（只读）", icon: "文" },
-  { id: "notebook", label: "笔记本", hint: "Python / R 单元格", icon: "记" },
-  { id: "artifacts", label: "产物", hint: "账本 + figures/ 与 results/", icon: "产" },
-  { id: "run", label: "运行", hint: "内核、方案门与本次会话", icon: "运" },
+const TABS: Array<{ id: DockTab; label: string; hint: string }> = [
+  { id: "files", label: "文件", hint: "浏览工作区（只读）" },
+  { id: "notebook", label: "笔记本", hint: "Python / R 单元格" },
+  { id: "artifacts", label: "产物", hint: "账本 + figures/ 与 results/" },
+  { id: "run", label: "运行", hint: "内核、方案门与本次会话" },
 ];
 
 export default function RightDock({
   open,
   tab,
   onTab,
-  onOpen,
+  onClose,
+  onResetWidth,
+  counts,
   files,
   notebook,
   artifacts,
@@ -31,46 +30,107 @@ export default function RightDock({
   open: boolean;
   tab: DockTab;
   onTab: (tab: DockTab) => void;
-  onOpen: () => void;
+  onClose: () => void;
+  onResetWidth: () => void;
+  /** 可选：标签上的数量（例如「产物 54」） */
+  counts?: Partial<Record<DockTab, number>>;
   files: ReactNode;
   notebook: ReactNode;
   artifacts: ReactNode;
   run: ReactNode;
 }) {
+  const [menu, setMenu] = useState(false);
+  const moreRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) setMenu(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!moreRef.current?.parentElement?.contains(e.target as Node)) setMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMenu(false);
+        moreRef.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
   return (
-    <aside className={`dock ${open ? "" : "dock-collapsed"}`} aria-label="工作坞">
-      {!open && (
-        <div className="dock-rail" role="tablist" aria-label="工作坞面板">
+    <aside
+      id="right-dock"
+      className={`dock ${open ? "" : "dock-collapsed"}`}
+      aria-label="工作坞"
+      aria-hidden={!open}
+    >
+      <div className="dock-head">
+        <div className="dock-tabs" role="tablist" aria-label="工作坞面板">
           {TABS.map((t) => (
             <button
               key={t.id}
               role="tab"
               aria-selected={tab === t.id}
-              title={open ? t.hint : `${t.label}：${t.hint}`}
+              title={t.hint}
               className={tab === t.id ? "active" : ""}
-              onClick={() => {
-                onTab(t.id);
-                onOpen();
-              }}
+              onClick={() => onTab(t.id)}
             >
-              {t.icon}
+              {t.label}
+              {counts?.[t.id] !== undefined && (
+                <span className="dock-count">{counts[t.id]}</span>
+              )}
             </button>
           ))}
         </div>
-      )}
-      <div className="dock-tabs" role="tablist" aria-label="工作坞面板">
-        {TABS.map((t) => (
+        <div className="dock-head-actions">
           <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            title={t.hint}
-            className={tab === t.id ? "active" : ""}
-            onClick={() => onTab(t.id)}
+            ref={moreRef}
+            type="button"
+            className="dock-icon"
+            aria-label="更多"
+            aria-haspopup="menu"
+            aria-expanded={menu}
+            onClick={() => setMenu((v) => !v)}
           >
-            {t.label}
+            ⋯
           </button>
-        ))}
+          <button type="button" className="dock-icon" aria-label="关闭面板" onClick={onClose}>
+            ×
+          </button>
+          {menu && (
+            <div className="dock-menu" role="menu" aria-label="面板操作">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(false);
+                  onResetWidth();
+                }}
+              >
+                重置面板宽度
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(false);
+                  onClose();
+                }}
+              >
+                关闭面板
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <div className="dock-body" style={{ display: tab === "files" ? undefined : "none" }}>
         {files}

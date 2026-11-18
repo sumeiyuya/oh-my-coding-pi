@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import Notebook from "./Notebook";
 import Permissions from "./Permissions";
 import Settings from "./Settings";
@@ -24,6 +24,7 @@ import Route from "./Route";
 import ApprovalModal from "./ApprovalModal";
 import FilePreview from "./FilePreview";
 import Markdown from "./Markdown";
+import UploadMenu from "./UploadMenu";
 import ToolCard from "./ToolCard";
 import ToolGroup from "./ToolGroup";
 import { messagesFromAgent } from "./tool-rebuild";
@@ -32,6 +33,11 @@ import { copyText } from "./clipboard";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
 import { applyMention, mentionInsert, mentionQueryParts, parseMention } from "./mention";
 import { TABS_KEY, TABS_MAX, pruneTabs, pushTab, sanitizeTabs } from "./session-tabs";
+import {
+  UPLOAD_IMAGE_MAX_BYTES,
+  UPLOAD_IMAGE_MAX_COUNT,
+  UPLOAD_IMAGE_TOTAL_BYTES,
+} from "@oh-my-coding-pi/shared";
 import type {
   AgentMessage,
   AppError,
@@ -51,12 +57,15 @@ import type {
   SessionTreeResult,
   SessionTreeNode,
   ForkResult,
+  PickedUpload,
+  UploadKind,
   FileEntry,
   FileListResult,
   FileReadResult,
   FileStatResult,
   ImageAttachment,
   WorkspaceInfo,
+  WorkspaceIndexEntry,
 } from "@oh-my-coding-pi/shared";
 
 type Msg = { id?: string } & (
@@ -113,17 +122,11 @@ function formatRelative(iso: string | undefined): string {
   return new Date(t).toLocaleDateString();
 }
 
-/** 会话分组：今天 / 昨天 / 更早（PR3） */
-function sessionGroupOf(updatedAt: string | undefined): string {
-  if (!updatedAt) return "更早";
-  const then = new Date(updatedAt);
-  if (Number.isNaN(then.getTime())) return "更早";
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const t = then.getTime();
-  if (t >= startOfToday) return "今天";
-  if (t >= startOfToday - 86_400_000) return "昨天";
-  return "更早";
+/** 工作区显示名：最后一段目录；根路径兜底 */
+function workspaceLabel(root: string | undefined): string {
+  if (!root) return "未打开工作区";
+  const parts = root.split(String.fromCharCode(92)).join("/").split("/").filter(Boolean);
+  return parts[parts.length - 1] || root;
 }
 
 function sessionFileKey(file: string): string {
@@ -143,6 +146,13 @@ const OVERLAY_TITLE = {
   skills: "技能",
   settings: "设置",
 } as const;
+
+const DOCK_LABEL: Record<DockTab, string> = {
+  files: "文件",
+  notebook: "笔记本",
+  artifacts: "产物",
+  run: "运行",
+};
 
 const POLICY_LABEL: Record<PolicyMode, string> = {
   ask: "请求批准",
@@ -237,6 +247,11 @@ function TreeNodeView({
 export default function App() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [workspaceIndex, setWorkspaceIndex] = useState<WorkspaceIndexEntry[]>([]);
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
+    () => new Set(loadUiState().expandedWorkspaces),
+  );
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [sessionMeta, setSessionMeta] = useState<Record<string, SessionMetaEntry>>({});
   const [metaIgnored, setMetaIgnored] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -306,10 +321,15 @@ export default function App() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelSelectRef = useRef<HTMLButtonElement>(null);
+  const dockSwitchRef = useRef<HTMLButtonElement>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [attachments, setAttachments] = useState<
     Array<{ id: string; data: string; mimeType: string }>
   >([]);
+  /** 正在复制的外部文件：进度与取消都看它 */
+  const [uploading, setUploading] = useState<{ id: string; name: string; percent: number } | null>(
+    null,
+  );
   const [policy, setPolicy] = useState<PolicyInfo | null>(null);
   const pendingText = useRef("");
   /** 工具中间输出节流：同一 toolCallId 最快 150 ms 更新一次 */
@@ -343,6 +363,18 @@ export default function App() {
       setMetaIgnored(false);
     }
   }, []);
+
+  const refreshWorkspaceIndex = useCallback(async () => {
+    try {
+      setWorkspaceIndex(await window.api.getWorkspaceIndex());
+    } catch {
+      setWorkspaceIndex([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshWorkspaceIndex();
+  }, [workspace?.root, sessions.length, refreshWorkspaceIndex]);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -611,6 +643,18 @@ export default function App() {
       }
     });
 
+    const offUpload = window.api.onUploadProgress((p) => {
+      setUploading((cur) =>
+        cur && cur.id === p.importId
+          ? {
+              ...cur,
+              name: p.file,
+              percent: p.totalBytes > 0 ? Math.round((p.copiedBytes / p.totalBytes) * 100) : 0,
+            }
+          : cur,
+      );
+    });
+
     const offTurn = window.api.onTurnPhase((ev) => {
       switch (ev.phase) {
         case "accepted":
@@ -676,6 +720,7 @@ export default function App() {
     return () => {
       offEvent();
       offTurn();
+      offUpload();
       offPiReady();
       offStatus();
       offError();
@@ -709,6 +754,17 @@ export default function App() {
     window.addEventListener("omcp:models-changed", onChange);
     return () => window.removeEventListener("omcp:models-changed", onChange);
   }, [refreshModels]);
+
+  useEffect(() => {
+    if (!menuFor) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".session-menu") || target?.closest(".session-more")) return;
+      setMenuFor(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuFor]);
 
   useEffect(() => {
     if (!notice) return;
@@ -1123,6 +1179,50 @@ export default function App() {
     await refreshSessions();
   }
 
+  async function togglePin(file: string, pinned: boolean) {
+    const res = await window.api
+      .setSessionMeta(file, { pinned })
+      .catch(() => ({ ok: false, error: "置顶失败" }));
+    if (!res.ok) setNotice(res.error || "置顶失败");
+    await refreshSessions();
+  }
+
+  /** 行内菜单的克隆/导出/树：必要时先切到目标会话 */
+  async function withSession(file: string, fn: () => void | Promise<void>) {
+    if (busy) {
+      setNotice("正在运行，先停止再操作");
+      return;
+    }
+    if (file !== currentFile) await loadSession(file);
+    await fn();
+  }
+
+  async function cloneFrom(file: string) {
+    await withSession(file, cloneCurrent);
+  }
+
+  async function exportFrom(file: string) {
+    await withSession(file, exportHtml);
+  }
+
+  async function openTree(file: string) {
+    await withSession(file, () => {
+      setTab("tree");
+    });
+  }
+
+  async function removeSession(file: string) {
+    if (!window.confirm("把这段会话移到 .omcp/trash/sessions？会话文件不会立即删除。")) return;
+    const res = await window.api.deleteSession(file).catch(() => ({ ok: false, error: "删除失败" }));
+    if (!res.ok) {
+      setNotice(res.error || "删除失败");
+      return;
+    }
+    setNotice("已移到回收站");
+    await refreshSessions();
+    await refreshWorkspaceIndex();
+  }
+
   async function newSession() {
     if (busy) return;
     const ok = await window.api.newSession().catch(() => false);
@@ -1199,23 +1299,188 @@ export default function App() {
     return Boolean(found.input?.includes("image"));
   })();
 
-  const addImageFiles = useCallback(async (files: File[]) => {
-    const images = files.filter((f) => f.type.startsWith("image/"));
-    if (images.length === 0) return;
-    const next: Array<{ id: string; data: string; mimeType: string }> = [];
-    for (const file of images.slice(0, 4)) {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      next.push({
-        id: `${file.name}-${Date.now()}-${next.length}`,
-        data: btoa(binary),
-        mimeType: file.type || "image/png",
+  const addImageFiles = useCallback(
+    async (files: File[]) => {
+      const images = files.filter((f) => f.type.startsWith("image/"));
+      if (images.length === 0) return;
+      const accepted: Array<{ id: string; data: string; mimeType: string; size: number }> = [];
+      let skipped = 0;
+      for (const file of images) {
+        if (file.size > UPLOAD_IMAGE_MAX_BYTES) {
+          skipped += 1;
+          continue;
+        }
+        if (accepted.length >= UPLOAD_IMAGE_MAX_COUNT) {
+          skipped += 1;
+          continue;
+        }
+        const buf = await file.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        accepted.push({
+          id: `${file.name}-${Date.now()}-${accepted.length}`,
+          data: btoa(binary),
+          mimeType: file.type || "image/png",
+          size: file.size,
+        });
+      }
+
+      let total = attachments.reduce(
+        (sum, a) => sum + Math.ceil((a.data.length * 3) / 4),
+        0,
+      );
+      const out = [...attachments];
+      for (const item of accepted) {
+        if (out.length >= UPLOAD_IMAGE_MAX_COUNT) {
+          skipped += 1;
+          continue;
+        }
+        if (total + item.size > UPLOAD_IMAGE_TOTAL_BYTES) {
+          skipped += 1;
+          continue;
+        }
+        out.push({ id: item.id, data: item.data, mimeType: item.mimeType });
+        total += item.size;
+      }
+      setAttachments(out);
+      if (skipped > 0) {
+        setNotice(
+          `已忽略 ${skipped} 张图片（最多 ${UPLOAD_IMAGE_MAX_COUNT} 张，单张 ≤4 MB，总计 ≤12 MB）`,
+        );
+      }
+    },
+    [attachments],
+  );
+
+  /** 图片对话框选中的项：data 已由主进程读好 */
+  function addPickedImages(picked: PickedUpload[]) {
+    let total = attachments.reduce(
+      (sum, a) => sum + Math.ceil((a.data.length * 3) / 4),
+      0,
+    );
+    const out = [...attachments];
+    let skipped = 0;
+    for (const f of picked) {
+      if (!f.data) continue;
+      if (out.length >= UPLOAD_IMAGE_MAX_COUNT) {
+        skipped += 1;
+        continue;
+      }
+      if (f.size > UPLOAD_IMAGE_MAX_BYTES) {
+        skipped += 1;
+        continue;
+      }
+      if (total + f.size > UPLOAD_IMAGE_TOTAL_BYTES) {
+        skipped += 1;
+        continue;
+      }
+      out.push({
+        id: `pick-${Date.now()}-${out.length}`,
+        data: f.data,
+        mimeType: f.mimeType ?? "image/png",
       });
+      total += f.size;
     }
-    setAttachments((cur) => [...cur, ...next].slice(0, 4));
-  }, []);
+    setAttachments(out);
+    if (skipped > 0) {
+      setNotice(
+        `已忽略 ${skipped} 张图片（最多 ${UPLOAD_IMAGE_MAX_COUNT} 张，单张 ≤4 MB，总计 ≤12 MB）`,
+      );
+    }
+  }
+
+  /** 在光标处插入 @ 引用；路径不能含空白（外部/含空格文件已复制为安全名） */
+  function insertReferences(paths: string[]) {
+    const clean = [...new Set(paths.filter(Boolean))].filter(
+      (p) => !input.includes(`@${p}`),
+    );
+    if (clean.length === 0) {
+      setNotice("已在输入框中");
+      return;
+    }
+    setInput((prev) => {
+      const el = textareaRef.current;
+      const caret = el?.selectionStart ?? prev.length;
+      const before = prev.slice(0, caret);
+      const pad = before.length > 0 && !/\s$/.test(before) ? " " : "";
+      const text = clean.map((p) => `@${p} `).join("");
+      const next = before + pad + text + prev.slice(caret);
+      requestAnimationFrame(() => {
+        const pos = (before + pad + text).length;
+        el?.focus();
+        el?.setSelectionRange(pos, pos);
+      });
+      return next;
+    });
+    setNotice(`已引用 ${clean.length} 个文件`);
+  }
+
+  /** 外部/含空格文件：复制到 .omcp/uploads，成功后插入引用 */
+  async function importPaths(paths: string[], totalBytes = 0) {
+    if (paths.length === 0) return;
+    if (
+      totalBytes > 1024 * 1024 * 1024 &&
+      !window.confirm(
+        `将复制约 ${(totalBytes / 1024 / 1024 / 1024).toFixed(1)} GB，可能需要较长时间。继续？`,
+      )
+    ) {
+      return;
+    }
+    const importId = `u${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const name =
+      paths.length === 1
+        ? paths[0].split(String.fromCharCode(92)).join("/").split("/").pop() || "文件"
+        : `${paths.length} 个文件`;
+    setUploading({ id: importId, name, percent: 0 });
+    try {
+      const res = await window.api.importUploads(paths, importId);
+      if (res.files.length > 0) insertReferences(res.files);
+      if (!res.ok) setNotice(res.error ?? "部分文件上传失败");
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "上传失败");
+    } finally {
+      setUploading(null);
+    }
+  }
+
+  async function pickUpload(kind: UploadKind) {
+    if (!workspace) {
+      setNotice("先打开工作区");
+      return;
+    }
+    let res;
+    try {
+      res = await window.api.pickUpload(kind);
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "打开文件对话框失败");
+      return;
+    }
+    if (res.canceled) return;
+    if (res.rejected && res.rejected.length > 0) {
+      setNotice(
+        `未上传：${res.rejected
+          .map((r) => (r.name ? `${r.name}（${r.reason}）` : r.reason))
+          .join("；")}`,
+      );
+    }
+    if (kind === "image") {
+      addPickedImages(res.files);
+      return;
+    }
+    const inside = res.files.filter(
+      (f) => f.insideWorkspace && f.relative && !/\s/.test(f.relative),
+    );
+    if (inside.length > 0) insertReferences(inside.map((f) => f.relative!));
+    const insidePaths = new Set(inside.map((f) => f.path));
+    const external = res.files.filter((f) => !insidePaths.has(f.path));
+    if (external.length > 0) {
+      await importPaths(
+        external.map((f) => f.path),
+        external.reduce((sum, f) => sum + f.size, 0),
+      );
+    }
+  }
 
   const respondApproval = useCallback(
     (scope: ApprovalScope) => {
@@ -1275,42 +1540,49 @@ export default function App() {
       return next;
     });
 
-  const openDock = (tab?: DockTab) => {
-    if (tab) setDockTab(tab);
-    setDockOpen(true);
-    saveUiState({ dockOpen: true });
-  };
-
   /** 会话列表的可见集合：搜索 + 归档过滤 + 按更新时间倒序（PR3） */
+  const archivedCount = Object.values(sessionMeta).filter((e) => e.archived === true).length;
+
   const visibleSessions = sessions
-    .filter((s) => showArchived || !sessionMeta[sessionFileKey(s.sessionFile)]?.archived || s.sessionFile === currentFile)
+    .filter((s) => {
+      const entry = sessionMeta[sessionFileKey(s.sessionFile)];
+      // 已归档视图只看归档；主列表看未归档（当前会话即使归档也保留，避免“打开着却消失”）
+      if (showArchived) return entry?.archived === true;
+      return !entry?.archived || s.sessionFile === currentFile;
+    })
     .filter((s) => {
       const q = sessionQuery.trim().toLowerCase();
       if (!q) return true;
       const title = sessionMeta[sessionFileKey(s.sessionFile)]?.title ?? "";
       return `${title} ${s.sessionId} ${s.sessionFile}`.toLowerCase().includes(q);
     })
-    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-
-  const toggleSidebar = () => {
-    setUi((cur) => {
-      const next = { ...cur, sidebarCollapsed: !cur.sidebarCollapsed };
-      saveUiState({ sidebarCollapsed: next.sidebarCollapsed });
-      return next;
+    .sort((a, b) => {
+      const pa = sessionMeta[sessionFileKey(a.sessionFile)]?.pinned ? 1 : 0;
+      const pb = sessionMeta[sessionFileKey(b.sessionFile)]?.pinned ? 1 : 0;
+      if (pa !== pb) return pb - pa;
+      return String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? ""));
     });
+
+  const recentWorkspaces = workspaceIndex.filter((e) => {
+    if (e.root === workspace?.root) return false;
+    const q = sessionQuery.trim().toLowerCase();
+    if (!q) return true;
+    return `${workspaceLabel(e.root)} ${e.root}`.toLowerCase().includes(q);
+  });
+
+  /** 修改3：关闭右坞后焦点回到顶栏「面板」开关 */
+  const closeDock = () => {
+    setDockOpen(false);
+    saveUiState({ dockOpen: false });
+    requestAnimationFrame(() => dockSwitchRef.current?.focus());
   };
 
-  /** 快捷键：Ctrl+B 左栏 / Ctrl+J 右坞 / Ctrl+Alt+1..4 右坞面板（Ctrl+1..4 空置） */
+  /** 快捷键：Ctrl+J 右坞 / Ctrl+Alt+1..4 右坞面板（Ctrl+1..4、Ctrl+B 空置） */
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (e.key === "b" || e.key === "B") {
-        e.preventDefault();
-        toggleSidebar();
-        return;
-      }
       if (e.key === "j" || e.key === "J") {
         e.preventDefault();
         toggleDock();
@@ -1334,7 +1606,7 @@ export default function App() {
 
   return (
     <div
-      className={`shell${dockOpen ? " dock-open" : ""}${ui.sidebarCollapsed ? " side-collapsed" : ""}`}
+      className={`shell${dockOpen ? " dock-open" : ""}`}
       style={{
         ["--side-w" as string]: `${ui.sidebarWidth}px`,
         ["--dock-w" as string]: `${ui.dockWidth}px`,
@@ -1345,131 +1617,229 @@ export default function App() {
           <strong>oh my coding pi</strong>
           <span className="tag">P2</span>
         </div>
-        <div className="workspace">
-          <div className="ws-name" title={workspace?.root}>
-            {workspace ? workspace.root.split(/[\/]/).filter(Boolean).pop() : "…"}
-          </div>
-          <div className="ws-path" title={workspace?.root ?? ""}>
-            {workspace?.root ?? "未打开工作区"}
-          </div>
-          <div className="ws-meta">
-            <span className="pill">{sessions.length} 会话</span>
-            <span className="pill">{(workspace?.recent ?? []).length} 最近</span>
-          </div>
-          <div className="ws-actions">
-            <select value="" onChange={(e) => openWorkspacePath(e.target.value)}>
-              <option value="">最近工作区</option>
-              {(workspace?.recent ?? []).map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-            <button onClick={pickWorkspace}>切换</button>
-          </div>
-        </div>
-        <div className="side-tabs">
-          <button className={tab === "sessions" ? "active" : ""} onClick={() => setTab("sessions")}>
-            会话
-          </button>
-          <button className={tab === "tree" ? "active" : ""} onClick={() => setTab("tree")}>
-            树
+        <button className="side-new" onClick={() => void newSession()} disabled={busy}>
+          ＋ 新建任务
+        </button>
+        <div className="side-ws-head">
+          <span>工作区</span>
+          <button className="side-ws-add" onClick={() => void pickWorkspace()} title="切换工作区">
+            ＋
           </button>
         </div>
-        <div className="side-actions">
-          <button onClick={newSession} disabled={busy}>
-            新建
-          </button>
-          <button onClick={cloneCurrent} disabled={busy}>
-            克隆
-          </button>
-          <button onClick={exportHtml}>导出</button>
-          <button className={showArchived ? "active" : ""} onClick={() => setShowArchived((v) => !v)} title="显示或隐藏已归档会话">
-            归档
-          </button>
-        </div>
+        <input
+          className="side-search"
+          value={sessionQuery}
+          placeholder="搜索工作区 / 会话…"
+          spellCheck={false}
+          onChange={(e) => setSessionQuery(e.target.value)}
+          aria-label="搜索工作区或会话"
+        />
         {tab === "sessions" ? (
           <div className="session-list">
-            <input
-              className="side-search"
-              value={sessionQuery}
-              placeholder="搜索会话…"
-              spellCheck={false}
-              onChange={(e) => setSessionQuery(e.target.value)}
-              aria-label="搜索会话"
-            />
-            {sessions.length === 0 && <div className="side-empty">还没有会话</div>}
             {metaIgnored && (
               <div className="side-empty">标题文件损坏，已忽略。会话列表不受影响。</div>
             )}
-            {visibleSessions.length === 0 && sessions.length > 0 && (
-              <div className="side-empty">{sessionQuery.trim() ? "没有匹配的会话" : "没有未归档会话"}</div>
-            )}
-            {visibleSessions
-              .map((s, index) => {
-                const group = sessionGroupOf(s.updatedAt);
-                const prev = index > 0 ? sessionGroupOf(visibleSessions[index - 1]!.updatedAt) : null;
-                const key = sessionFileKey(s.sessionFile);
-                const entry = sessionMeta[key];
-                const label = entry?.title || s.sessionId.slice(0, 8);
-                return (
-                  <Fragment key={s.sessionFile}>
-                  {group !== prev && <div className="side-group">{group}</div>}
-                  <div
-                    className={`session ${s.sessionFile === currentFile ? "active" : ""} ${entry?.archived ? "archived" : ""}`}
-                  >
-                    {renamingFile === s.sessionFile ? (
-                      <input
-                        className="session-rename"
-                        value={renameValue}
-                        autoFocus
-                        maxLength={80}
-                        onChange={(e) => setRenameValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void commitRename(s.sessionFile);
-                          if (e.key === "Escape") {
-                            renameCancelled.current = true;
-                            setRenamingFile(null);
-                          }
-                        }}
-                        onBlur={() => void commitRename(s.sessionFile)}
-                      />
-                    ) : (
-                      <button
-                        className="session-open"
-                        onClick={() => loadSession(s.sessionFile)}
-                        title={entry?.title ? `${entry.title}\n${s.sessionFile}` : s.sessionFile}
-                      >
-                        <span className="sid">{label}</span>
-                        <span className="stamp">
-                          {entry?.archived ? "归档 · " : ""}
-                          {formatRelative(s.updatedAt)}
-                        </span>
-                      </button>
-                    )}
-                    <span className="session-tools">
+            <div className="ws-group open">
+              <div className="ws-group-head static">
+                <span className="caret">▾</span>
+                <span className="ws-name" title={workspace?.root}>
+                  {workspaceLabel(workspace?.root)}
+                </span>
+                <span className="count">{sessions.length}</span>
+              </div>
+              <div className="ws-sessions">
+                {visibleSessions.map((s) => {
+                  const key = sessionFileKey(s.sessionFile);
+                  const entry = sessionMeta[key];
+                  const label = entry?.title || s.sessionId.slice(0, 8);
+                  const open = menuFor === s.sessionFile;
+                  return (
+                    <div
+                      key={s.sessionFile}
+                      className={`session ${s.sessionFile === currentFile ? "active" : ""} ${
+                        entry?.archived ? "archived" : ""
+                      } ${entry?.pinned ? "pinned" : ""}`}
+                    >
+                      {renamingFile === s.sessionFile ? (
+                        <input
+                          className="session-rename"
+                          value={renameValue}
+                          autoFocus
+                          maxLength={80}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void commitRename(s.sessionFile);
+                            if (e.key === "Escape") {
+                              renameCancelled.current = true;
+                              setRenamingFile(null);
+                            }
+                          }}
+                          onBlur={() => void commitRename(s.sessionFile)}
+                        />
+                      ) : (
+                        <button
+                          className="session-open"
+                          onClick={() => void loadSession(s.sessionFile)}
+                          title={entry?.title ? `${entry.title}\n${s.sessionFile}` : s.sessionFile}
+                        >
+                          <span className="sid">
+                            {entry?.pinned ? "★ " : ""}
+                            {label}
+                          </span>
+                          <span className="stamp">{formatRelative(s.updatedAt)}</span>
+                        </button>
+                      )}
                       <button
                         type="button"
-                        className="mini"
-                        onClick={() => {
-                          renameCancelled.current = false;
-                          setRenamingFile(s.sessionFile);
-                          setRenameValue(entry?.title || "");
+                        className="session-more"
+                        aria-label="会话操作"
+                        aria-haspopup="menu"
+                        aria-expanded={open}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMenuFor(open ? null : s.sessionFile);
                         }}
                       >
-                        重命名
+                        ⋯
                       </button>
-                      <button type="button" className="mini" onClick={() => void toggleArchive(s.sessionFile, !entry?.archived)}>
-                        {entry?.archived ? "还原" : "归档"}
-                      </button>
-                    </span>
+                      {open && (
+                        <div className="session-menu" role="menu" aria-label={`${label} 的操作`}>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              renameCancelled.current = false;
+                              setRenamingFile(s.sessionFile);
+                              setRenameValue(entry?.title || "");
+                            }}
+                          >
+                            重命名
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void togglePin(s.sessionFile, !entry?.pinned);
+                            }}
+                          >
+                            {entry?.pinned ? "取消置顶" : "置顶"}
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void toggleArchive(s.sessionFile, !entry?.archived);
+                            }}
+                          >
+                            {entry?.archived ? "还原" : "归档"}
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void cloneFrom(s.sessionFile);
+                            }}
+                          >
+                            克隆
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void exportFrom(s.sessionFile);
+                            }}
+                          >
+                            导出
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void openTree(s.sessionFile);
+                            }}
+                          >
+                            在树中查看
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuFor(null);
+                              void removeSession(s.sessionFile);
+                            }}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {visibleSessions.length === 0 && (
+                  <div className="side-empty">
+                    {sessionQuery.trim()
+                      ? "没有匹配的会话"
+                      : showArchived
+                        ? "没有已归档会话"
+                        : sessions.length === 0
+                          ? "还没有会话"
+                          : "没有未归档会话"}
                   </div>
-                  </Fragment>
-                );
-              })}
+                )}
+              </div>
+            </div>
+            {recentWorkspaces.map((entry) => {
+              const expanded = expandedWorkspaces.has(entry.root);
+              return (
+                <div className={`ws-group ${expanded ? "open" : ""}`} key={entry.root}>
+                  <button
+                    type="button"
+                    className="ws-group-head"
+                    onClick={() =>
+                      setExpandedWorkspaces((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(entry.root)) next.delete(entry.root);
+                        else next.add(entry.root);
+                        saveUiState({ expandedWorkspaces: [...next] });
+                        return next;
+                      })
+                    }
+                  >
+                    <span className="caret">{expanded ? "▾" : "▸"}</span>
+                    <span className="ws-name" title={entry.root}>
+                      {workspaceLabel(entry.root)}
+                    </span>
+                    <span className="count">{entry.sessionCount}</span>
+                  </button>
+                  {expanded && (
+                    <div className="ws-sessions">
+                      <button
+                        type="button"
+                        className="ws-switch"
+                        onClick={() => void openWorkspacePath(entry.root)}
+                      >
+                        切换到此工作区
+                      </button>
+                      <div className="ws-hint">
+                        {entry.updatedAt ? `最近 ${formatRelative(entry.updatedAt)}` : "切换后加载会话"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <div className="tree-panel">
+            <button type="button" className="tree-back" onClick={() => setTab("sessions")}>
+              ← 返回会话
+            </button>
             {tree && tree.tree.length > 0 ? (
               tree.tree.map((node) => (
                 <TreeNodeView
@@ -1486,34 +1856,33 @@ export default function App() {
           </div>
         )}
         <div className="side-foot">
-          <button onClick={() => setOverlay("permissions")}>权限</button>
-          <button onClick={() => setOverlay("skills")}>技能</button>
-          <button onClick={() => setOverlay("settings")}>设置</button>
+          <button
+            type="button"
+            className={showArchived ? "active" : ""}
+            onClick={() => setShowArchived((v) => !v)}
+            title="只看已归档会话"
+          >
+            已归档 {archivedCount}
+          </button>
+          <button type="button" onClick={() => setOverlay("permissions")}>权限</button>
+          <button type="button" onClick={() => setOverlay("skills")}>技能</button>
+          <button type="button" onClick={() => setOverlay("settings")}>设置</button>
         </div>
       </aside>
 
-      {!ui.sidebarCollapsed && (
-        <Sash
-          side="left"
-          width={ui.sidebarWidth}
-          min={UI_LIMITS.sidebar.min}
-          max={UI_LIMITS.sidebar.max}
-          label="调整侧栏宽度"
-          onChange={(next) => setUi((cur) => ({ ...cur, sidebarWidth: clampWidth("sidebar", next) }))}
-          onCommit={(next) => saveUiState({ sidebarWidth: clampWidth("sidebar", next) })}
-        />
-      )}
+      <Sash
+        side="left"
+        width={ui.sidebarWidth}
+        min={UI_LIMITS.sidebar.min}
+        max={UI_LIMITS.sidebar.max}
+        label="调整侧栏宽度"
+        onChange={(next) => setUi((cur) => ({ ...cur, sidebarWidth: clampWidth("sidebar", next) }))}
+        onCommit={(next) => saveUiState({ sidebarWidth: clampWidth("sidebar", next) })}
+      />
 
       <div className="main">
         <div className="top">
         <header className="bar">
-          {/* 左栏收起时才在顶栏补品牌，避免同一个名字出现两次 */}
-          {ui.sidebarCollapsed && (
-            <div className="brand">
-              <strong>oh my coding pi</strong>
-              <span className="tag">P2</span>
-            </div>
-          )}
           <div className="bar-right">
             <PermissionPill />
             <ContextMeter sessionKey={currentFile} busy={busy} />
@@ -1532,20 +1901,14 @@ export default function App() {
               {theme === "dark" ? "亮色" : "深色"}
             </button>
             <button
-              className="dock-toggle"
-              onClick={toggleSidebar}
-              aria-pressed={!ui.sidebarCollapsed}
-              title="显示或收起左栏（Ctrl+B）"
-            >
-              {ui.sidebarCollapsed ? "左栏" : "收起左栏"}
-            </button>
-            <button
-              className="dock-toggle"
+              ref={dockSwitchRef}
+              className="dock-toggle dock-switch"
               onClick={toggleDock}
-              aria-pressed={dockOpen}
+              aria-expanded={dockOpen}
+              aria-controls="right-dock"
               title="显示或收起右侧工作坞（Ctrl+J）"
             >
-              {dockOpen ? "收起右坞" : "右坞"}
+              {dockOpen ? `面板：${DOCK_LABEL[ui.dockTab]}` : "面板"}
             </button>
             <span className={`status ${status}`}>{status}</span>
             {busy && (
@@ -1784,6 +2147,21 @@ export default function App() {
               </button>
             )}
           </div>
+          {uploading && (
+            <div className="upload-progress" role="status">
+              <span>
+                正在复制 {uploading.name} · {uploading.percent}%
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void window.api.cancelUpload(uploading.id);
+                }}
+              >
+                取消
+              </button>
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="attach-row">
               {attachments.map((a) => (
@@ -1803,11 +2181,14 @@ export default function App() {
             </div>
           )}
           <div className="composer-input">
+            <UploadMenu onPick={(kind) => void pickUpload(kind)} disabled={!workspace} />
             <textarea
               ref={textareaRef}
               value={input}
               placeholder={
-                busy ? "pi 正在工作；Enter 插入，Shift+Enter 换行" : "输入消息，Enter 发送；可粘贴图片，@ 补全路径"
+                busy
+                  ? "pi 正在工作；Enter 插入，Shift+Enter 换行"
+                  : "输入消息，Enter 发送；可粘贴图片，＋ 上传文件，@ 补全路径"
               }
               onChange={(e) => {
                 const value = e.target.value;
@@ -1825,7 +2206,23 @@ export default function App() {
               }}
               onDrop={(e) => {
                 e.preventDefault();
-                void addImageFiles(Array.from(e.dataTransfer.files ?? []));
+                const files = Array.from(e.dataTransfer.files ?? []);
+                const images = files.filter((f) => f.type.startsWith("image/"));
+                const others = files.filter((f) => !f.type.startsWith("image/"));
+                if (images.length > 0) void addImageFiles(images);
+                if (others.length > 0) {
+                  const paths: string[] = [];
+                  for (const file of others) {
+                    try {
+                      const path = window.api.pathForFile(file);
+                      if (path) paths.push(path);
+                    } catch {
+                      // 浏览器没有路径：下面统一提示
+                    }
+                  }
+                  if (paths.length > 0) void importPaths(paths);
+                  else setNotice("无法读取拖拽文件的路径");
+                }
               }}
               onDragOver={(e) => e.preventDefault()}
             />
@@ -1899,7 +2296,11 @@ export default function App() {
         open={dockOpen}
         tab={ui.dockTab}
         onTab={setDockTab}
-        onOpen={() => openDock()}
+        onClose={closeDock}
+        onResetWidth={() => {
+          setUi((cur) => ({ ...cur, dockWidth: 320 }));
+          saveUiState({ dockWidth: 320 });
+        }}
         files={(
 
               <div className="dock-files">

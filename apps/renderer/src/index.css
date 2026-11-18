@@ -451,32 +451,18 @@ body {
   cursor: default;
 }
 
-/* P1.1 layout */
-/* 三栏尺寸由 ui-state 提供（--side-w / --dock-w）；缝是绝对定位的 4px 命中区，
-   不参与 grid 轨道。收起右坞时不减列，而是换成一列 40px 图标条——
-   这样四个面板仍然“只藏不卸”，笔记本不会因为收起而丢状态。 */
+/* P1.1 layout（修改3） */
+/* 左栏常驻；右坞关着时第三列宽度为 0，不保留图标条。
+   缝是绝对定位的 4px 命中区，不参与 grid 轨道。 */
 .shell {
   position: relative;
   height: 100%;
   display: grid;
-  grid-template-columns: var(--side-w, 280px) minmax(420px, 1fr) var(--rail-w, 40px);
+  grid-template-columns: var(--side-w, 280px) minmax(420px, 1fr) 0;
 }
 
 .shell.dock-open {
   grid-template-columns: var(--side-w, 280px) minmax(420px, 1fr) var(--dock-w, 320px);
-}
-
-.shell.side-collapsed {
-  grid-template-columns: 0 minmax(420px, 1fr) var(--rail-w, 40px);
-}
-
-.shell.side-collapsed.dock-open {
-  grid-template-columns: 0 minmax(420px, 1fr) var(--dock-w, 320px);
-}
-
-.shell.side-collapsed > .sidebar {
-  overflow: hidden;
-  border: 0;
 }
 
 /* 分隔条：4px 命中 / 1px 可见（借自 DAWN sash.tsx） */
@@ -633,71 +619,111 @@ body.sash-dragging {
 
 .dock.dock-collapsed {
   display: flex;
+  width: 0;
+  border-left: 0;
+  overflow: hidden;
 }
 
-/* 收起时只留图标条：tab 与四个面板只藏不卸，笔记本状态才不会丢 */
-.dock.dock-collapsed .dock-tabs,
+/* 关闭时只藏不卸：头部与四个面板都隐藏，笔记本状态不丢 */
+.dock.dock-collapsed .dock-head,
 .dock.dock-collapsed .dock-body {
   display: none !important;
 }
 
-/* 收起后的图标条：40px，四个房客各一个按钮 */
-.dock-rail {
+.dock-head {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 8px 0;
-  width: 100%;
-  height: 100%;
+  gap: 4px;
+  padding: 5px 6px 0;
+  border-bottom: 1px solid var(--line);
+  position: relative;
 }
 
-.dock-rail button {
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--line);
-  background: #fff;
+.dock-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+
+.dock-icon {
+  border: 0;
+  background: transparent;
   color: var(--muted);
-  border-radius: 7px;
-  font-size: 11.5px;
+  border-radius: 5px;
+  width: 22px;
+  height: 22px;
   line-height: 1;
-  cursor: pointer;
+  font-size: 15px;
+  padding: 0;
 }
 
-.dock-rail button:hover {
-  border-color: #bfdbfe;
-  color: #1d4ed8;
+.dock-icon:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
-.dock-rail button.active {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-  color: #1d4ed8;
+.dock-menu {
+  position: absolute;
+  right: 4px;
+  top: 28px;
+  z-index: 40;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--side);
+  border: 1px solid var(--chip);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
 }
-.dock-rail button.active:hover {
-  border-color: #93c5fd;
+
+.dock-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.dock-menu button:hover {
+  background: var(--hover);
 }
 
 .dock-tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px;
-  border-bottom: 1px solid var(--line);
+  gap: 2px;
+  padding: 0;
+  border-bottom: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .dock-tabs button {
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  border-radius: 6px;
-  padding: 3px 8px;
+  border-radius: 6px 6px 0 0;
+  padding: 4px 6px;
   font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
+}
+
+.dock-count {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .dock-tabs button.active {
-  background: var(--side-2);
-  border-color: var(--chip);
+  background: transparent;
+  border-color: transparent;
+  border-bottom-color: var(--accent);
   color: var(--text);
 }
 
@@ -3237,4 +3263,288 @@ body.sash-dragging {
   color: var(--red);
   font-size: 10.5px;
   vertical-align: middle;
+}
+
+/* 上传（修改1）：输入框左侧的添加内容菜单 */
+.composer-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.composer-input textarea {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.upload-attach {
+  position: relative;
+  flex: none;
+}
+.upload-trigger {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+}
+.upload-trigger:hover:not(:disabled) {
+  border-color: var(--focus);
+  color: var(--text);
+}
+.upload-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.upload-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  min-width: 190px;
+  padding: 5px;
+  background: var(--side);
+  border: 1px solid var(--chip);
+  border-radius: 9px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.upload-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  font-size: 12.5px;
+  text-align: left;
+}
+.upload-menu button:hover {
+  background: var(--hover);
+}
+.upload-ico {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+}
+.upload-progress {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 2px 2px 6px;
+}
+.upload-progress button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
+/* 修改2：工作区树与会话行 */
+.side-new {
+  margin: 6px 10px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.side-new:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+.side-new:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.side-ws-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.side-ws-add {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 5px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  font-size: 14px;
+}
+.side-ws-add:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.ws-group {
+  margin: 2px 4px;
+}
+.ws-group-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 12px;
+  text-align: left;
+}
+.ws-group-head:hover {
+  background: var(--hover);
+}
+.ws-group-head.static {
+  cursor: default;
+}
+.ws-group-head .caret {
+  width: 10px;
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+}
+.ws-group-head .ws-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 12px;
+}
+.ws-group-head .count {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ws-sessions {
+  display: none;
+  padding-left: 16px;
+}
+.ws-group.open .ws-sessions {
+  display: block;
+}
+.ws-switch {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  text-align: left;
+  margin: 2px 0;
+}
+.ws-switch:hover {
+  border-color: var(--focus);
+}
+.ws-hint {
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 2px 2px 5px;
+}
+.tree-back {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  margin: 4px 8px 8px;
+}
+.tree-back:hover {
+  border-color: var(--focus);
+}
+.session {
+  flex-direction: row;
+  align-items: center;
+  position: relative;
+  padding: 5px 6px;
+}
+.session-open {
+  flex: 1;
+  min-width: 0;
+}
+.session-open .sid {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-more {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 5px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  font-size: 14px;
+  padding: 0;
+  opacity: 0;
+}
+.session:hover .session-more,
+.session-more[aria-expanded="true"] {
+  opacity: 1;
+}
+.session-more:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.session-menu {
+  position: absolute;
+  right: 4px;
+  top: 28px;
+  z-index: 35;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--side);
+  border: 1px solid var(--chip);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.session-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.session-menu button:hover {
+  background: var(--hover);
+}
+.session.pinned .sid {
+  color: var(--accent);
+}
+.session-more:focus-visible {
+  opacity: 1;
+  outline: 2px solid #93b4f7;
+  outline-offset: -1px;
 }

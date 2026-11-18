@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentMessage,
   AppError,
@@ -24,7 +24,10 @@ import type {
   SessionSwitchResult,
   SessionTreeResult,
   TurnPhaseEvent,
+  UploadKind,
+  UploadProgress,
   WorkspaceInfo,
+  WorkspaceIndexEntry,
   WorkspaceOpenResult,
 } from "@oh-my-coding-pi/shared";
 
@@ -94,6 +97,9 @@ contextBridge.exposeInMainWorld("api", {
   getStats: (): Promise<SessionStats> => ipcRenderer.invoke("pi:stats"),
   getBudget: (): Promise<BudgetStatus> => ipcRenderer.invoke("pi:budget"),
   getWorkspace: (): Promise<WorkspaceInfo> => ipcRenderer.invoke("workspace:current"),
+  getWorkspaceIndex: (): Promise<WorkspaceIndexEntry[]> => ipcRenderer.invoke("workspace:index"),
+  deleteSession: (sessionFile: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("session:delete", sessionFile),
   pickWorkspace: (): Promise<WorkspaceOpenResult | null> => ipcRenderer.invoke("workspace:pick"),
   openWorkspace: (root: string): Promise<WorkspaceOpenResult> =>
     ipcRenderer.invoke("workspace:open", root),
@@ -107,6 +113,16 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("pi:turn", listener);
     return () => ipcRenderer.removeListener("pi:turn", listener);
   },
+  pickUpload: (kind: UploadKind) => ipcRenderer.invoke("upload:pick", kind),
+  importUploads: (paths: string[], importId: string) =>
+    ipcRenderer.invoke("upload:import", { paths, importId }),
+  cancelUpload: (importId: string) => ipcRenderer.invoke("upload:cancel", importId),
+  onUploadProgress: (cb: (progress: UploadProgress) => void) => {
+    const listener = (_event: unknown, progress: UploadProgress) => cb(progress);
+    ipcRenderer.on("upload:progress", listener);
+    return () => ipcRenderer.removeListener("upload:progress", listener);
+  },
+  pathForFile: (file: File): string => webUtils.getPathForFile(file),
   isPiReady: (): Promise<boolean> => ipcRenderer.invoke("pi:ready"),
   onPiReady: (cb: (ready: boolean) => void): (() => void) => {
     const listener = (_event: unknown, ready: boolean) => cb(ready);

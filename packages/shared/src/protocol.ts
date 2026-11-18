@@ -275,6 +275,45 @@ export interface TurnPhaseEvent {
 }
 
 /* ------------------------------------------------------------------ */
+/* 上传（修改1）：文件 / 图片 / 数据                                    */
+/* ------------------------------------------------------------------ */
+
+export type UploadKind = "file" | "image" | "data";
+
+/** 图片的安全上限：base64 传输与模型输入的内存约束，不是产品限额 */
+export const UPLOAD_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+export const UPLOAD_IMAGE_MAX_COUNT = 4;
+export const UPLOAD_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
+
+export interface PickedUpload {
+  /** 本机绝对路径 */
+  path: string;
+  name: string;
+  size: number;
+  /** 是否在当前工作区内 */
+  insideWorkspace: boolean;
+  /** 工作区相对路径（统一 / 分隔）；不在工作区内时缺省 */
+  relative?: string;
+  /** 图片才有：base64 与 mime */
+  data?: string;
+  mimeType?: string;
+}
+
+export interface PickUploadResult {
+  canceled: boolean;
+  files: PickedUpload[];
+  /** 被拒绝的项与原因（图片过大/不可读/重复） */
+  rejected?: Array<{ name: string; reason: string }>;
+}
+
+export interface UploadProgress {
+  importId: string;
+  file: string;
+  copiedBytes: number;
+  totalBytes: number;
+}
+
+/* ------------------------------------------------------------------ */
 /* 审批                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -608,6 +647,8 @@ export interface AuditEntryView {
   summary: string;
   sessionId?: string;
   source?: string;
+  /** 上传审计：只记路径，不记内容 */
+  files?: string[];
 }
 
 export interface PersistentGrant {
@@ -793,6 +834,8 @@ export interface SessionMetaEntry {
   /** 用户手动改过名：自动标题不再覆盖（R5） */
   renamed?: boolean;
   archived?: boolean;
+  /** 修改2：置顶；置顶会话排在组内最前 */
+  pinned?: boolean;
   lastOpenedAt?: string;
   /** 这一段会话自己的权限档；缺省 = 跟随应用默认 */
   permissionMode?: PermissionMode;
@@ -808,7 +851,15 @@ export interface SessionMetaResult {
 export interface SessionMetaPatch {
   title?: string;
   archived?: boolean;
+  pinned?: boolean;
   permissionMode?: PermissionMode | null;
+}
+
+/** 修改2：最近工作区的会话数/更新时间（只读目录，不解析 JSONL） */
+export interface WorkspaceIndexEntry {
+  root: string;
+  sessionCount: number;
+  updatedAt?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1202,6 +1253,8 @@ export interface PreloadApi {
   getStats(): Promise<SessionStats>;
   getBudget(): Promise<BudgetStatus>;
   getWorkspace(): Promise<WorkspaceInfo>;
+  getWorkspaceIndex(): Promise<WorkspaceIndexEntry[]>;
+  deleteSession(sessionFile: string): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(): Promise<WorkspaceOpenResult | null>;
   openWorkspace(root: string): Promise<WorkspaceOpenResult>;
   getTree(): Promise<SessionTreeResult>;
@@ -1220,6 +1273,12 @@ export interface PreloadApi {
   /** pi 进程已启动但可能还在初始化；true 表示 RPC 已经真正响应过 */
   isPiReady(): Promise<boolean>;
   onPiReady(cb: (ready: boolean) => void): () => void;
+  pickUpload(kind: UploadKind): Promise<PickUploadResult>;
+  importUploads(paths: string[], importId: string): Promise<{ ok: boolean; files: string[]; error?: string }>;
+  cancelUpload(importId: string): Promise<boolean>;
+  onUploadProgress(cb: (progress: UploadProgress) => void): () => void;
+  /** 拖拽时把 File 转成本机路径（Electron webUtils） */
+  pathForFile(file: File): string;
   onApproval(cb: (req: ApprovalRequest) => void): () => void;
   onStatus(cb: (status: BridgeStatus) => void): () => void;
   onError(cb: (error: AppError) => void): () => void;
@@ -1361,6 +1420,7 @@ export interface BudgetStatus {
 
 export type IpcEvent =
   | { channel: "pi:event"; item: PiStreamItem }
+  | { channel: "upload:progress"; progress: UploadProgress }
   | { channel: "pi:turn"; event: TurnPhaseEvent }
   | { channel: "bridge:pi-ready"; ready: boolean }
   | { channel: "approval:request"; request: ApprovalRequest }

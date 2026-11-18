@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import type {
@@ -33,6 +33,9 @@ import type {
   PiEvent,
   PiStreamItem,
   PiResponse,
+  PickUploadResult,
+  PickedUpload,
+  UploadKind,
   PersistentGrant,
   PermissionMode,
   PermissionState,
@@ -45,13 +48,24 @@ import type {
   SessionSwitchResult,
   SessionTreeResult,
   WorkspaceInfo,
+  WorkspaceIndexEntry,
   WorkspaceOpenResult,
 } from "@oh-my-coding-pi/shared";
-import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX } from "@oh-my-coding-pi/shared";
+import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX, UPLOAD_IMAGE_MAX_BYTES, UPLOAD_IMAGE_MAX_COUNT } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
 import { EventPump } from "./event-pump";
+import {
+  checkDiskSpace,
+  classifyUpload,
+  copyWithProgress,
+  filtersFor,
+  readImageBase64,
+  safeFileName,
+  uniqueDestination,
+  uploadDateDir,
+} from "./upload-service";
 import { KernelService } from "./kernel-service";
 import { KernelBroker } from "./kernel-broker";
 import { PolicyService } from "./policy-service";
@@ -837,6 +851,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   rKernel?.setWorkspace(resolved);
   scheduleKernelPrewarm();
   sessionDir = newSessionDir;
+  invalidateWorkspaceIndex();
   workspaceStateFile = join(science, "state.json");
   supervisor.setSessionDir(sessionDir);
 
@@ -1872,6 +1887,7 @@ ipcMain.handle("pi:new-session", async () => {
   invalidateStats();
   const res = await rpc.request({ type: "new_session" });
   if (res.success) {
+    invalidateWorkspaceIndex();
     currentSessionFile = null;
     applyPermissionMode();
     supervisor.setSessionFile(null);
@@ -2181,6 +2197,217 @@ ipcMain.handle("workspace:current", () => ({
   root: workspaceRoot,
   recent: readWorkspaces().recent ?? [],
 }));
+
+/* ------------------------------------------------------------------ */
+/* 工作区索引（修改2）：最近工作区的会话数，只读目录，不解析 JSONL      */
+/* ------------------------------------------------------------------ */
+
+let workspaceIndexCache: { at: number; data: WorkspaceIndexEntry[] } | null = null;
+
+function invalidateWorkspaceIndex(): void {
+  workspaceIndexCache = null;
+}
+
+function buildWorkspaceIndex(): WorkspaceIndexEntry[] {
+  const roots = [workspaceRoot, ...(readWorkspaces().recent ?? [])]
+    .map((r) => String(r ?? "").trim())
+    .filter(Boolean);
+  const unique = [...new Set(roots)];
+  const out: WorkspaceIndexEntry[] = [];
+  for (const root of unique) {
+    const dir = join(root, ".omcp", "sessions");
+    let sessionCount = 0;
+    let latest = 0;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".jsonl")) continue;
+        sessionCount += 1;
+        try {
+          const mtime = statSync(join(dir, name)).mtimeMs;
+          if (mtime > latest) latest = mtime;
+        } catch {
+          // 单个文件读不到不影响计数
+        }
+      }
+    } catch {
+      // 目录不存在：0
+    }
+    out.push({
+      root,
+      sessionCount,
+      ...(latest > 0 ? { updatedAt: new Date(latest).toISOString() } : {}),
+    });
+  }
+  return out;
+}
+
+ipcMain.handle("workspace:index", (): WorkspaceIndexEntry[] => {
+  const now = Date.now();
+  if (workspaceIndexCache && now - workspaceIndexCache.at < 30_000) {
+    return workspaceIndexCache.data;
+  }
+  const data = buildWorkspaceIndex();
+  workspaceIndexCache = { at: now, data };
+  return data;
+});
+
+ipcMain.handle("session:delete", (_event, file: string) => {
+  if (!workspaceRoot || !sessionDir) return { ok: false, error: "没有打开工作区" };
+  const key = sessionMetaKey(file);
+  if (!key) return { ok: false, error: "会话文件名不合法" };
+  if (currentSessionFile && basename(currentSessionFile) === key) {
+    return { ok: false, error: "当前会话不能删除，请先切换" };
+  }
+  const target = join(sessionDir, key);
+  if (!existsSync(target)) return { ok: false, error: "会话文件不存在" };
+  try {
+    const trash = join(workspaceRoot, ".omcp", "trash", "sessions");
+    mkdirSync(trash, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    renameSync(target, join(trash, `${stamp}-${key}`));
+    invalidateWorkspaceIndex();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* 上传（修改1）：工作区内引用、工作区外复制、图片附件                  */
+/* ------------------------------------------------------------------ */
+
+const uploadImports = new Map<string, AbortController>();
+
+function auditUpload(summary: string, files: string[]): void {
+  auditLog?.write({
+    ts: new Date().toISOString(),
+    toolName: "upload",
+    ruleId: "upload:pick",
+    decision: "allow",
+    scope: "upload",
+    summary,
+    files,
+    sessionId: currentSessionFile ?? undefined,
+  });
+}
+
+ipcMain.handle("upload:pick", async (_event, kind: UploadKind): Promise<PickUploadResult> => {
+  if (!workspaceRoot) {
+    return { canceled: true, files: [], rejected: [{ name: "", reason: "先打开工作区" }] };
+  }
+  if (!win) return { canceled: true, files: [] };
+  const result = await dialog.showOpenDialog(win, {
+    properties: ["openFile", "multiSelections"],
+    filters: filtersFor(kind === "image" ? "image" : kind === "data" ? "data" : "file"),
+  });
+  if (result.canceled) return { canceled: true, files: [] };
+
+  const files: PickedUpload[] = [];
+  const rejected: Array<{ name: string; reason: string }> = [];
+  let imageCount = 0;
+  for (const p of result.filePaths) {
+    try {
+      const c = await classifyUpload(p, workspaceRoot);
+      if (kind === "image") {
+        if (imageCount >= UPLOAD_IMAGE_MAX_COUNT) {
+          rejected.push({ name: basename(p), reason: `最多 ${UPLOAD_IMAGE_MAX_COUNT} 张` });
+          continue;
+        }
+        const img = await readImageBase64(c.path, UPLOAD_IMAGE_MAX_BYTES);
+        files.push({ ...c, ...img });
+        imageCount += 1;
+      } else {
+        files.push(c);
+      }
+    } catch (err) {
+      rejected.push({
+        name: basename(p),
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 这里只审计“已经落位”的引用与图片；外部文件等 import 成功后再记复制
+  const refs = files
+    .filter((f) => !f.data && f.insideWorkspace && f.relative && !/\s/.test(f.relative))
+    .map((f) => f.relative!);
+  const images = files.filter((f) => f.data).map((f) => f.name);
+  if (refs.length + images.length > 0) {
+    auditUpload(
+      `上传 ${refs.length + images.length} 项（${refs.length} 引用 / ${images.length} 图片）`,
+      [...refs, ...images],
+    );
+  }
+
+  return { canceled: false, files, ...(rejected.length ? { rejected } : {}) };
+});
+
+ipcMain.handle(
+  "upload:import",
+  async (
+    _event,
+    args: { paths?: unknown; importId?: unknown },
+  ): Promise<{ ok: boolean; files: string[]; error?: string }> => {
+    if (!workspaceRoot) return { ok: false, files: [], error: "先打开工作区" };
+    const paths = Array.isArray(args?.paths)
+      ? args.paths.filter((x): x is string => typeof x === "string")
+      : [];
+    const rawId = typeof args?.importId === "string" ? args.importId : "";
+    const importId = /^[A-Za-z0-9_-]{1,64}$/.test(rawId) ? rawId : `u${Date.now()}`;
+    const controller = new AbortController();
+    uploadImports.set(importId, controller);
+
+    const out: string[] = [];
+    const errors: string[] = [];
+    let refs = 0;
+    let copies = 0;
+    try {
+      for (const p of paths) {
+        if (controller.signal.aborted) {
+          errors.push("已取消");
+          break;
+        }
+        try {
+          const c = await classifyUpload(p, workspaceRoot);
+          if (c.insideWorkspace && c.relative && !/\s/.test(c.relative)) {
+            out.push(c.relative);
+            refs += 1;
+            continue;
+          }
+          const dir = uploadDateDir(workspaceRoot);
+          const dest = uniqueDestination(dir, safeFileName(c.name));
+          await checkDiskSpace(workspaceRoot, c.size);
+          await copyWithProgress(c.path, dest, c.size, {
+            signal: controller.signal,
+            onProgress: (copiedBytes, totalBytes) =>
+              send("upload:progress", { importId, file: c.name, copiedBytes, totalBytes }),
+          });
+          out.push(relative(workspaceRoot, dest).split(sep).join("/"));
+          copies += 1;
+        } catch (err) {
+          errors.push(`${basename(p)}：${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (out.length > 0) {
+        auditUpload(`上传 ${out.length} 个文件（${refs} 引用 / ${copies} 复制）`, out);
+      }
+      return {
+        ok: errors.length === 0,
+        files: out,
+        ...(errors.length ? { error: errors.join("；") } : {}),
+      };
+    } finally {
+      uploadImports.delete(importId);
+    }
+  },
+);
+
+ipcMain.handle("upload:cancel", (_event, importId: string) => {
+  const controller = uploadImports.get(String(importId));
+  if (!controller) return false;
+  controller.abort();
+  return true;
+});
 
 ipcMain.handle("workspace:pick", async () => {
   const result = await dialog.showOpenDialog(win!, { properties: ["openDirectory"] });
@@ -3153,6 +3380,96 @@ async function runSelftestMode(): Promise<void> {
         })()`,
       );
       console.log("P3_KERNELBENCH " + JSON.stringify(r));
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "sidebarcheck") {
+      const r = await js<unknown>(
+        `(async () => {
+          const text = document.body.innerText;
+          const more = document.querySelector(".session-more");
+          more?.click();
+          await new Promise((r) => setTimeout(r, 50));
+          const menuItems = [...document.querySelectorAll(".session-menu [role=menuitem]")].map(
+            (b) => b.textContent?.trim(),
+          );
+          return {
+            hasNewTask: !!document.querySelector(".side-new"),
+            hasWorkspaceHead: !!document.querySelector(".side-ws-head"),
+            hasTabs: !!document.querySelector(".side-tabs"),
+            hasOldActions: !!document.querySelector(".side-actions"),
+            sessionRows: document.querySelectorAll(".session").length,
+            wsGroups: document.querySelectorAll(".ws-group").length,
+            hasMore: !!more,
+            menuItems,
+            archivedEntry: text.includes("已归档"),
+            hasTreeTab: text.includes("树"),
+          };
+        })()`,
+      );
+      console.log("P3_SIDEBAR " + JSON.stringify(r));
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "layoutcheck") {
+      const r = await js<unknown>(
+        `(async () => {
+          const sw = document.querySelector(".dock-switch");
+          const dock = document.querySelector(".dock");
+          const side = document.querySelector(".sidebar");
+          const text = document.body.innerText;
+          const width = (el) => (el ? Math.round(el.getBoundingClientRect().width) : -1);
+          const before = {
+            hasSwitch: !!sw,
+            switchText: sw?.textContent?.trim() || "",
+            hasLeftCollapse: text.includes("收起左栏"),
+            hasRightCollapse: text.includes("收起右坞"),
+            hasRail: !!document.querySelector(".dock-rail"),
+            hasClose: !!document.querySelector('[aria-label="关闭面板"]'),
+            sidebarWidth: width(side),
+            dockWidth: width(dock),
+          };
+          sw?.click();
+          await new Promise((r) => setTimeout(r, 80));
+          const closed = {
+            dockWidth: width(document.querySelector(".dock")),
+            switchText: document.querySelector(".dock-switch")?.textContent?.trim() || "",
+            hasRail: !!document.querySelector(".dock-rail"),
+            sidebarWidth: width(document.querySelector(".sidebar")),
+          };
+          document.querySelector(".dock-switch")?.click();
+          await new Promise((r) => setTimeout(r, 80));
+          return { before, closed, reopened: width(document.querySelector(".dock")) };
+        })()`,
+      );
+      console.log("P3_LAYOUT " + JSON.stringify(r));
+      app.quit();
+    }
+
+    if (SELFTEST_MODE === "uploadcheck") {
+      const inside = join(workspaceRoot, "data", "raw", "upload-inside.csv");
+      mkdirSync(dirname(inside), { recursive: true });
+      const nl = String.fromCharCode(10);
+      writeFileSync(inside, "a,b" + nl + "1,2" + nl, "utf8");
+      const outside = join(app.getPath("temp"), `omcp-upload-${Date.now()}.csv`);
+      writeFileSync(outside, "x,y" + nl + "3,4" + nl, "utf8");
+      const res = await js<{ ok: boolean; files: string[]; error?: string }>(
+        `window.api.importUploads(${JSON.stringify([inside, outside])}, "selftest-upload")`,
+      );
+      const audit = (auditLog?.read(10) ?? []).filter((e) => e.toolName === "upload");
+      const ui = await js<{ hasTrigger: boolean; label: string }>(
+        `({ hasTrigger: !!document.querySelector(".upload-trigger"), label: document.querySelector(".upload-trigger")?.getAttribute("aria-label") || "" })`,
+      );
+      console.log(
+        "P3_UPLOAD " +
+          JSON.stringify({
+            res,
+            insideExists: existsSync(inside),
+            copiedExists: res.files[1] ? existsSync(join(workspaceRoot, res.files[1])) : false,
+            audit: audit.slice(-2),
+            ui,
+          }),
+      );
       app.quit();
     }
 
@@ -4781,7 +5098,7 @@ app.whenReady().then(async () => {
   applyPermissionMode();
   await createWindow();
 
-  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "perflong", "ready", "kernelbench", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
+  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "perflong", "ready", "kernelbench", "uploadcheck", "layoutcheck", "sidebarcheck", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
     setTimeout(() => void runSelftestMode(), 3200);
   }
 

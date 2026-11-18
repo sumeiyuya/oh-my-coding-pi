@@ -30,6 +30,7 @@ function entryOf(raw: unknown): SessionMetaEntry | null {
     if (title) entry.title = title;
   }
   if (obj.archived === true) entry.archived = true;
+  if (obj.pinned === true) entry.pinned = true;
   if (typeof obj.lastOpenedAt === "string" && !Number.isNaN(Date.parse(obj.lastOpenedAt))) {
     entry.lastOpenedAt = obj.lastOpenedAt;
   }
@@ -40,7 +41,14 @@ function entryOf(raw: unknown): SessionMetaEntry | null {
   ) {
     entry.permissionMode = obj.permissionMode;
   }
-  if (!entry.title && !entry.renamed && !entry.archived && !entry.lastOpenedAt && !entry.permissionMode) {
+  if (
+    !entry.title &&
+    !entry.renamed &&
+    !entry.archived &&
+    !entry.pinned &&
+    !entry.lastOpenedAt &&
+    !entry.permissionMode
+  ) {
     return null;
   }
   return entry;
@@ -87,6 +95,7 @@ export function patchSessionMeta(
   patch: {
     title?: string;
     archived?: boolean;
+    pinned?: boolean;
     lastOpenedAt?: string;
     permissionMode?: SessionMetaEntry["permissionMode"] | null;
   },
@@ -105,6 +114,10 @@ export function patchSessionMeta(
     if (patch.archived) next.archived = true;
     else delete next.archived;
   }
+  if ("pinned" in patch) {
+    if (patch.pinned) next.pinned = true;
+    else delete next.pinned;
+  }
   if (patch.lastOpenedAt && !Number.isNaN(Date.parse(patch.lastOpenedAt))) {
     next.lastOpenedAt = patch.lastOpenedAt;
   }
@@ -114,7 +127,14 @@ export function patchSessionMeta(
     else delete next.permissionMode;
   }
   const sessions = { ...loaded.sessions };
-  if (!next.title && !next.renamed && !next.archived && !next.lastOpenedAt && !next.permissionMode) {
+  if (
+    !next.title &&
+    !next.renamed &&
+    !next.archived &&
+    !next.pinned &&
+    !next.lastOpenedAt &&
+    !next.permissionMode
+  ) {
     delete sessions[key];
   }
   else sessions[key] = next;
