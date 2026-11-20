@@ -44,6 +44,26 @@ export function parseToolArgs(args: string): Record<string, unknown> {
   }
 }
 
+export type ToolLanguage = "python" | "r";
+
+/**
+ * run_code 的语言：参数里 language=r 才是 R；没有该字段按工具默认 Python；
+ * 参数被截断/不是合法 JSON 时返回 null（不猜，也不显示徽标）。
+ */
+export function toolLanguage(item: Pick<ToolItem, "name" | "args">): ToolLanguage | null {
+  if (item.name !== "run_code") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(item.args);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const input = parsed as Record<string, unknown>;
+  const value = typeof input.language === "string" ? input.language.trim().toLowerCase() : "python";
+  return value === "r" ? "r" : "python";
+}
+
 /** 一行摘要：优先命令，其次路径，最后退回工具名 */
 export function toolCommandLine(item: Pick<ToolItem, "name" | "args">): string {
   const input = parseToolArgs(item.args);

@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
-import { foldOutput, formatDuration, toolCommandLine } from "./tool-summary";
+import { foldOutput, formatDuration, toolCommandLine, toolLanguage } from "./tool-summary";
+import LangBadge from "./LangBadge";
 
 /**
  * 单个工具调用卡片（不成组时用它）。
@@ -33,6 +34,7 @@ function ToolCardView({
     startedAt !== undefined && endedAt !== undefined ? Math.max(0, endedAt - startedAt) : undefined;
   const failed = Boolean(isError) && !interrupted;
   const folded = foldOutput(result, full);
+  const lang = toolLanguage({ name, args });
 
   return (
     <div className={`msg tool-card ${done ? "done" : "running"}${failed ? " failed" : ""}`}>
@@ -45,6 +47,7 @@ function ToolCardView({
         aria-expanded={open}
       >
         <span className="dot" data-done={done} data-error={failed ? "1" : undefined} />
+        {lang && <LangBadge lang={lang} />}
         <code>{name}</code>
         <span className="args">{toolCommandLine({ name, args })}</span>
         {interrupted && <span className="tr-note">已停止</span>}

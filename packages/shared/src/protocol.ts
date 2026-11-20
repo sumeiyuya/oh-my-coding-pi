@@ -1423,6 +1423,8 @@ export interface AppError {
   severity: "info" | "warning" | "error" | "fatal";
   title: string;
   detail: string;
+  /** 技术原文：只在「查看原始错误」折叠区与日志里出现，界面主行不显示 */
+  raw?: string;
   recoverable: boolean;
   action?:
     | "retry"

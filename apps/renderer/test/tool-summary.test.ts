@@ -9,6 +9,7 @@ import {
   groupSentence,
   parseToolArgs,
   runningLabel,
+  toolLanguage,
   summarizeTools,
   toolCommandLine,
   type ToolItem,
@@ -137,4 +138,23 @@ test("输出折叠：保留前 8 行并报剩余行数", () => {
   assert.equal(full?.hidden, 12);
 
   assert.equal(foldOutput(undefined, false), undefined);
+});
+
+test("run_code 语言：language=r 才是 R", () => {
+  assert.equal(toolLanguage({ name: "run_code", args: JSON.stringify({ code: "x", language: "r" }) }), "r");
+});
+
+test("run_code 语言：缺省与 python 都按 Python", () => {
+  assert.equal(toolLanguage({ name: "run_code", args: JSON.stringify({ code: "x" }) }), "python");
+  assert.equal(toolLanguage({ name: "run_code", args: JSON.stringify({ code: "x", language: "python" }) }), "python");
+  assert.equal(toolLanguage({ name: "run_code", args: "{}" }), "python");
+});
+
+test("run_code 语言：参数截断/非法 JSON 不猜", () => {
+  assert.equal(toolLanguage({ name: "run_code", args: '{"code":"x","language":"r"' }), null);
+  assert.equal(toolLanguage({ name: "run_code", args: "" }), null);
+});
+
+test("非 run_code 工具不显示语言", () => {
+  assert.equal(toolLanguage({ name: "bash", args: JSON.stringify({ command: "python x.py" }) }), null);
 });

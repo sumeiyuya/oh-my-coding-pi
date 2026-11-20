@@ -6,6 +6,7 @@ import PermissionPill from "./PermissionPill";
 import ModelPicker from "./ModelPicker";
 import ThinkingPicker from "./ThinkingPicker";
 import FileTree from "./FileTree";
+import LangBadge from "./LangBadge";
 import Sash from "./Sash";
 import RightDock from "./RightDock";
 import ArtifactsPane from "./ArtifactsPane";
@@ -33,6 +34,8 @@ import { messagesFromAgent } from "./tool-rebuild";
 import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
+import ErrorBanner from "./ErrorBanner";
+import { presentAppError, presentModelError } from "./error-view";
 import { applyMention, mentionInsert, mentionQueryParts, parseMention } from "./mention";
 import { TABS_KEY, TABS_MAX, pruneTabs, pushTab, sanitizeTabs } from "./session-tabs";
 import {
@@ -2056,35 +2059,54 @@ export default function App() {
           </div>
         )}
         {modelError && (
-          <div className="banner fatal">
-            <span title={`${modelError.title}：${modelError.detail}`}>
-              <b>{modelError.title}</b>{" "}
-              {modelError.detail.length > 110
-                ? modelError.detail.slice(0, 110) + "…"
-                : modelError.detail}
-              {modelError.hint ? `（${modelError.hint}）` : ""}
-            </span>
-            <button
-              onClick={() => {
-                modelSelectRef.current?.focus();
-                setNotice("在上方模型选择器里换一个模型");
-              }}
-            >
-              换个模型
-            </button>
-            <button onClick={() => setModelError(null)}>关闭</button>
-          </div>
+          <ErrorBanner
+            view={presentModelError(modelError)}
+            actions={
+              <button
+                type="button"
+                onClick={() => {
+                  modelSelectRef.current?.focus();
+                  setNotice("在上方模型选择器里换一个模型");
+                }}
+              >
+                换个模型
+              </button>
+            }
+            onClose={() => setModelError(null)}
+          />
         )}
         {policy?.mode === "readonly" && <ReadonlyBanner />}
         {notice && <div className="notice">{notice}</div>}
         {appError && (
-          <div className={`banner ${appError.severity === "warning" ? "warn" : "fatal"}`}>
-            <span>
-              <b>{appError.title}</b> {appError.detail}
-            </span>
-            {appError.action === "restart-pi" && <button onClick={restartPi}>重启</button>}
-            <button onClick={() => setAppError(null)}>关闭</button>
-          </div>
+          <ErrorBanner
+            view={presentAppError(appError)}
+            actions={
+              <>
+                {appError.action === "restart-pi" && (
+                  <button type="button" onClick={restartPi}>
+                    重启 pi
+                  </button>
+                )}
+                {appError.action === "open-settings" && (
+                  <button type="button" onClick={() => setOverlay("settings")}>
+                    设置
+                  </button>
+                )}
+                {appError.action === "retry" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      modelSelectRef.current?.focus();
+                      setNotice("已停止自动重试；可以换个模型，或稍后再发一次");
+                    }}
+                  >
+                    换个模型
+                  </button>
+                )}
+              </>
+            }
+            onClose={() => setAppError(null)}
+          />
         )}
         </div>
 
@@ -2119,7 +2141,6 @@ export default function App() {
             if (m.kind === "user") {
               return (
                 <div className="msg user" key={m.id ?? i}>
-                  <div className="who">你</div>
                   <div className="bubble">
                     {m.text}
                     {m.failed && (
@@ -2441,6 +2462,12 @@ export default function App() {
         )}
         run={(
               <div className="dock-run">
+                <div className="kernel-line">
+                  <LangBadge lang="python" /> Python 内核
+                </div>
+                <div className="kernel-line">
+                  <LangBadge lang="r" /> R 内核
+                </div>
                 <div className="dock-note">内核与方案门（只读）。首次运行代码时内核才会启动。</div>
               </div>
         )}

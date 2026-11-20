@@ -1153,7 +1153,8 @@ function promptResult(res: { success: boolean; error?: string }): PromptResult {
     code: "E_PI_PROMPT",
     severity: "error",
     title: "消息未被 pi 接受",
-    detail: error.slice(0, 500),
+    detail: "pi 拒绝了这条消息",
+    raw: error,
     recoverable: true,
     action: "none",
   });
@@ -1232,7 +1233,8 @@ supervisor.on("exit", (info: { code: number | null; signal: NodeJS.Signals | nul
       code: "E_PI_EXIT",
       severity: "error",
       title: "pi 进程已断开",
-      detail: `exit code ${info.code ?? "null"}${info.signal ? " signal " + info.signal : ""}`,
+      detail: "pi 意外退出，正在恢复当前会话",
+      raw: `exit code ${info.code ?? "null"}${info.signal ? " signal " + info.signal : ""}`,
       recoverable: true,
       action: "restart-pi",
     });
@@ -1259,7 +1261,8 @@ supervisor.on("error", (err: Error) => {
     code: "E_PI_SPAWN",
     severity: "fatal",
     title: "无法启动 pi",
-    detail: err.message,
+    detail: "pi 入口不可用",
+    raw: err.message,
     recoverable: true,
     action: "open-settings",
   });
@@ -1302,8 +1305,10 @@ rpc.on("event", (ev: PiEvent) => {
     reportError({
       code: rate ? "E_MODEL_RATE" : "E_MODEL_NETWORK",
       severity: "warning",
-      title: rate ? "模型限流，正在重试" : "模型服务暂时不可用，正在重试",
-      detail: `第 ${ev.attempt}/${ev.maxAttempts} 次，${ev.delayMs}ms 后重试 · ${ev.errorMessage.slice(0, 200)}`,
+      title: rate ? "模型限流，正在重试" : "正在重试",
+      // 主行只给进度；技术原文进 raw，界面折叠显示（DAWN 的 failed-notice 结构）
+      detail: `第 ${ev.attempt}/${ev.maxAttempts} 次，${Math.round(ev.delayMs / 100) / 10} 秒后重试`,
+      raw: ev.errorMessage,
       recoverable: true,
       action: "retry",
     });
@@ -1312,8 +1317,9 @@ rpc.on("event", (ev: PiEvent) => {
     reportError({
       code: "E_MODEL_NETWORK",
       severity: "error",
-      title: "模型重试失败",
-      detail: ev.finalError ?? `第 ${ev.attempt} 次尝试失败`,
+      title: "模型服务仍不可用",
+      detail: `已重试 ${ev.attempt} 次，仍无法连接`,
+      raw: ev.finalError ?? `第 ${ev.attempt} 次尝试失败`,
       recoverable: true,
       action: "retry",
     });
@@ -1323,7 +1329,8 @@ rpc.on("event", (ev: PiEvent) => {
       code: "E_TOOL_ERROR",
       severity: "error",
       title: "扩展执行出错",
-      detail: ev.message,
+      detail: "扩展运行时出错",
+      raw: ev.message,
       recoverable: true,
       action: "open-log",
     });
@@ -2782,7 +2789,8 @@ ipcMain.handle(
         code: "E_MODEL_SWITCH",
         severity: "error",
         title: "切换模型失败",
-        detail: `${provider}/${modelId}：${error}`.slice(0, 500),
+        detail: "无法切换到所选模型",
+        raw: `${provider}/${modelId}：${error}`.slice(0, 500),
         recoverable: true,
         action: "open-settings",
       });
@@ -5000,7 +5008,8 @@ app.whenReady().then(async () => {
         code: "E_TOOL_BLOCKED",
         severity: "error",
         title: "权限策略不可用，已全部拒绝",
-        detail: message,
+        detail: "策略文件无法解析，工具调用已被拒绝",
+        raw: message,
         recoverable: true,
         action: "open-settings",
       }),
@@ -5089,7 +5098,8 @@ app.whenReady().then(async () => {
         code: "E_TOOL_ERROR",
         severity: "warning",
         title: "浏览器操作失败",
-        detail: message.slice(0, 300),
+        detail: "这次浏览器操作没有完成",
+        raw: message.slice(0, 300),
         recoverable: true,
         action: "none",
       }),

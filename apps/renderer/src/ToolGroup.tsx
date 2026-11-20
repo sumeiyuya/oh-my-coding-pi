@@ -6,8 +6,10 @@ import {
   runningLabel,
   summarizeTools,
   toolCommandLine,
+  toolLanguage,
   type ToolItem,
 } from "./tool-summary";
+import LangBadge from "./LangBadge";
 
 /**
  * 一组连续的工具调用（S2）。
@@ -31,6 +33,11 @@ export default function ToolGroup({ tools }: { tools: ToolItem[] }) {
 
   const running = summary.running;
   const sentence = groupSentence(tools);
+  // 整组都是 run_code 且语言一致时才在组头标一个；混合语言不猜
+  const groupLang = (() => {
+    const first = toolLanguage(tools[0] ?? { name: "", args: "" });
+    return first && tools.every((t) => toolLanguage(t) === first) ? first : null;
+  })();
   const showElapsed = !running && summary.totalMs !== undefined && summary.totalMs >= 1000;
 
   return (
@@ -86,6 +93,7 @@ function ToolRow({ item }: { item: ToolItem }) {
       : undefined;
   const folded = foldOutput(item.result, full);
   const canOpen = Boolean(item.result) || item.isError;
+  const lang = toolLanguage(item);
 
   return (
     <div className={`tool-row${open ? " open" : ""}${item.isError && !item.interrupted ? " failed" : ""}`}>
@@ -101,6 +109,7 @@ function ToolRow({ item }: { item: ToolItem }) {
         <span className={`tg-mark ${item.isError && !item.interrupted ? "bad" : item.done ? "ok" : "wait"}`} aria-hidden="true">
           {item.isError && !item.interrupted ? "!" : item.done ? "✓" : "·"}
         </span>
+        {lang && <LangBadge lang={lang} />}
         <span className="tr-tool">{item.name}</span>
         <span className="tr-cmd">{toolCommandLine(item)}</span>
         {item.interrupted && <span className="tr-note">已停止</span>}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KernelRunEvent, NotebookCell } from "@oh-my-coding-pi/shared";
+import LangBadge from "./LangBadge";
 
 type Output =
   | { kind: "text"; text: string }
@@ -215,6 +216,7 @@ export default function Notebook() {
       {cells.map((cell, index) => (
         <div className="nb-cell" key={cell.id}>
           <div className="nb-head">
+            <LangBadge lang={cell.language} />
             <select
               className="nb-lang"
               value={cell.language}

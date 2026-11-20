@@ -96,7 +96,10 @@ export function describeModelError(raw: string | null | undefined): ModelErrorIn
   return { kind: "unknown", title: "模型调用失败", detail, hint };
 }
 
-/** 一行给系统消息用的文字 */
+/**
+ * 一行给系统消息用的文字。
+ * 不拼 detail：那是技术原文，只应出现在「查看原始错误」折叠区与日志里。
+ */
 export function modelErrorLine(info: ModelErrorInfo): string {
-  return info.hint ? `${info.title}：${info.detail}（${info.hint}）` : `${info.title}：${info.detail}`;
+  return info.hint ? `${info.title}（${info.hint}）` : info.title;
 }
