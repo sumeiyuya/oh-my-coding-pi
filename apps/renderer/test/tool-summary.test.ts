@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   foldOutput,
   formatDuration,
+  mcpToolLabel,
   groupAdjacent,
   groupPhrase,
   groupSentence,
@@ -157,4 +158,11 @@ test("run_code 语言：参数截断/非法 JSON 不猜", () => {
 
 test("非 run_code 工具不显示语言", () => {
   assert.equal(toolLanguage({ name: "bash", args: JSON.stringify({ command: "python x.py" }) }), null);
+});
+
+test("mcpToolLabel：mcp__server__tool → server · tool", () => {
+  assert.equal(mcpToolLabel("mcp__filesystem__read_file"), "filesystem · read_file");
+  assert.equal(mcpToolLabel("mcp__my_server__list"), "my_server · list");
+  assert.equal(mcpToolLabel("bash"), null);
+  assert.equal(mcpToolLabel("mcp__only"), null);
 });

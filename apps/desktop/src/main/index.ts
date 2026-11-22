@@ -106,6 +106,7 @@ import { emptyCache, scanSessions, type ScanCache } from "./usage-scan";
 import { probeInterpreters, realDeps } from "./kernel-probe";
 import { expectedVersion, probeSystemPi, resolvePi, runVersion } from "./pi-runtime";
 import { checkForUpdate } from "./updater";
+import { McpService } from "./mcp-service";
 import { buildDiagnosticZip, tailFile } from "./diagnostics";
 import { adoptMemory, readMemoryQueue, rejectMemory } from "./memory-store";
 // 插件册只有一份定义（ADR-045）：主进程构建期内联它，扩展侧相对路径导入同一个文件
@@ -187,6 +188,8 @@ interface PendingApproval {
 }
 const pendingApprovals = new Map<string, PendingApproval>();
 let secretStore: SecretStore | null = null;
+/** MCP 配置服务：lazy 创建（secretStore 与 workspaceRoot 就绪后） */
+let mcpService: McpService | null = null;
 /** 方案期：会话级；未批准时只放只读工具 */
 const planGate = {
   enabled: false,
@@ -443,6 +446,34 @@ function registryFile(): string {
 /** 与 piRuntimeInfo() 保持同一套解析：显式配置 > ~/.pi/agent */
 function resolveAgentDir(): string {
   return appSettings.piConfigDir || join(app.getPath("home"), ".pi", "agent");
+}
+
+/**
+ * MCP 服务按需创建：它读的配置目录、工作区、密钥都在启动后才稳定。
+ * 状态检查会 spawn `pi mcp list --json`，入口解析与 supervisor 用同一套。
+ */
+function getMcpService(): McpService {
+  mcpService ??= new McpService({
+    agentDir: () => resolveAgentDir(),
+    workspaceRoot: () => workspaceRoot || process.cwd(),
+    secrets: () => secretStore,
+    piEntry: () => {
+      const resolved = resolvePi(
+        process.env.OMCP_PI_PATH,
+        (process as unknown as { resourcesPath?: string }).resourcesPath,
+        process.env.OMCP_PI_DEV_ROOT,
+      );
+      if (resolved.kind === "error") return null;
+      return { kind: resolved.kind, entry: resolved.entry };
+    },
+    trustFile: () => join(app.getPath("userData"), "mcp-trust.json"),
+    onConfigSaved: () => {
+      // 与插件开关同一套：重启 pi，下一段会话按新配置连接
+      supervisor.stop();
+      setTimeout(() => supervisor.start(), 300);
+    },
+  });
+  return mcpService;
 }
 
 function piModelsPath(): string {
@@ -2942,6 +2973,77 @@ ipcMain.handle("skills:create", (_event, slug: string, description: string): str
   return createSkill(workspaceRoot, slug, description);
 });
 
+/* ------------------------------------------------------------------ */
+/* MCP（P1）：配置、状态、密钥、信任                                     */
+/* ------------------------------------------------------------------ */
+
+ipcMain.handle("mcp:list", () => getMcpService().list());
+
+ipcMain.handle("mcp:check", (_event, name?: string) => getMcpService().check(name));
+
+ipcMain.handle(
+  "mcp:save",
+  (_event, input: { json?: string; name?: string } | undefined) =>
+    getMcpService().save({
+      json: String(input?.json ?? ""),
+      ...(input?.name ? { name: String(input.name) } : {}),
+    }),
+);
+
+ipcMain.handle("mcp:remove", (_event, name: string) => getMcpService().remove(String(name)));
+
+ipcMain.handle(
+  "mcp:flag",
+  (
+    _event,
+    input:
+      | { name?: string; flag?: string; value?: boolean; fingerprint?: string }
+      | undefined,
+  ) => {
+    const flag = input?.flag;
+    if (flag !== "enabled" && flag !== "trusted") {
+      throw new Error("flag 只能是 enabled 或 trusted");
+    }
+    return getMcpService().setFlag(
+      String(input?.name ?? ""),
+      flag,
+      Boolean(input?.value),
+      typeof input?.fingerprint === "string" ? input.fingerprint : undefined,
+    );
+  },
+);
+
+ipcMain.handle(
+  "mcp:secret",
+  (_event, input: { name?: string; key?: string; value?: string } | undefined) =>
+    getMcpService().setSecret(
+      String(input?.name ?? ""),
+      String(input?.key ?? ""),
+      String(input?.value ?? ""),
+    ),
+);
+
+ipcMain.handle("mcp:login", async (_event, name: string) => {
+  const result = await getMcpService().login(String(name));
+  if (result.ok) {
+    // 登录令牌写进了 agentDir；运行中的 pi 还拿着旧连接，重启后按新令牌连
+    supervisor.stop();
+    setTimeout(() => supervisor.start(), 300);
+  }
+  return result;
+});
+
+ipcMain.handle("mcp:open-config", async () => {
+  const service = getMcpService();
+  const file = service.configPath();
+  if (!existsSync(file)) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '{\n  "mcpServers": {}\n}\n', "utf8");
+  }
+  const error = await shell.openPath(file);
+  return { ok: !error, path: file, ...(error ? { error } : {}) };
+});
+
 ipcMain.handle("settings:app", (): AppSettingsView => ({ ...appSettings }));
 
 function memoryDirPath(): string {
@@ -4993,6 +5095,14 @@ app.whenReady().then(async () => {
 
   grants = new GrantStore(join(app.getPath("userData"), "grants.json"));
   secretStore = new SecretStore(join(app.getPath("userData"), "secrets.json"));
+
+  // P3：启动后异步检查一次 MCP 连接。不阻塞会话、不弹窗；
+  // 结果进 mcp-service 的缓存，设置页打开时能看到。
+  if (!SELFTEST) {
+    setTimeout(() => {
+      void getMcpService().check().catch(() => undefined);
+    }, 8000);
+  }
   auditLog = new AuditLog(() => auditFile());
   policyService = new PolicyService({
     getWorkspaceRoot: () => workspaceRoot,

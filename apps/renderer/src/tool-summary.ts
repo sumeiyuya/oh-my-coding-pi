@@ -203,3 +203,18 @@ export function foldOutput(result: string | undefined, expanded: boolean, headLi
   if (expanded || hidden === 0) return { text: result, hidden };
   return { text: lines.slice(0, headLines).join("\n"), hidden };
 }
+
+/**
+ * MCP 工具名 `mcp__server__tool` → "server · tool"。
+ * 只影响界面显示：传给模型的名字、审批记录里的 toolName 都不变。
+ */
+export function mcpToolLabel(name: string): string | null {
+  if (!name.startsWith("mcp__")) return null;
+  const rest = name.slice(5);
+  const split = rest.indexOf("__");
+  if (split <= 0) return null;
+  const server = rest.slice(0, split);
+  const tool = rest.slice(split + 2);
+  if (!server || !tool) return null;
+  return `${server} · ${tool}`;
+}

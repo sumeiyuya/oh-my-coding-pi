@@ -635,6 +635,74 @@ export interface PluginsResult {
   enabledKeys: string[];
 }
 
+/* ------------------------------------------------------------------ */
+/* MCP（P1）：配置视图；值永远不进视图，只给名字                          */
+/* ------------------------------------------------------------------ */
+
+export type McpExposure = "direct" | "deferred" | "codemode" | "hidden";
+export type McpTransport = "stdio" | "http";
+
+/** unchecked = 还没试过；checking = 检查子进程在跑；failed 必须带 error */
+export type McpState =
+  | "unchecked"
+  | "checking"
+  | "ready"
+  | "failed"
+  | "needs-auth"
+  | "disabled";
+
+export interface McpToolView {
+  name: string;
+  description?: string;
+  readOnly?: boolean;
+}
+
+export interface McpServerView {
+  name: string;
+  transport: McpTransport;
+  command?: string;
+  args: string[];
+  url?: string;
+  cwd?: string;
+  /** 需要的环境变量名 / 请求头名；值不在视图里 */
+  secrets: string[];
+  /** 还没填的那些（SecretStore 与进程 env 都没有） */
+  missingSecrets: string[];
+  enabled: boolean;
+  exposure: McpExposure;
+  description?: string;
+  from: "global" | "project";
+  /** command/args 或 url 的短指纹；信任跟着它走 */
+  fingerprint: string;
+  trusted: boolean;
+  state: McpState;
+  error?: string;
+  tools: McpToolView[];
+}
+
+export interface McpListView {
+  configPath: string;
+  servers: McpServerView[];
+  /** 配置本身的问题（重名、JSON 坏、字段非法）；不静默跳过 */
+  problems: string[];
+  /** pi 的原话：项目未信任时说明 .pi/mcp.json 被忽略 */
+  note?: string;
+}
+
+export interface McpSaveResult {
+  name: string;
+  needsSecrets: string[];
+  list: McpListView;
+}
+
+export interface McpLoginResult {
+  ok: boolean;
+  /** 授权页地址：浏览器没自动打开时给用户点 */
+  url?: string;
+  error?: string;
+}
+
+
 /** 记忆条目（ADR-046）：存 <userData>/memory/*.jsonl，不落工作区。 */
 export interface MemoryItem {
   id: string;
@@ -1313,6 +1381,21 @@ export interface PreloadApi {
   restartKernel(language?: "python" | "r"): Promise<boolean>;
   getVariables(language?: "python" | "r"): Promise<string[]>;
   onKernelEvent(cb: (ev: KernelRunEvent) => void): () => void;
+  /* MCP（P1） */
+  listMcpServers(): Promise<McpListView>;
+  /** 有副作用：会启动所有已启用服务器 */
+  checkMcpServers(name?: string): Promise<McpListView>;
+  saveMcpServer(input: { json: string; name?: string }): Promise<McpSaveResult>;
+  removeMcpServer(name: string): Promise<McpListView>;
+  setMcpFlag(
+    name: string,
+    flag: "enabled" | "trusted",
+    value: boolean,
+    fingerprint?: string,
+  ): Promise<McpListView>;
+  setMcpSecret(name: string, key: string, value: string): Promise<{ ok: boolean; list: McpListView }>;
+  openMcpConfig(): Promise<{ ok: boolean; path: string; error?: string }>;
+  loginMcpServer(name: string): Promise<McpLoginResult>;
 }
 
 export type IpcRequest =

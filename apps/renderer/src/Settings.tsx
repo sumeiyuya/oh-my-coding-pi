@@ -5,6 +5,7 @@ import ModelRegistry from "./ModelRegistry";
 import AddProviderDialog from "./AddProviderDialog";
 import ProviderSetupDialog from "./ProviderSetupDialog";
 import PluginSettings from "./PluginSettings";
+import McpSettings from "./McpSettings";
 import type {
   AppSettingsDetail,
   ModelInfo,
@@ -416,6 +417,8 @@ export default function Settings({
       </section>
 
       <ModelRegistry />
+
+      <McpSettings />
 
       <PluginSettings />
 

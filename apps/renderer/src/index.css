@@ -2139,6 +2139,18 @@ body.sash-dragging {
   word-break: break-all;
 }
 
+.approval-scope-hint {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn-text);
+  border-radius: 8px;
+  background: var(--notice-bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .approval-options {
   display: flex;
   gap: 8px;
@@ -2317,6 +2329,18 @@ body.sash-dragging {
   min-width: 190px;
   background: var(--bg);
   color: var(--text);
+}
+.mcp-json {
+  flex: 1 1 100%;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
 }
 .perm-update { margin-top: 8px; border-top: 1px solid var(--code-bg); padding-top: 8px; }
 .perm-update a { color: var(--link); font-size: 12px; word-break: break-all; }

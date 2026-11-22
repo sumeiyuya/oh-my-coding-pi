@@ -183,6 +183,21 @@ contextBridge.exposeInMainWorld("api", {
   exportDiagnostics: (): Promise<string | null> => ipcRenderer.invoke("diag:export"),
   openExternal: (url: string): Promise<unknown> => ipcRenderer.invoke("shell:open-external", url),
   signalReady: (): void => ipcRenderer.send("app:ready"),
+  /* MCP（P1） */
+  listMcpServers: (): Promise<unknown> => ipcRenderer.invoke("mcp:list"),
+  checkMcpServers: (name?: string): Promise<unknown> => ipcRenderer.invoke("mcp:check", name),
+  saveMcpServer: (input: unknown): Promise<unknown> => ipcRenderer.invoke("mcp:save", input),
+  removeMcpServer: (name: string): Promise<unknown> => ipcRenderer.invoke("mcp:remove", name),
+  setMcpFlag: (
+    name: string,
+    flag: string,
+    value: boolean,
+    fingerprint?: string,
+  ): Promise<unknown> => ipcRenderer.invoke("mcp:flag", { name, flag, value, fingerprint }),
+  setMcpSecret: (name: string, key: string, value: string): Promise<unknown> =>
+    ipcRenderer.invoke("mcp:secret", { name, key, value }),
+  openMcpConfig: (): Promise<unknown> => ipcRenderer.invoke("mcp:open-config"),
+  loginMcpServer: (name: string): Promise<unknown> => ipcRenderer.invoke("mcp:login", name),
   loadRoute: (): Promise<unknown> => ipcRenderer.invoke("route:load"),
   saveRoute: (doc: unknown): Promise<unknown> => ipcRenderer.invoke("route:save", doc),
   exportRoute: (): Promise<unknown> => ipcRenderer.invoke("route:export"),

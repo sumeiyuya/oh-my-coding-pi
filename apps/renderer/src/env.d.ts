@@ -112,6 +112,14 @@ type P1Api = Pick<
   | "setPlanMode"
   | "approvePlan"
   | "exportAudit"
+  | "listMcpServers"
+  | "checkMcpServers"
+  | "saveMcpServer"
+  | "removeMcpServer"
+  | "setMcpFlag"
+  | "setMcpSecret"
+  | "openMcpConfig"
+  | "loginMcpServer"
 >;
 
 declare global {

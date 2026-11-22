@@ -202,14 +202,20 @@ export class PolicyService {
     return info;
   }
 
-  decide(toolName: string, input: Record<string, unknown>): PolicyDecision {
+  decide(
+    toolName: string,
+    input: Record<string, unknown>,
+    opts?: { readOnly?: boolean },
+  ): PolicyDecision {
     const root = this.opts.getWorkspaceRoot();
 
     // 方案期：默认拒一切非只读操作（fail-closed 的同族规则）
     const gate = this.opts.getPlanGate?.();
     if (gate?.enabled) {
       const readonly = ["read", "grep", "find", "ls", "glob"];
-      if (!readonly.includes(toolName)) {
+      // 只信 mcp__ 前缀的 readOnlyHint：其它工具不能自称只读来绕过方案期
+      const readOnlyMcp = toolName.startsWith("mcp__") && opts?.readOnly === true;
+      if (!readonly.includes(toolName) && !readOnlyMcp) {
         const summary = String(
           input.code ?? input.command ?? input.path ?? toolName,
         ).slice(0, 200);
@@ -280,7 +286,12 @@ export class PolicyService {
       const engineMode = riskMode === "allow-all" ? "allow" : riskMode ? "ask" : effective;
       decision = evaluatePolicy(
         { ...this.policy, mode: engineMode },
-        { toolName, input, workspaceRoot: root },
+        {
+          toolName,
+          input,
+          workspaceRoot: root,
+          ...(opts?.readOnly ? { readOnly: true } : {}),
+        },
         this.compiled,
       );
     } catch (err) {
@@ -398,6 +409,7 @@ export class PolicyService {
       const body = (raw ? JSON.parse(raw) : {}) as {
         toolName?: unknown;
         input?: unknown;
+        readOnly?: unknown;
       };
       if (typeof body.toolName !== "string") {
         res.writeHead(400, { "content-type": "application/json" });
@@ -406,7 +418,11 @@ export class PolicyService {
       }
       const input =
         body.input && typeof body.input === "object" ? (body.input as Record<string, unknown>) : {};
-      const decision = this.decide(body.toolName, input);
+      const decision = this.decide(
+        body.toolName,
+        input,
+        body.readOnly === true ? { readOnly: true } : undefined,
+      );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, decision, policy: this.info() }));
       return;

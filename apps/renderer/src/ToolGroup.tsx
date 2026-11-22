@@ -3,6 +3,7 @@ import {
   foldOutput,
   formatDuration,
   groupSentence,
+  mcpToolLabel,
   runningLabel,
   summarizeTools,
   toolCommandLine,
@@ -110,7 +111,7 @@ function ToolRow({ item }: { item: ToolItem }) {
           {item.isError && !item.interrupted ? "!" : item.done ? "✓" : "·"}
         </span>
         {lang && <LangBadge lang={lang} />}
-        <span className="tr-tool">{item.name}</span>
+        <span className="tr-tool" title={item.name}>{mcpToolLabel(item.name) ?? item.name}</span>
         <span className="tr-cmd">{toolCommandLine(item)}</span>
         {item.interrupted && <span className="tr-note">已停止</span>}
         {ms !== undefined && <span className="tr-dur">{formatDuration(ms)}</span>}

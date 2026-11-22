@@ -33,10 +33,17 @@ interface UICtx {
   };
 }
 
+interface ToolInfo {
+  name: string;
+  annotations?: { readOnlyHint?: boolean };
+}
+
 interface ExtensionAPI {
   on(event: "tool_call", handler: (event: ToolCallEvent, ctx: UICtx) => unknown): void;
   /** 工具执行完（含失败）：只用来记账，返回值一律不管 */
   on(event: "tool_result", handler: (event: ToolResultEvent) => unknown): void;
+  /** pi 1.5.2：所有已注册工具；MCP 工具带服务器声明的 annotations */
+  getAllTools(): ToolInfo[];
 }
 
 interface ToolResultEvent {
@@ -52,6 +59,21 @@ export default function permissionExt(pi: ExtensionAPI): void {
     const token = process.env.OMCP_POLICY_TOKEN;
     if (!base || !token) return;
 
+    /**
+     * 只读判定来自 pi 的工具元数据（MCP 服务器的 readOnlyHint）。
+     * 拿不到就不声称只读：方案期 / 只读模式会按“不可读”处理。
+     * 只对 mcp__ 查：主进程也只采信这个前缀，避免其它工具自称只读绕过。
+     */
+    let readOnly = false;
+    if (event.toolName.startsWith("mcp__")) {
+      try {
+        const info = pi.getAllTools().find((tool) => tool.name === event.toolName);
+        readOnly = info?.annotations?.readOnlyHint === true;
+      } catch {
+        readOnly = false;
+      }
+    }
+
     let decision: Decision;
     try {
       const res = await fetch(`${base}/decide`, {
@@ -60,7 +82,11 @@ export default function permissionExt(pi: ExtensionAPI): void {
           authorization: `Bearer ${token}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ toolName: event.toolName, input: event.input ?? {} }),
+        body: JSON.stringify({
+          toolName: event.toolName,
+          input: event.input ?? {},
+          ...(readOnly ? { readOnly: true } : {}),
+        }),
       });
       if (!res.ok) throw new Error(`policy service returned ${res.status}`);
       const data = (await res.json()) as { decision?: Decision };

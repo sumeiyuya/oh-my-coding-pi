@@ -79,6 +79,11 @@ export interface PolicyTarget {
   input: Record<string, unknown>;
   /** 工作区绝对路径；用于解析相对路径与 <workspace> 占位符 */
   workspaceRoot: string;
+  /**
+   * 工具元数据里声明了 readOnlyHint（目前只用于 mcp__ 前缀）。
+   * 只影响只读模式与方案期门；不改变 deny / ask 的其它判据。
+   */
+  readOnly?: boolean;
 }
 
 export interface PolicyDecision {
@@ -209,6 +214,26 @@ export function compileRules(patterns: readonly string[]): RegExp[] {
   });
 }
 
+/**
+ * 工具名匹配：不含 `*` 的条目按精确匹配（旧策略含义不变）；
+ * 含 `*` 的条目按 glob（如 `mcp__fs__read_*`、`mcp__danger__*`）。
+ */
+export function toolPatternMatches(pattern: string, tool: string): boolean {
+  const p = String(pattern ?? "").trim();
+  if (!p) return false;
+  if (!p.includes("*")) return p === tool;
+  return globToRegExp(p).test(tool);
+}
+
+/** `mcp__fs__read` → `fs`；不是 MCP 工具或名字不完整 → null */
+export function mcpServerOf(toolName: string): string | null {
+  if (!toolName.startsWith("mcp__")) return null;
+  const rest = toolName.slice(5);
+  const split = rest.indexOf("__");
+  if (split <= 0 || split >= rest.length - 2) return null;
+  return rest.slice(0, split);
+}
+
 function normalizeToolName(name: string): string {
   return String(name ?? "").trim();
 }
@@ -249,7 +274,7 @@ export function evaluatePolicy(
     };
   }
 
-  if (policy.tools.deny.includes(tool)) {
+  if (policy.tools.deny.some((pattern) => toolPatternMatches(pattern, tool))) {
     return {
       action: "deny",
       ruleId: "tool:deny",
@@ -258,7 +283,12 @@ export function evaluatePolicy(
     };
   }
 
-  if (mode === "readonly" && !(READONLY_TOOLS as readonly string[]).includes(tool)) {
+  const readOnlyMcp = tool.startsWith("mcp__") && target.readOnly === true;
+  if (
+    mode === "readonly" &&
+    !(READONLY_TOOLS as readonly string[]).includes(tool) &&
+    !readOnlyMcp
+  ) {
     return {
       action: "deny",
       ruleId: "mode:readonly",
@@ -365,10 +395,34 @@ export function evaluatePolicy(
     }
   }
 
-  if (policy.tools.allow.length > 0 && !policy.tools.allow.includes(tool) && mode !== "allow") {
+  /**
+   * 服务器声明只读的 MCP 工具：不占「未列出工具」的审批。
+   * tools.deny 已在前面生效，显式拒绝仍然优先。
+   * readOnlyHint 是服务器自报的，不构成安全保证；信任服务器时已经接受这一点。
+   */
+  if (
+    tool.startsWith("mcp__") &&
+    target.readOnly === true &&
+    policy.tools.allow.length > 0 &&
+    !policy.tools.allow.some((pattern) => toolPatternMatches(pattern, tool))
+  ) {
+    return {
+      action: "allow",
+      ruleId: "mcp:readonly",
+      summary: tool,
+      reason: "MCP 服务器声明该工具只读，放行。",
+    };
+  }
+
+  if (
+    policy.tools.allow.length > 0 &&
+    !policy.tools.allow.some((pattern) => toolPatternMatches(pattern, tool)) &&
+    mode !== "allow"
+  ) {
+    const server = mcpServerOf(tool);
     return {
       action: "ask",
-      ruleId: "tool:unlisted",
+      ruleId: server ? `tool:unlisted:mcp__${server}` : "tool:unlisted",
       summary: tool,
       reason: `工具 ${tool} 不在 tools.allow 白名单内。`,
     };

@@ -21,12 +21,21 @@ function policy(patch: Partial<PolicyConfig> = {}): PolicyConfig {
   return { ...normalizePolicy(null), ...patch } as PolicyConfig;
 }
 
-function target(toolName: string, input: Record<string, unknown>): PolicyTarget {
-  return { toolName, input, workspaceRoot: ROOT };
+function target(
+  toolName: string,
+  input: Record<string, unknown>,
+  readOnly = false,
+): PolicyTarget {
+  return { toolName, input, workspaceRoot: ROOT, ...(readOnly ? { readOnly: true } : {}) };
 }
 
-function decide(toolName: string, input: Record<string, unknown>, p: PolicyConfig = policy()) {
-  return evaluatePolicy(p, target(toolName, input));
+function decide(
+  toolName: string,
+  input: Record<string, unknown>,
+  p: PolicyConfig = policy(),
+  readOnly = false,
+) {
+  return evaluatePolicy(p, target(toolName, input, readOnly));
 }
 
 test("默认策略：未命中的读操作放行", () => {
@@ -194,6 +203,14 @@ test("未列入 tools.allow 的工具需要审批", () => {
   assert.equal(d.ruleId, "tool:unlisted");
 });
 
+test("MCP 工具默认走 tool:unlisted → ask（审批门覆盖）", () => {
+  const p = policy();
+  const d = decide("mcp__filesystem__read_file", { path: "package.json" }, p);
+  assert.equal(d.action, "ask");
+  assert.equal(d.ruleId, "tool:unlisted:mcp__filesystem");
+  assert.match(d.reason, /mcp__filesystem__read_file/);
+});
+
 test("glob：** 可跨目录，也可匹配零层", () => {
   const root = ROOT;
   assert.ok(matchPathPattern("**/.env", ".env", root));
@@ -262,4 +279,41 @@ test("脚本内容检查：命中删除/子进程写法", () => {
   assert.equal(inspectScriptHead("import subprocess\nsubprocess.run(['ls'])"), "subprocess");
   assert.equal(inspectScriptHead("df <- read.csv('x'); summary(df)"), null);
   assert.equal(inspectScriptHead("print('hello')"), null);
+});
+
+test("tools.allow 支持 * 通配（MCP 服务器级白名单）", () => {
+  const p = policy();
+  p.tools.allow = ["mcp__filesystem__read_*"];
+  assert.equal(decide("mcp__filesystem__read_file", { path: "a" }, p).action, "allow");
+  assert.equal(decide("mcp__filesystem__write_file", { path: "a" }, p).action, "ask");
+});
+
+test("tools.deny 支持 * 通配", () => {
+  const p = policy();
+  p.tools.deny = ["mcp__danger__*"];
+  const d = decide("mcp__danger__drop", {}, p);
+  assert.equal(d.action, "deny");
+  assert.equal(d.ruleId, "tool:deny");
+});
+
+test("MCP 工具未列入白名单：授权键带服务器，不按整类放行", () => {
+  const p = policy();
+  const d = decide("mcp__filesystem__read_file", {}, p);
+  assert.equal(d.action, "ask");
+  assert.equal(d.ruleId, "tool:unlisted:mcp__filesystem");
+});
+
+test("只读 MCP 工具：服务器声明只读时放行", () => {
+  const p = policy();
+  const d = decide("mcp__filesystem__read_file", {}, p, true);
+  assert.equal(d.action, "allow");
+  assert.equal(d.ruleId, "mcp:readonly");
+});
+
+test("只读模式：只读 MCP 放行，写 MCP 照拒", () => {
+  const p = policy({ mode: "readonly" });
+  assert.equal(decide("mcp__filesystem__read_file", {}, p, true).action, "allow");
+  const d = decide("mcp__filesystem__write_file", {}, p, false);
+  assert.equal(d.action, "deny");
+  assert.equal(d.ruleId, "mode:readonly");
 });

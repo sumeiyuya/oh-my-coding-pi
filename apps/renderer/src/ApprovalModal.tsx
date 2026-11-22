@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ApprovalRequest, ApprovalScope } from "@oh-my-coding-pi/shared";
+import { approvalScopeHint } from "./approval-hint";
 
 const SCOPE_HINT: Record<string, string> = {
   once: "只放行这一次调用",
@@ -16,6 +17,7 @@ export default function ApprovalModal({
   onRespond: (scope: ApprovalScope) => void;
 }) {
   const [remaining, setRemaining] = useState(Math.max(0, Math.floor(request.timeoutMs / 1000)));
+  const scopeHint = approvalScopeHint(request.ruleId);
 
   useEffect(() => {
     setRemaining(Math.max(0, Math.floor(request.timeoutMs / 1000)));
@@ -49,6 +51,7 @@ export default function ApprovalModal({
           </span>
         </div>
         <pre className="approval-summary">{request.summary || "（无摘要）"}</pre>
+        {scopeHint && <div className="approval-scope-hint">{scopeHint}</div>}
         <div className="approval-options">
           {request.options.map((option) => (
             <button

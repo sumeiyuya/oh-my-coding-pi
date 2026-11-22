@@ -1,0 +1,1063 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omcp · MCP 接入实施方案（可视化版）</title>
+<style>
+  :root{
+    --ink:#0f1b24; --body:#24343f; --muted:#5d6f7c; --line:#d8e2e8;
+    --bg:#f4f7f9; --card:#ffffff; --soft:#eef4f6;
+    --teal:#0f766e; --teal-soft:#e3f2f0;
+    --blue:#1d4ed8; --blue-soft:#e8eefc;
+    --amber:#b45309; --amber-soft:#fdf1e3;
+    --red:#b91c1c; --red-soft:#fdeaea;
+    --green:#15803d; --green-soft:#e7f5ec;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--body);
+    font:15px/1.7 "Microsoft YaHei","PingFang SC","Segoe UI",system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,pre,.mono{font-family:"Cascadia Mono","JetBrains Mono",Consolas,"Courier New",monospace}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* 顶部导航 */
+  .topbar{
+    position:sticky; top:0; z-index:50; backdrop-filter:blur(10px);
+    background:rgba(244,247,249,.92); border-bottom:1px solid var(--line);
+  }
+  .topbar-inner{
+    max-width:1180px; margin:0 auto; padding:10px 28px;
+    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .brand{font-weight:700; color:var(--ink); letter-spacing:.2px}
+  .brand span{color:var(--teal)}
+  .nav{display:flex; gap:14px; flex-wrap:wrap; font-size:13px}
+  .nav a{color:var(--muted)}
+  .nav a:hover{color:var(--teal);text-decoration:none}
+  .meta-pill{
+    margin-left:auto; font-size:12px; color:var(--muted);
+    border:1px solid var(--line); background:#fff; border-radius:999px; padding:3px 12px;
+  }
+
+  main{max-width:1180px;margin:0 auto;padding:34px 28px 80px}
+
+  /* 封面 */
+  .cover{
+    background:linear-gradient(135deg,#0f1b24 0%,#123544 55%,#0f766e 140%);
+    color:#eaf3f5; border-radius:18px; padding:40px 42px; position:relative; overflow:hidden;
+  }
+  .cover:after{
+    content:""; position:absolute; right:-90px; top:-90px; width:320px; height:320px;
+    border:1px solid rgba(255,255,255,.16); border-radius:50%;
+    box-shadow:0 0 0 46px rgba(255,255,255,.05),0 0 0 92px rgba(255,255,255,.03);
+  }
+  .cover .kicker{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:#7fd1c8;font-weight:700}
+  .cover h1{margin:10px 0 8px;font-size:32px;line-height:1.28;letter-spacing:.5px}
+  .cover p{margin:0;color:#b7cbd2;max-width:820px}
+  .cover .facts{display:flex;gap:26px;margin-top:26px;flex-wrap:wrap;position:relative;z-index:1}
+  .cover .fact b{display:block;font-size:22px;color:#fff;letter-spacing:.5px}
+  .cover .fact span{font-size:12px;color:#9fb7bf}
+
+  /* 卡片与章节 */
+  section{margin-top:34px}
+  h2{
+    font-size:20px;color:var(--ink);margin:0 0 14px;padding-left:12px;
+    border-left:4px solid var(--teal);line-height:1.3;
+  }
+  h2 .no{color:var(--teal);font-size:13px;letter-spacing:.12em;margin-right:8px;font-weight:700}
+  h3{font-size:15px;color:var(--ink);margin:22px 0 8px}
+  .lead{color:var(--muted);margin:-4px 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px 10px;margin-top:14px}
+  .figure .cap{font-size:12.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:10px;margin-top:6px}
+  .figure .cap b{color:var(--ink)}
+  .figure svg{display:block;width:100%;height:auto}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;background:var(--card);font-size:13.5px}
+  .tablewrap{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{background:var(--soft);color:var(--ink);font-size:12.5px;letter-spacing:.03em;font-weight:700}
+  tr:last-child td{border-bottom:none}
+  td code{background:var(--soft);padding:1px 5px;border-radius:5px;font-size:12.5px;color:#123}
+
+  /* 代码 */
+  pre{
+    background:#0f1b24;color:#d9e6ea;border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:12.6px;line-height:1.62;margin:10px 0
+  }
+  pre .c{color:#7f9aa3}
+  pre .k{color:#7fd1c8}
+  pre .s{color:#f0c987}
+  .inline-code{background:var(--soft);padding:2px 6px;border-radius:5px;font-size:12.5px;color:#123}
+
+  /* 徽标 */
+  .chip{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid transparent;font-weight:700;letter-spacing:.02em}
+  .chip.teal{background:var(--teal-soft);color:var(--teal);border-color:#bfe0da}
+  .chip.blue{background:var(--blue-soft);color:var(--blue);border-color:#c9d7f8}
+  .chip.amber{background:var(--amber-soft);color:var(--amber);border-color:#f0d5ae}
+  .chip.red{background:var(--red-soft);color:var(--red);border-color:#f3c2c2}
+  .chip.green{background:var(--green-soft);color:var(--green);border-color:#bfe3cb}
+  .chip.gray{background:var(--soft);color:var(--muted);border-color:var(--line)}
+
+  /* 关键结论条 */
+  .callout{border-left:4px solid var(--teal);background:var(--teal-soft);border-radius:0 12px 12px 0;padding:14px 18px;margin:14px 0;color:#0b3b39}
+  .callout.warn{border-color:var(--amber);background:var(--amber-soft);color:#5b3a11}
+  .callout.bad{border-color:var(--red);background:var(--red-soft);color:#5a1414}
+  .callout b{color:inherit}
+
+  /* 原则卡片 */
+  .principle{padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+  .principle .n{font-size:12px;color:var(--teal);font-weight:800;letter-spacing:.14em}
+  .principle h4{margin:6px 0 6px;font-size:15px;color:var(--ink)}
+  .principle p{margin:0;color:var(--muted);font-size:13px}
+
+  /* 验收清单 */
+  ul.check{list-style:none;padding:0;margin:8px 0 0}
+  ul.check li{padding:7px 0 7px 30px;position:relative;border-bottom:1px dashed var(--line);font-size:14px}
+  ul.check li:last-child{border-bottom:none}
+  ul.check li:before{
+    content:"";position:absolute;left:2px;top:11px;width:15px;height:15px;border:2px solid #9db3bd;border-radius:4px
+  }
+  ul.check li b{color:var(--ink)}
+
+  /* 甘特 */
+  .gantt{display:grid;grid-template-columns:150px 1fr;gap:10px 16px;align-items:center;margin-top:8px}
+  .gantt .label{font-size:13px;color:var(--ink);font-weight:700}
+  .gantt .track{position:relative;height:26px;background:var(--soft);border-radius:8px;overflow:hidden}
+  .gantt .bar{position:absolute;top:0;bottom:0;border-radius:8px;display:flex;align-items:center;padding:0 10px;font-size:11.5px;color:#fff;font-weight:700;white-space:nowrap}
+  .gantt .bar.p1{background:linear-gradient(90deg,#0f766e,#14958a)}
+  .gantt .bar.p2{background:linear-gradient(90deg,#1d4ed8,#3b6cf0)}
+  .gantt .bar.p3{background:linear-gradient(90deg,#b45309,#d97706)}
+  .gantt .bar.p0{background:linear-gradient(90deg,#334155,#475569)}
+  .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-left:166px;padding-right:2px}
+
+  /* UI 线框 */
+  .wire{background:#fbfdfe;border:1px solid var(--line);border-radius:14px;padding:18px}
+  .wire .winbar{display:flex;gap:6px;align-items:center;margin-bottom:14px;color:var(--muted);font-size:12px}
+  .wire .dot{width:9px;height:9px;border-radius:50%;background:#d6e0e5}
+  .wire .row{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px;margin-bottom:10px}
+  .wire .row-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .wire .name{font-weight:700;color:var(--ink);font-size:13.5px}
+  .wire .cmd{font-size:12px;color:var(--muted);margin-top:6px;word-break:break-all}
+  .wire .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+  .btn{font-size:11.5px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 10px;color:var(--ink)}
+  .btn.primary{border-color:var(--teal);color:var(--teal);background:var(--teal-soft)}
+  .switch{font-size:11.5px;color:var(--muted);display:inline-flex;align-items:center;gap:5px}
+  .switch i{width:26px;height:14px;border-radius:99px;background:#dbe5ea;display:inline-block;position:relative}
+  .switch i:after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#fff}
+  .switch.on i{background:var(--teal)}
+  .switch.on i:after{left:14px}
+  .wire .add{border:1px dashed #b9cdd6;border-radius:10px;padding:12px 14px;color:var(--muted);font-size:12.5px;background:#fff}
+  .wire .textarea{height:64px;border:1px solid var(--line);border-radius:8px;background:var(--soft);margin-top:8px}
+  .wire .state{display:inline-block;width:8px;height:8px;border-radius:50%}
+  .state.ok{background:var(--green)} .state.bad{background:var(--red)} .state.wait{background:#94a3b8}
+
+  .footer{max-width:1180px;margin:0 auto;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding:16px 28px 40px}
+
+  @media print{
+    *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}
+    .topbar{display:none} body{background:#fff}
+    main{max-width:none;padding:0}
+    .cover{border-radius:0}
+    .figure,.card,.tablewrap{break-inside:avoid}
+    section{break-inside:auto}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">omcp <span>×</span> MCP</div>
+    <nav class="nav">
+      <a href="#summary">摘要</a>
+      <a href="#arch">架构</a>
+      <a href="#flow">时序</a>
+      <a href="#state">状态机</a>
+      <a href="#perm">权限</a>
+      <a href="#contract">契约</a>
+      <a href="#ui">界面</a>
+      <a href="#plan">路线</a>
+      <a href="#accept">验收</a>
+      <a href="#risk">风险</a>
+    </nav>
+    <div class="meta-pill">基于 pi 1.5.2 · omcp 0.6.8 · v1</div>
+  </div>
+</div>
+
+<main>
+
+  <header class="cover">
+    <div class="kicker">Implementation Plan · Visual Edition</div>
+    <h1>为 omcp 接入 MCP 服务器<br>照 DAWN 的产品行为，不照它的实现方式</h1>
+    <p>协议层全部交给 pi 1.5.2 内置的 <span class="mono">builtin:mcp</span>；omcp 只负责配置、密钥、状态、信任与审批这五件事。
+       本文件是实施方案，不包含任何代码改动。</p>
+    <div class="facts">
+      <div class="fact"><b>0 行</b><span>MCP 协议代码</span></div>
+      <div class="fact"><b>≈ 550 行</b><span>新增 omcp 代码</span></div>
+      <div class="fact"><b>4 段</b><span>P0 → P3</span></div>
+      <div class="fact"><b>8 条</b><span>验收标准</span></div>
+    </div>
+  </header>
+
+  <!-- ============ 1 摘要 ============ -->
+  <section id="summary">
+    <h2><span class="no">01</span>方案摘要：一句话与六条原则</h2>
+    <p class="lead">先定分工，再谈实现。分工错了，后面每一行代码都会和 pi 的语义打架。</p>
+
+    <div class="callout">
+      <b>一句话：</b>pi 已经是完整的 MCP 宿主；omcp 缺的不是协议，而是 DAWN 已经验证过的那套<strong>产品行为</strong>——
+      配置怎么改、密钥放哪、状态怎么报、信任记在哪、只读工具怎么放行。
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="principle">
+        <div class="n">原则 01</div>
+        <h4>协议层不重写</h4>
+        <p>连接、工具发现、调用、重连、OAuth、结果截断全部由 pi 内置扩展完成。omcp 不引入 MCP 客户端依赖，也不自己起连接池。</p>
+      </div>
+      <div class="principle">
+        <div class="n">原则 02</div>
+        <h4>配置文件只写“名字”</h4>
+        <p><span class="inline-code">mcp.json</span> 里只出现变量名占位；值进 omcp 的 <span class="inline-code">SecretStore</span>。缺哪个变量，界面就点名说哪个。</p>
+      </div>
+      <div class="principle">
+        <div class="n">原则 03</div>
+        <h4>状态三态，失败必带原因</h4>
+        <p><span class="inline-code">unchecked / ready / failed</span>。未检查不等于失败；失败必须给出可执行的原因，而不是一句“连接失败”。</p>
+      </div>
+      <div class="principle">
+        <div class="n">原则 04</div>
+        <h4>信任按“名字 + 指纹”</h4>
+        <p>信任存 omcp 自己的设置，不写进项目文件。同名但命令/URL 变了就是另一台，必须重新确认。</p>
+      </div>
+      <div class="principle">
+        <div class="n">原则 05</div>
+        <h4>只读工具要能被方案期放行</h4>
+        <p>只读的 MCP 工具在只读模式与方案期应当可用；写工具不行。判据是服务器自己声明的 <span class="inline-code">readOnlyHint</span>。</p>
+      </div>
+      <div class="principle">
+        <div class="n">原则 06</div>
+        <h4>配置写入可回滚</h4>
+        <p>写之前备份原文，写之后立刻读回校验；读不回来就写回原文并报错。用户的文件不是我们的数据库。</p>
+      </div>
+    </div>
+
+    <h3>谁负责什么</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:20%">层</th><th style="width:34%">负责方</th><th>omcp 要做的事</th></tr></thead>
+        <tbody>
+          <tr><td><b>协议 / 连接</b></td><td>pi <span class="inline-code">builtin:mcp</span> + <span class="inline-code">@earendil-works/pi-mcp</span></td><td>什么都不做</td></tr>
+          <tr><td><b>配置</b></td><td>omcp</td><td>读写 <span class="inline-code">&lt;agentDir&gt;/mcp.json</span>，保留未知字段，原子写 + 校验 + 回滚</td></tr>
+          <tr><td><b>密钥</b></td><td>omcp</td><td>SecretStore 存值，启动 pi 与检查子进程时注入环境变量</td></tr>
+          <tr><td><b>状态</b></td><td>omcp</td><td>调 <span class="inline-code">pi mcp list --json</span>，把 pi 的 state 映射成三态</td></tr>
+          <tr><td><b>信任</b></td><td>omcp</td><td>按服务器名 + 命令/URL 指纹记录，存在应用设置</td></tr>
+          <tr><td><b>审批</b></td><td>omcp <span class="inline-code">permission-ext</span></td><td>所有 MCP 工具调用天然经过 tool_call；补只读判定与授权粒度</td></tr>
+          <tr><td><b>展示</b></td><td>omcp Renderer</td><td>设置页 MCP 面板、工具卡片 <span class="inline-code">[server] tool</span>、状态点</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 2 架构 ============ -->
+  <section id="arch">
+    <h2><span class="no">02</span>架构：四条通道，各走各的</h2>
+    <p class="lead">omcp 与 pi 之间只有四条通道。把它们画清楚，就不会在错误的地方写代码。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 560" role="img" aria-label="omcp 与 pi 的 MCP 架构图">
+        <defs>
+          <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#64748b"/>
+          </marker>
+          <marker id="a-teal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#0f766e"/>
+          </marker>
+          <marker id="a-blue" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#1d4ed8"/>
+          </marker>
+          <marker id="a-amber" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b45309"/>
+          </marker>
+        </defs>
+
+        <!-- 背景分区 -->
+        <rect x="16" y="54" width="300" height="452" rx="14" fill="#f7fbfc" stroke="#d8e2e8"/>
+        <text x="34" y="80" font-size="13" font-weight="700" fill="#0f1b24">Electron 主进程</text>
+        <text x="34" y="97" font-size="11" fill="#5d6f7c">配置 / 密钥 / 策略 / 进程</text>
+
+        <rect x="356" y="54" width="350" height="452" rx="14" fill="#f7fbfc" stroke="#d8e2e8"/>
+        <text x="374" y="80" font-size="13" font-weight="700" fill="#0f1b24">pi 1.5.2 进程（--mode rpc）</text>
+        <text x="374" y="97" font-size="11" fill="#5d6f7c">连接 / 工具注册 / 工具管道</text>
+
+        <rect x="746" y="54" width="278" height="452" rx="14" fill="#f7fbfc" stroke="#d8e2e8"/>
+        <text x="764" y="80" font-size="13" font-weight="700" fill="#0f1b24">MCP 服务器</text>
+        <text x="764" y="97" font-size="11" fill="#5d6f7c">stdio 或 streamable HTTP</text>
+
+        <!-- 主进程模块 -->
+        <rect x="40" y="116" width="252" height="72" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="58" y="141" font-size="12.5" font-weight="700" fill="#0f1b24">mcp-service.ts（新）</text>
+        <text x="58" y="160" font-size="11" fill="#5d6f7c">读 / 写 / 校验 / 回滚</text>
+        <text x="58" y="176" font-size="11" fill="#5d6f7c">状态查询 · 指纹计算</text>
+
+        <rect x="40" y="204" width="252" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="58" y="228" font-size="12.5" font-weight="700" fill="#0f1b24">SecretStore（已有）</text>
+        <text x="58" y="247" font-size="11" fill="#5d6f7c">mcp:&lt;server&gt;:&lt;VAR&gt;</text>
+
+        <rect x="40" y="284" width="252" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="58" y="308" font-size="12.5" font-weight="700" fill="#0f1b24">PolicyService（已有）</text>
+        <text x="58" y="327" font-size="11" fill="#5d6f7c">allow / ask / deny · 审计</text>
+
+        <rect x="40" y="364" width="252" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="58" y="388" font-size="12.5" font-weight="700" fill="#0f1b24">Supervisor（已有）</text>
+        <text x="58" y="407" font-size="11" fill="#5d6f7c">spawn / 重启 / 注入 env</text>
+
+        <rect x="40" y="444" width="252" height="46" rx="9" fill="#eef4f6" stroke="#d8e2e8"/>
+        <text x="58" y="466" font-size="11.5" fill="#24343f">apps/renderer/src/McpSettings.tsx（新）</text>
+        <text x="58" y="481" font-size="10.5" fill="#5d6f7c">列表 / 添加 / 测试 / 信任 / 停用</text>
+
+        <!-- pi 模块 -->
+        <rect x="378" y="116" width="306" height="86" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="396" y="141" font-size="12.5" font-weight="700" fill="#0f1b24">builtin:mcp</text>
+        <text x="396" y="160" font-size="11" fill="#5d6f7c">读 mcp.json · 后台连接 · 重连</text>
+        <text x="396" y="176" font-size="11" fill="#5d6f7c">mcp__&lt;server&gt;__&lt;tool&gt;</text>
+        <text x="396" y="192" font-size="11" fill="#5d6f7c">exposure: direct / deferred / codemode</text>
+
+        <rect x="378" y="222" width="306" height="72" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="396" y="247" font-size="12.5" font-weight="700" fill="#0f1b24">工具管道</text>
+        <text x="396" y="266" font-size="11" fill="#5d6f7c">tool_call → 扩展 → 执行 → tool_result</text>
+        <text x="396" y="282" font-size="11" fill="#5d6f7c">annotations 可读</text>
+
+        <rect x="378" y="314" width="306" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="396" y="338" font-size="12.5" font-weight="700" fill="#0f1b24">permission-ext（已有）</text>
+        <text x="396" y="357" font-size="11" fill="#5d6f7c">/decide · /tool-result</text>
+
+        <rect x="378" y="398" width="306" height="46" rx="9" fill="#eef4f6" stroke="#d8e2e8"/>
+        <text x="396" y="420" font-size="11.5" fill="#24343f">MCP 工具已注册（模型可见）</text>
+        <text x="396" y="435" font-size="10.5" fill="#5d6f7c">direct 直接声明 · deferred 搜索后声明</text>
+
+        <!-- 服务器 -->
+        <rect x="768" y="116" width="234" height="86" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="786" y="141" font-size="12.5" font-weight="700" fill="#0f1b24">A · stdio</text>
+        <text x="786" y="160" font-size="11" fill="#5d6f7c">npx / uvx / 本地可执行</text>
+        <text x="786" y="176" font-size="11" fill="#5d6f7c">env 由密钥注入</text>
+
+        <rect x="768" y="222" width="234" height="86" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="786" y="247" font-size="12.5" font-weight="700" fill="#0f1b24">B · streamable HTTP</text>
+        <text x="786" y="266" font-size="11" fill="#5d6f7c">headers 由密钥注入</text>
+        <text x="786" y="282" font-size="11" fill="#5d6f7c">OAuth（pi 负责）</text>
+
+        <rect x="768" y="330" width="234" height="70" rx="9" fill="#f7fbfc" stroke="#d8e2e8" stroke-dasharray="4 3"/>
+        <text x="786" y="354" font-size="11.5" font-weight="700" fill="#0f1b24">外部世界</text>
+        <text x="786" y="372" font-size="11" fill="#5d6f7c">文件 / 数据库 / 文献 / API</text>
+        <text x="786" y="388" font-size="10.5" fill="#b45309">数据可能离开本机</text>
+
+        <!-- 通道 1：配置 -->
+        <path d="M292 140 H340 V150 H370" fill="none" stroke="#1d4ed8" stroke-width="1.6" marker-end="url(#a-blue)"/>
+        <text x="300" y="132" font-size="10.5" fill="#1d4ed8">① 写 mcp.json</text>
+
+        <!-- 通道 2：密钥 env -->
+        <path d="M292 236 H330 V196 H370" fill="none" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a-teal)"/>
+        <text x="300" y="256" font-size="10.5" fill="#0f766e">② 注入 env</text>
+
+        <!-- 通道 3：状态（虚线，子进程） -->
+        <path d="M292 456 H320 V500 H700 V470" fill="none" stroke="#64748b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#a)"/>
+        <text x="470" y="516" font-size="10.5" fill="#475569">③ 状态：pi mcp list --json（独立子进程，会启动服务器）</text>
+
+        <!-- 通道 4：权限 -->
+        <path d="M378 346 H330" fill="none" stroke="#b45309" stroke-width="1.6" marker-end="url(#a-amber)"/>
+        <text x="286" y="334" font-size="10.5" fill="#b45309" text-anchor="end">④ 工具调用决策</text>
+
+        <!-- pi → server -->
+        <path d="M684 160 H752" fill="none" stroke="#64748b" stroke-width="1.6" marker-end="url(#a)"/>
+        <text x="692" y="152" font-size="10.5" fill="#475569">stdio</text>
+        <path d="M684 262 H752" fill="none" stroke="#64748b" stroke-width="1.6" marker-end="url(#a)"/>
+        <text x="692" y="254" font-size="10.5" fill="#475569">HTTP</text>
+        <path d="M885 308 V324" fill="none" stroke="#64748b" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#a)"/>
+      </svg>
+      <div class="cap"><b>图 1 · 四条通道。</b>配置（蓝）与密钥（青）由主进程写向 pi；状态（灰虚线）走独立子进程；审批（橙）由 pi 反向问主进程。MCP 服务器只和 pi 说话，omcp 不直接连。</div>
+    </div>
+
+    <div class="grid3" style="margin-top:16px">
+      <div class="card">
+        <span class="chip blue">通道 ① 配置</span>
+        <p style="margin:8px 0 0;font-size:13px">`&lt;agentDir&gt;/mcp.json`。omcp 是唯一写入者；写前备份，写后读回校验。</p>
+      </div>
+      <div class="card">
+        <span class="chip teal">通道 ② 密钥</span>
+        <p style="margin:8px 0 0;font-size:13px">配置文件里只有 `${OMCP_MCP_…}`；值在 SecretStore，spawn 时注入。</p>
+      </div>
+      <div class="card">
+        <span class="chip gray">通道 ③ 状态</span>
+        <p style="margin:8px 0 0;font-size:13px">`pi mcp list --json` 是权威；它是独立进程，不会污染当前会话。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 3 时序 ============ -->
+  <section id="flow">
+    <h2><span class="no">03</span>时序：从“粘贴一段 JSON”到“模型调到工具”</h2>
+    <p class="lead">两条路径要分开看：配置路径决定“能不能用”，调用路径决定“能不能安全地用”。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1000 840" role="img" aria-label="MCP 配置与调用时序图">
+        <defs>
+          <marker id="s" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#334155"/>
+          </marker>
+          <marker id="s-teal" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#0f766e"/>
+          </marker>
+          <marker id="s-amber" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#b45309"/>
+          </marker>
+          <marker id="s-green" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#15803d"/>
+          </marker>
+        </defs>
+
+        <!-- 泳道标题 -->
+        <g font-size="11.5" font-weight="700" fill="#0f1b24">
+          <text x="40" y="26">用户</text>
+          <text x="200" y="26">设置页</text>
+          <text x="370" y="26">主进程</text>
+          <text x="550" y="26">pi 进程</text>
+          <text x="740" y="26">MCP 服务器</text>
+          <text x="912" y="26">模型</text>
+        </g>
+        <g stroke="#d8e2e8" stroke-width="1">
+          <line x1="60" y1="40" x2="60" y2="812"/>
+          <line x1="220" y1="40" x2="220" y2="812"/>
+          <line x1="390" y1="40" x2="390" y2="812"/>
+          <line x1="570" y1="40" x2="570" y2="812"/>
+          <line x1="760" y1="40" x2="760" y2="812"/>
+          <line x1="940" y1="40" x2="940" y2="812"/>
+        </g>
+
+        <!-- 阶段条 -->
+        <g font-size="10.5" font-weight="700" letter-spacing=".08em">
+          <text x="16" y="66" fill="#0f766e">配置路径</text>
+          <text x="16" y="486" fill="#1d4ed8">调用路径</text>
+        </g>
+        <line x1="12" y1="76" x2="988" y2="76" stroke="#e3f2f0" stroke-width="5"/>
+        <line x1="12" y1="496" x2="988" y2="496" stroke="#e8eefc" stroke-width="5"/>
+
+        <!-- 配置步骤 -->
+        <g font-size="10.5" fill="#334155">
+          <path d="M68 108 H212" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="72" y="98">粘贴服务器 JSON</text>
+
+          <path d="M228 156 H382" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="232" y="146">mcp:save（name + json）</text>
+
+          <text x="400" y="204" fill="#0f766e">② 抽走密钥值 → SecretStore（不写文件）</text>
+
+          <path d="M398 252 H562" stroke="#1d4ed8" fill="none" marker-end="url(#s)"/>
+          <text x="402" y="242" fill="#1d4ed8">① 写 mcp.json（tmp → rename）</text>
+
+          <text x="400" y="300" fill="#475569">读回校验；失败则写回原文并报错</text>
+
+          <path d="M398 348 H562" stroke="#0f766e" fill="none" marker-end="url(#s-teal)"/>
+          <text x="402" y="338" fill="#0f766e">重启 pi（注入密钥 env）</text>
+
+          <path d="M578 396 H752" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="582" y="386">connect（stdio / HTTP）</text>
+
+          <text x="578" y="444" fill="#475569">注册 mcp__server__tool，按 exposure 声明</text>
+        </g>
+
+        <!-- 调用步骤 -->
+        <g font-size="10.5" fill="#334155">
+          <path d="M932 528 H578" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="582" y="518">tool_call: mcp__fs__read</text>
+
+          <path d="M562 576 H398" stroke="#b45309" fill="none" marker-end="url(#s-amber)"/>
+          <text x="402" y="566" fill="#b45309">④ /decide → allow / ask / deny</text>
+
+          <path d="M382 624 H228" stroke="#b45309" fill="none" marker-end="url(#s-amber)"/>
+          <text x="232" y="614" fill="#b45309">ask：弹审批（仅本次 / 本会话 / 总是）</text>
+
+          <path d="M228 672 H382" stroke="#15803d" fill="none" marker-end="url(#s-green)"/>
+          <text x="232" y="662" fill="#15803d">allow → 继续执行</text>
+
+          <path d="M578 720 H752" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="582" y="710">callTool(params)</text>
+
+          <path d="M752 768 H578" stroke="#334155" fill="none" marker-end="url(#s)"/>
+          <text x="582" y="758">result（isError / content）</text>
+        </g>
+
+        <!-- 注：审批超时 -->
+        <text x="232" y="700" font-size="9.5" fill="#92400e">超时 5 分钟 = 拒绝</text>
+      </svg>
+      <div class="cap"><b>图 2 · 两条路径。</b>配置路径止于“工具已注册”；调用路径每次都要过审批。红色/橙色是安全边界，不能省。</div>
+    </div>
+  </section>
+
+  <!-- ============ 4 状态机 ============ -->
+  <section id="state">
+    <h2><span class="no">04</span>状态机：未检查 ≠ 失败</h2>
+    <p class="lead">pi 只告诉我们“连上没连上”；omcp 要补的是“还没试过”和“配置变了”这两种真实状态。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 960 380" role="img" aria-label="MCP 服务器状态机">
+        <defs>
+          <marker id="m" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+          </marker>
+          <marker id="m-green" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#15803d"/>
+          </marker>
+          <marker id="m-red" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b91c1c"/>
+          </marker>
+          <marker id="m-amber" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b45309"/>
+          </marker>
+          <marker id="m-dual" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto-start-reverse">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b45309"/>
+          </marker>
+        </defs>
+
+        <!-- 顶部回环：stale -> checking -->
+        <path d="M705 118 C705 60 300 60 300 116" fill="none" stroke="#b45309" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#m-amber)"/>
+        <text x="424" y="54" font-size="10.5" fill="#92400e">重启后重新检查（stale → checking）</text>
+
+        <!-- 节点 -->
+        <g font-size="11.5">
+          <rect x="30" y="120" width="140" height="56" rx="10" fill="#ffffff" stroke="#9db3bd"/>
+          <text x="46" y="144" font-weight="700" fill="#0f1b24">unchecked</text>
+          <text x="46" y="162" font-size="10" fill="#5d6f7c">还没试过</text>
+
+          <rect x="230" y="120" width="140" height="56" rx="10" fill="#ffffff" stroke="#0f766e"/>
+          <text x="246" y="144" font-weight="700" fill="#0f1b24">checking</text>
+          <text x="246" y="162" font-size="10" fill="#5d6f7c">子进程在连</text>
+
+          <rect x="430" y="120" width="140" height="56" rx="10" fill="#e7f5ec" stroke="#15803d"/>
+          <text x="446" y="144" font-weight="700" fill="#14532d">ready</text>
+          <text x="446" y="162" font-size="10" fill="#166534">有 tools</text>
+
+          <rect x="630" y="120" width="150" height="56" rx="10" fill="#fdf1e3" stroke="#b45309"/>
+          <text x="646" y="144" font-weight="700" fill="#78350f">stale</text>
+          <text x="646" y="162" font-size="10" fill="#92400e">配置 / 密钥已变</text>
+
+          <rect x="230" y="240" width="140" height="56" rx="10" fill="#fdeaea" stroke="#b91c1c"/>
+          <text x="246" y="264" font-weight="700" fill="#7f1d1d">failed</text>
+          <text x="246" y="282" font-size="10" fill="#991b1b">error 必填</text>
+
+          <rect x="630" y="240" width="150" height="52" rx="10" fill="#f1f5f9" stroke="#94a3b8"/>
+          <text x="646" y="263" font-weight="700" fill="#334155">disabled</text>
+          <text x="646" y="280" font-size="10" fill="#475569">不连接，保留条目</text>
+        </g>
+
+        <!-- 箭头 -->
+        <g fill="none" stroke="#475569" stroke-width="1.5">
+          <path d="M170 148 H222" marker-end="url(#m)"/>
+          <path d="M370 148 H422" marker-end="url(#m-green)"/>
+          <path d="M570 148 H622" marker-end="url(#m-amber)"/>
+          <path d="M300 176 V232" marker-end="url(#m-red)"/>
+          <path d="M368 238 C402 212 402 194 372 178" stroke-dasharray="5 4" marker-end="url(#m)"/>
+          <path d="M556 178 L648 238" stroke="#b45309" marker-start="url(#m-dual)" marker-end="url(#m-amber)"/>
+        </g>
+
+        <!-- 箭头文字 -->
+        <g font-size="10.5" fill="#475569">
+          <text x="178" y="140">检查</text>
+          <text x="378" y="140" fill="#15803d">连上</text>
+          <text x="574" y="140" fill="#92400e">变更</text>
+          <text x="308" y="208" fill="#b91c1c">失败</text>
+          <text x="410" y="216">重试</text>
+          <text x="636" y="202" fill="#b45309">停用 / 启用</text>
+        </g>
+      </svg>
+      <div class="cap"><b>图 3 · 状态机。</b>只有 <span class="mono">checking</span> 是瞬态；<span class="mono">ready</span> / <span class="mono">failed</span> 都要带工具数或原因。<span class="mono">stale</span> 是 omcp 自己的状态，用来防止“界面显示连上了，其实配置已经改了”。</div>
+    </div>
+
+    <div class="tablewrap" style="margin-top:14px">
+      <table>
+        <thead><tr><th style="width:22%">pi 的 state</th><th style="width:22%">omcp 视图</th><th>规则</th></tr></thead>
+        <tbody>
+          <tr><td><code>connected</code>（或带 tools）</td><td><span class="chip green">ready</span></td><td>工具数 &gt; 0 才算 ready；工具为 0 时显示“连上了，但没有工具”</td></tr>
+          <tr><td><code>failed</code></td><td><span class="chip red">failed</span></td><td>直接把 <code>error</code> 透传；空 error 视为异常，标成“失败但没给原因”</td></tr>
+          <tr><td><code>disabled</code></td><td><span class="chip gray">disabled</span></td><td>不连接；保留条目，不算失败</td></tr>
+          <tr><td>（尚未调用检查）</td><td><span class="chip gray">unchecked</span></td><td>面板打开、保存配置后、重启后都回到这里</td></tr>
+          <tr><td>（检查子进程运行中）</td><td><span class="chip teal">checking</span></td><td>禁止并发检查；按钮变“检查中…”</td></tr>
+          <tr><td>（项目文件存在但未信任）</td><td><span class="chip amber">note</span></td><td>把 <code>pi mcp list</code> 返回的 note 原样显示，不说成“没有服务器”</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 5 权限 ============ -->
+  <section id="perm">
+    <h2><span class="no">05</span>权限：只读能放行，写工具必须问</h2>
+    <p class="lead">DAWN 把 <span class="mono">readOnlyHint</span> 一路接到了方案期门；omcp 现在只硬编码放行五个内置只读工具。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 900 470" role="img" aria-label="MCP 工具权限决策树">
+        <defs>
+          <marker id="p" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+          </marker>
+          <marker id="p-g" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#15803d"/>
+          </marker>
+          <marker id="p-r" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b91c1c"/>
+          </marker>
+        </defs>
+
+        <g font-size="11.5">
+          <!-- 主干 -->
+          <rect x="40" y="24" width="250" height="44" rx="9" fill="#0f1b24"/>
+          <text x="60" y="51" fill="#fff" font-weight="700">MCP 工具调用</text>
+
+          <rect x="40" y="100" width="250" height="44" rx="9" fill="#fff" stroke="#9db3bd"/>
+          <text x="58" y="120" fill="#0f1b24">方案期且尚未批准？</text>
+          <text x="58" y="136" font-size="10" fill="#5d6f7c">plan gate</text>
+
+          <rect x="40" y="182" width="250" height="44" rx="9" fill="#fff" stroke="#9db3bd"/>
+          <text x="58" y="202" fill="#0f1b24">策略命中 deny？</text>
+          <text x="58" y="218" font-size="10" fill="#5d6f7c">tools.deny / 路径 / 硬拒</text>
+
+          <rect x="40" y="264" width="250" height="44" rx="9" fill="#fff" stroke="#9db3bd"/>
+          <text x="58" y="284" fill="#0f1b24">策略 ask 或服务器未信任？</text>
+          <text x="58" y="300" font-size="10" fill="#5d6f7c">tool:unlisted / mcp.trusted</text>
+
+          <rect x="40" y="346" width="250" height="44" rx="9" fill="#e7f5ec" stroke="#15803d"/>
+          <text x="58" y="373" fill="#14532d" font-weight="700">执行并记审计</text>
+
+          <!-- 右分支：方案期 -->
+          <rect x="392" y="92" width="220" height="60" rx="9" fill="#fff" stroke="#0f766e"/>
+          <text x="410" y="114" fill="#0f1b24">工具声明 readOnlyHint？</text>
+          <text x="410" y="132" font-size="10" fill="#5d6f7c">或服务器级只读白名单</text>
+
+          <rect x="680" y="92" width="180" height="44" rx="9" fill="#e7f5ec" stroke="#15803d"/>
+          <text x="700" y="119" fill="#14532d" font-weight="700">✅ 放行（只读）</text>
+
+          <rect x="680" y="154" width="190" height="58" rx="9" fill="#fdeaea" stroke="#b91c1c"/>
+          <text x="700" y="178" fill="#7f1d1d" font-weight="700">⛔ plan:readonly</text>
+          <text x="700" y="199" font-size="10" fill="#991b1b">写工具在方案期不执行</text>
+
+          <!-- 右分支：策略 -->
+          <rect x="392" y="182" width="220" height="52" rx="9" fill="#fdeaea" stroke="#b91c1c"/>
+          <text x="410" y="204" fill="#7f1d1d" font-weight="700">⛔ deny（规则号）</text>
+          <text x="410" y="221" font-size="10" fill="#991b1b">不改道、不重试</text>
+
+          <!-- 右分支：ask -->
+          <rect x="392" y="264" width="220" height="52" rx="9" fill="#fdf1e3" stroke="#b45309"/>
+          <text x="410" y="286" fill="#78350f" font-weight="700">❓ 审批弹窗</text>
+          <text x="410" y="303" font-size="10" fill="#92400e">仅本次 / 本会话 / 总是 / 拒绝</text>
+
+          <rect x="680" y="264" width="180" height="52" rx="9" fill="#fdf1e3" stroke="#b45309"/>
+          <text x="700" y="286" fill="#78350f" font-weight="700">超时 = 拒绝</text>
+          <text x="700" y="303" font-size="10" fill="#92400e">5 分钟无回答按拒绝</text>
+        </g>
+
+        <!-- 箭头 -->
+        <g fill="none" stroke="#475569" stroke-width="1.5">
+          <path d="M165 68 V94" marker-end="url(#p)"/>
+          <path d="M290 122 H384" marker-end="url(#p)"/>
+          <path d="M612 104 H672" marker-end="url(#p-g)"/>
+          <path d="M612 140 H672" marker-end="url(#p-r)"/>
+          <path d="M165 144 V176" marker-end="url(#p)"/>
+          <path d="M290 204 H384" marker-end="url(#p-r)"/>
+          <path d="M165 226 V258" marker-end="url(#p)"/>
+          <path d="M290 286 H384" marker-end="url(#p)"/>
+          <path d="M165 308 V340" marker-end="url(#p-g)"/>
+          <path d="M612 290 H672" marker-end="url(#p)"/>
+        </g>
+        <g font-size="10" fill="#475569">
+          <text x="296" y="114">是</text>
+          <text x="176" y="164">否</text>
+          <text x="296" y="196">是</text>
+          <text x="176" y="246">否</text>
+          <text x="296" y="278">是</text>
+          <text x="176" y="328">否</text>
+          <text x="618" y="98" fill="#15803d">是</text>
+          <text x="618" y="154" fill="#b91c1c">否</text>
+        </g>
+      </svg>
+      <div class="cap"><b>图 4 · 决策顺序。</b>方案期先判，策略后判；只读 MCP 工具在方案期放行，依据是服务器声明的 <span class="mono">annotations.readOnlyHint</span>，不是工具名里有没有 <span class="mono">get_</span> 这种猜测。</div>
+    </div>
+
+    <div class="callout warn">
+      <b>为什么只读标记必须由 pi 进程上报：</b>主进程只能拿到 <span class="mono">tool_call</span> 的 toolName 和 input，拿不到 annotations。
+      所以要在 <span class="mono">permission-ext</span> 里于 <span class="mono">session_start</span> 时读 <span class="mono">pi.getAllTools()</span>，把 <span class="mono">{name, readOnly, destructive}</span> 上报给主进程缓存，供 <span class="mono">PolicyService.decide()</span> 使用。
+    </div>
+
+    <h3>授权粒度要改一次</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:26%">现状</th><th style="width:34%">问题</th><th>改法</th></tr></thead>
+        <tbody>
+          <tr><td><code>tools.allow</code> 精确匹配</td><td>任何 <code>mcp__x__y</code> 都落进 <code>tool:unlisted</code></td><td>支持 glob：<code>mcp__fs__read_*</code> 可单独白名单</td></tr>
+          <tr><td>授权按 <code>ruleId</code> 记忆</td><td>允许一次 <code>tool:unlisted</code>，等于放行所有未列工具（包括新加的 MCP 工具）</td><td>授权键带工具或服务器：<code>tool:unlisted:mcp__fs</code></td></tr>
+          <tr><td>只读工具不在白名单</td><td>只读模式下连 <code>list_files</code> 都拒</td><td>annotations → 只读集合，只读模式与方案期放行</td></tr>
+          <tr><td>工具卡片只显示名字</td><td>模型看到的 <code>mcp__fs__read</code> 在界面上不可读</td><td>卡片显示 <code>fs · read</code>，参数摘要优先 query/path</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 6 契约 ============ -->
+  <section id="contract">
+    <h2><span class="no">06</span>契约：类型、IPC、配置文件</h2>
+    <p class="lead">先把类型定死，后面的实现才有验收对象。</p>
+
+    <h3>共享类型（packages/shared/src/protocol.ts）</h3>
+    <pre><span class="c">// 只放视图，不放密钥值</span>
+<span class="k">export type</span> McpExposure = <span class="s">"direct"</span> | <span class="s">"deferred"</span> | <span class="s">"codemode"</span> | <span class="s">"hidden"</span>;
+<span class="k">export type</span> McpState = <span class="s">"unchecked"</span> | <span class="s">"checking"</span> | <span class="s">"ready"</span> | <span class="s">"failed"</span> | <span class="s">"disabled"</span>;
+
+<span class="k">export interface</span> McpToolView {
+  name: string;
+  description?: string;
+  readOnly?: boolean;
+}
+
+<span class="k">export interface</span> McpServerView {
+  name: string;
+  transport: <span class="s">"stdio"</span> | <span class="s">"http"</span>;
+  command?: string;
+  args: string[];
+  url?: string;
+  cwd?: string;
+  <span class="c">/** 需要的环境变量名 / 请求头名；值不在视图里 */</span>
+  secrets: string[];
+  missingSecrets: string[];
+  enabled: boolean;
+  exposure: McpExposure;
+  description?: string;
+  from: <span class="s">"global"</span> | <span class="s">"project"</span>;
+  <span class="c">/** command/args 或 url 的 sha256 前 16 位 */</span>
+  fingerprint: string;
+  <span class="c">/** 存在应用设置 mcp.trusted.&lt;name&gt;.&lt;fingerprint&gt; */</span>
+  trusted: boolean;
+  state: McpState;
+  error?: string;
+  tools: McpToolView[];
+}
+
+<span class="k">export interface</span> McpListView {
+  configPath: string;
+  servers: McpServerView[];
+  problems: string[];
+  <span class="c">/** pi 的原话：项目未信任时说明 .pi/mcp.json 被忽略 */</span>
+  note?: string;
+}</pre>
+
+    <h3>IPC（preload 暴露为 window.api）</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:26%">channel</th><th style="width:24%">入参</th><th>出参 / 副作用</th></tr></thead>
+        <tbody>
+          <tr><td><code>mcp:list</code></td><td>—</td><td><code>McpListView</code>；只读，不启动服务器</td></tr>
+          <tr><td><code>mcp:check</code></td><td><code>{ name?: string }</code></td><td>更新状态；<b>有副作用</b>：会启动所有已启用服务器</td></tr>
+          <tr><td><code>mcp:save</code></td><td><code>{ json: string, name?: string }</code></td><td><code>{ name, needsSecrets }</code>；抽走密钥值，写文件并重启 pi</td></tr>
+          <tr><td><code>mcp:remove</code></td><td><code>{ name }</code></td><td><code>McpListView</code>；只删全局配置，项目文件不动</td></tr>
+          <tr><td><code>mcp:flag</code></td><td><code>{ name, flag: "enabled"|"trusted", value, fingerprint? }</code></td><td><code>McpListView</code>；enabled 写文件，trusted 写应用设置</td></tr>
+          <tr><td><code>mcp:secret</code></td><td><code>{ name, key, value }</code></td><td><code>{ ok }</code>；只写 SecretStore，<b>不回显</b></td></tr>
+          <tr><td><code>mcp:open-config</code></td><td>—</td><td>用系统默认编辑器打开 <code>mcp.json</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>配置文件长这样</h3>
+    <pre>{
+  <span class="s">"mcpServers"</span>: {
+    <span class="s">"filesystem"</span>: {
+      <span class="s">"command"</span>: <span class="s">"npx"</span>,
+      <span class="s">"args"</span>: [<span class="s">"-y"</span>, <span class="s">"@modelcontextprotocol/server-filesystem"</span>, <span class="s">"D:/desktop/coding"</span>],
+      <span class="s">"env"</span>: {},
+      <span class="s">"exposure"</span>: <span class="s">"direct"</span>,
+      <span class="s">"description"</span>: <span class="s">"浏览与读取工作区文件"</span>
+    },
+    <span class="s">"docs"</span>: {
+      <span class="s">"url"</span>: <span class="s">"https://example.com/mcp"</span>,
+      <span class="s">"headers"</span>: { <span class="s">"Authorization"</span>: <span class="s">"Bearer ${OMCP_MCP_DOCS_AUTHORIZATION}"</span> },
+      <span class="s">"exposure"</span>: <span class="s">"deferred"</span>,
+      <span class="s">"description"</span>: <span class="s">"检索内部文档"</span>
+    }
+  }
+}</pre>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 0">
+      文件里只出现 <span class="inline-code">${OMCP_MCP_&lt;SERVER&gt;_&lt;VAR&gt;}</span>；值在 <span class="inline-code">%APPDATA%/oh-my-coding-pi/secrets.json</span>，键名 <span class="inline-code">mcp:&lt;server&gt;:&lt;VAR&gt;</span>。
+      启动 pi 与运行 <span class="inline-code">pi mcp list</span> 时都按同一张表注入环境变量。<b>配置文件可以进 git，密钥不会。</b>
+    </p>
+
+    <h3>写入流程（五步，失败可回滚）</h3>
+    <div class="grid3">
+      <div class="card"><b>1 · 备份</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">原文件复制为 <span class="inline-code">mcp.json.bak</span>，只保留一份。</p></div>
+      <div class="card"><b>2 · 改结构</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">解析 → 只改 <span class="inline-code">mcpServers[name]</span>，未知字段原样保留。</p></div>
+      <div class="card"><b>3 · 原子写</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">写 <span class="inline-code">.tmp</span> 再 rename，避免写一半。</p></div>
+      <div class="card"><b>4 · 读回校验</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">重新解析；名字、command/url、exposure 全部再验一遍。</p></div>
+      <div class="card"><b>5 · 失败回滚</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">写回原文，报出具体原因；界面不显示“已保存”。</p></div>
+      <div class="card" style="border-color:#bfe3cb;background:#f7fcf8"><b>6 · 重启 pi</b><p style="margin:6px 0 0;font-size:13px;color:var(--muted)">复用插件开关的 <span class="inline-code">supervisor.stop() → start()</span>；提示“下一段新会话生效”。</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 7 界面 ============ -->
+  <section id="ui">
+    <h2><span class="no">07</span>界面：一屏把五件事说完</h2>
+    <p class="lead">照 DAWN 的列表行：名字、来源、状态、缺什么、工具数，以及四个动作。</p>
+
+    <div class="wire">
+      <div class="winbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:8px">设置 → MCP 服务器</span></div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="state ok"></span>
+          <span class="name">filesystem</span>
+          <span class="chip gray">全局</span>
+          <span class="chip green">已连接 · 12 个工具</span>
+          <span class="chip blue" style="margin-left:auto">direct</span>
+        </div>
+        <div class="cmd">npx -y @modelcontextprotocol/server-filesystem D:/desktop/coding</div>
+        <div class="acts">
+          <button class="btn primary">试一次</button>
+          <span class="switch on"><i></i>这台我信得过</span>
+          <span class="switch"><i></i>先别连它</span>
+          <button class="btn">删掉 filesystem</button>
+        </div>
+      </div>
+
+      <div class="row" style="border-color:#f0d5ae;background:#fffdf8">
+        <div class="row-head">
+          <span class="state bad"></span>
+          <span class="name">pg</span>
+          <span class="chip gray">全局</span>
+          <span class="chip red">连接失败</span>
+          <span class="chip amber">还差 PGURL</span>
+        </div>
+        <div class="cmd">npx -y @modelcontextprotocol/server-postgres</div>
+        <div class="cmd" style="color:#92400e">它自己说：ECONNREFUSED 127.0.0.1:5432</div>
+        <div class="acts">
+          <button class="btn primary">试一次</button>
+          <button class="btn">去填 PGURL</button>
+          <span class="switch on"><i></i>这台我信得过</span>
+          <span class="switch"><i></i>先别连它</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="state wait"></span>
+          <span class="name">proj-docs</span>
+          <span class="chip amber">这个项目带的</span>
+          <span class="chip gray">未检查</span>
+          <span class="chip blue" style="margin-left:auto">deferred</span>
+        </div>
+        <div class="cmd">.pi/mcp.json · 需要信任项目才会加载</div>
+        <div class="acts"><button class="btn">去设置里打开“信任项目”</button></div>
+      </div>
+
+      <div class="add">
+        粘贴服务器文档里的 JSON（从 <span class="mono">{</span> 开始，连着大括号一起）
+        <div class="textarea"></div>
+        <div style="display:flex;gap:8px;margin-top:9px;align-items:center">
+          <button class="btn primary">解析并保存</button>
+          <span style="font-size:11.5px">名字可留空；解析后会先把密钥值抽走，再写文件</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">空态与错误态要分开</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px;color:var(--muted)">
+          <li><b>还没有配：</b>给出配置路径 + 粘贴框，不说“加载失败”</li>
+          <li><b>读不到名单：</b>显示 JSON 解析错误的位置与原文</li>
+          <li><b>项目文件被忽略：</b>原样显示 pi 的 note，并给“打开信任项目”的入口</li>
+          <li><b>连不上：</b>原因 + stderr 尾部 + 缺哪个密钥，三者分开</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">交互纪律</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px;color:var(--muted)">
+          <li>“试一次”会启动进程，按钮旁必须有这句提示</li>
+          <li>检查进行中禁止再次点击；同一时刻只跑一个子进程</li>
+          <li>保存成功后不假装“已生效”，只说“重启 pi 后生效”</li>
+          <li>密钥输入框 type=password；保存后只显示“已保存”，不回显</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 8 路线 ============ -->
+  <section id="plan">
+    <h2><span class="no">08</span>路线：四段，按依赖顺序</h2>
+    <p class="lead">P0 不改代码就能验证方向；P1 是主体；P2 是安全与体验；P3 是远程与 OAuth。</p>
+
+    <div class="card">
+      <div class="gantt">
+        <div class="label">P0 · 验证方向</div>
+        <div class="track"><div class="bar p0" style="left:0;width:9%">0.5d</div></div>
+        <div class="label">P1 · 配置与界面</div>
+        <div class="track"><div class="bar p1" style="left:9%;width:45%">2.5d</div></div>
+        <div class="label">P2 · 信任与只读</div>
+        <div class="track"><div class="bar p2" style="left:54%;width:27%">1.5d</div></div>
+        <div class="label">P3 · 远程与 OAuth</div>
+        <div class="track"><div class="bar p3" style="left:81%;width:19%">1d</div></div>
+      </div>
+      <div class="axis"><span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5.5 天</span></div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <span class="chip gray">P0 · 0 行代码</span>
+        <h3>先证明“pi 真的能用”</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px">
+          <li>手写 <span class="inline-code">&lt;agentDir&gt;/mcp.json</span>，加一台 filesystem</li>
+          <li>跑 <span class="inline-code">pi mcp list --json</span> 确认 connected</li>
+          <li>重启 omcp，新会话里让模型调用一次</li>
+          <li>记录：工具名长什么样、审批弹什么、卡片显示什么</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="chip teal">P1 · 2.5 天</span>
+        <h3>配置、状态、密钥、界面</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px">
+          <li><span class="inline-code">mcp-service.ts</span>：读写/校验/回滚/指纹/状态</li>
+          <li>IPC 7 条 + preload + shared 类型</li>
+          <li><span class="inline-code">McpSettings.tsx</span>：列表、粘贴 JSON、密钥、测试</li>
+          <li>保存后重启 pi；失败不污染配置</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="chip blue">P2 · 1.5 天</span>
+        <h3>把 MCP 纳入治理</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px">
+          <li>信任按名字+指纹，存应用设置</li>
+          <li>annotations 上报 → 只读集合 → 方案期放行</li>
+          <li><span class="inline-code">tools.allow</span> 支持 glob；授权键带服务器</li>
+          <li>工具卡片显示 <span class="inline-code">server · tool</span></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="chip amber">P3 · 1 天</span>
+        <h3>远程与登录（按需）</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px">
+          <li>spawn <span class="inline-code">pi mcp login &lt;name&gt;</span>，抓 URL 打开浏览器</li>
+          <li>启动后异步检查一次，失败不阻塞会话</li>
+          <li>远程服务器标注“数据离开本机”</li>
+          <li>可选：单台测试（不重连全部）</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>按文件排的实施顺序</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:34%">文件</th><th style="width:14%">动作</th><th>内容</th></tr></thead>
+        <tbody>
+          <tr><td><code>packages/shared/src/protocol.ts</code></td><td>改</td><td><code>McpServerView</code> / <code>McpListView</code> / IPC 参数类型</td></tr>
+          <tr><td><code>apps/desktop/src/main/mcp-service.ts</code></td><td>新增</td><td>配置读写、校验、回滚、指纹、密钥表、状态查询</td></tr>
+          <tr><td><code>apps/desktop/src/main/index.ts</code></td><td>改</td><td>7 条 IPC、启动时注册、重启 pi、信任设置读写</td></tr>
+          <tr><td><code>apps/desktop/src/preload/index.ts</code></td><td>改</td><td>暴露 <code>mcp*</code> 方法</td></tr>
+          <tr><td><code>apps/renderer/src/McpSettings.tsx</code></td><td>新增</td><td>列表 / 添加 / 测试 / 密钥 / 信任</td></tr>
+          <tr><td><code>apps/renderer/src/Settings.tsx</code></td><td>改</td><td>挂载 MCP 卡片（放在「pi 运行时」之后）</td></tr>
+          <tr><td><code>packages/permission-ext/src/index.ts</code></td><td>改</td><td>上报 <code>getAllTools()</code> 的只读标记；调 <code>/decide</code> 不变</td></tr>
+          <tr><td><code>packages/shared/src/policy.ts</code></td><td>改</td><td><code>tools.allow</code> glob；未列工具的授权键带服务器</td></tr>
+          <tr><td><code>apps/desktop/src/main/policy-service.ts</code></td><td>改</td><td>方案期门读只读集合</td></tr>
+          <tr><td><code>apps/renderer/src/tool-summary.ts</code></td><td>改</td><td><code>mcp__a__b</code> → <code>a · b</code>；参数摘要</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 9 验收 ============ -->
+  <section id="accept">
+    <h2><span class="no">09</span>验收：八条，逐条过</h2>
+    <p class="lead">每一条都要有实际证据（截图、JSON 输出或审计行），不接受“应该可以”。</p>
+
+    <div class="card">
+      <ul class="check">
+        <li><b>添加：</b>粘贴一段 filesystem 的 JSON → 保存 → 列表出现该服务器，状态从 unchecked 变 ready，工具数正确。</li>
+        <li><b>调用：</b>新会话里模型直接看到 <code>mcp__filesystem__*</code> 并成功调用一次；不出现“工具不存在”。</li>
+        <li><b>审批：</b>调用触发审批弹窗；点“拒绝”后模型收到明确拒绝原因，且服务器端没有收到该次调用。</li>
+        <li><b>密钥：</b>配置一台需要 <code>env</code> 的服务器，未填密钥时显示“还差 X”且连接失败；填上后 ready；<code>mcp.json</code> 里搜不到密钥明文。</li>
+        <li><b>回滚：</b>手工构造一个写坏的 JSON 场景（如非法 name），保存失败，文件内容与保存前逐字节一致。</li>
+        <li><b>失败信息：</b>把服务器命令改成不存在的路径，状态 failed，界面能看到 <code>error</code> 的最后几行，不是一个“连接失败”。</li>
+        <li><b>信任：</b>改掉某台服务器的命令，指纹变化；原来的“我信得过”失效，下次调用重新询问。</li>
+        <li><b>只读：</b>进入方案期，调用只读 MCP 工具被放行；调用写工具被 <code>plan:readonly</code> 拒绝。</li>
+      </ul>
+    </div>
+
+    <div class="callout warn" style="margin-top:14px">
+      <b>边界也要验收：</b>项目未信任时，<code>.pi/mcp.json</code> 不生效，界面显示 pi 的 note；<br>
+      删除服务器只删全局配置，不动项目文件；<br>
+      检查进行中重复点击不会起第二个进程。
+    </div>
+  </section>
+
+  <!-- ============ 10 风险 ============ -->
+  <section id="risk">
+    <h2><span class="no">10</span>风险、边界与“不抄清单”</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:22%">风险</th><th style="width:40%">事实</th><th>应对</th></tr></thead>
+        <tbody>
+          <tr><td><b>stdio 服务器 = 任意代码</b></td><td>pi 直接 spawn <code>command</code>；omcp 的审批门只管工具调用，管不到服务器内部</td><td>新增时显示完整命令并要求勾选“我信任这个程序”；信任按指纹记录</td></tr>
+          <tr><td><b>远程 = 数据外发</b></td><td>工具入参可能包含路径、查询词、文件片段</td><td>远程服务器行固定标注“数据离开本机”；首次使用弹一次确认</td></tr>
+          <tr><td><b>检查有副作用</b></td><td><code>pi mcp list</code> 会启动所有启用的服务器</td><td>只在打开面板/手动点“检查”时跑；按钮旁写明；串行加锁</td></tr>
+          <tr><td><b>项目配置看不到状态</b></td><td><code>pi mcp list</code> 在项目未信任时返回 note，不列项目服务器；它没有 <code>--approve</code> 参数</td><td>默认只管理全局配置；信任项目时明确提示“项目服务器状态需在会话中验证”</td></tr>
+          <tr><td><b>上下文成本</b></td><td><code>direct</code> 会全量声明工具；服务器多时撑系统提示</td><td>新服务器默认 direct；工具数 &gt; 12 时 UI 建议改 deferred</td></tr>
+          <tr><td><b>会话与配置不同步</b></td><td>改 <code>mcp.json</code> 要重启 pi 才生效</td><td>保存后重启并提示“下一段新会话生效”；不假装已生效</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>不抄清单（DAWN 有，但 omcp 不该抄）</h3>
+    <div class="grid2">
+      <div class="card">
+        <p style="margin:0;font-size:13.5px"><span class="chip red">不抄</span> <b>自建 MCP client 与连接池</b><br>
+        <span style="color:var(--muted)">pi 已有；重复实现会和 exposure、审批、结果截断脱节，且要自己维护重连与 OAuth。</span></p>
+      </div>
+      <div class="card">
+        <p style="margin:0;font-size:13.5px"><span class="chip red">不抄</span> <b>legacy SSE 传输</b><br>
+        <span style="color:var(--muted)">pi 明确拒绝 SSE；遇到只给 SSE 的服务器，让用户换 <code>/mcp</code> 端点或放弃。</span></p>
+      </div>
+      <div class="card">
+        <p style="margin:0;font-size:13.5px"><span class="chip red">不抄</span> <b>YAML 配置</b><br>
+        <span style="color:var(--muted)"><code>mcp.json</code> 是跨客户端通用格式，能直接吃 Claude/Cursor 的现成配置，这是优势。</span></p>
+      </div>
+      <div class="card">
+        <p style="margin:0;font-size:13.5px"><span class="chip red">不抄</span> <b><code>server__tool</code> 命名</b><br>
+        <span style="color:var(--muted)">pi 用 <code>mcp__server__tool</code>，已带命名空间；界面层做可读化即可，不改工具名。</span></p>
+      </div>
+      <div class="card">
+        <p style="margin:0;font-size:13.5px"><span class="chip red">不抄</span> <b>全量直接注册工具</b><br>
+        <span style="color:var(--muted)">DAWN 把所有工具都塞给模型；omcp 用 pi 的 exposure，按服务器规模选 direct / deferred。</span></p>
+      </div>
+      <div class="card" style="border-color:#bfe0da;background:#f7fcfb">
+        <p style="margin:0;font-size:13.5px"><span class="chip teal">要抄</span> <b>产品行为，不是实现</b><br>
+        <span style="color:var(--muted)">三态、缺密钥点名、试一次、信任按指纹、来源标注、写后回滚、只读贯通——这七条与协议无关，直接照做。</span></p>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:16px">
+      <b>下一步：</b>先做 P0（手写一份 <code>mcp.json</code>，用 <code>pi mcp list --json</code> 验证），确认工具名、审批、卡片三处的实际表现；
+      再按 P1 的文件顺序实施。<b>P0 不改代码，失败也没有成本。</b>
+    </div>
+  </section>
+</main>
+
+<div class="footer">
+  本文件是实施方案，不包含代码改动。所有 pi 行为均以 pi 1.5.2 的文档与实测为准；DAWN 行为以其打包代码（src/mcp/、src/tools/mcp-tool.ts、MCP池、配置写入器）为准。
+</div>
+
+</body>
+</html>
