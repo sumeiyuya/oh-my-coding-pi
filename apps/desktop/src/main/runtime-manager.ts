@@ -5,10 +5,11 @@
  * 「注册 / 激活 / 关闭 / 列举」做出来，**不改变服务路由与 UI**：
  *
  * - 默认仍只有一个 `default` runtime，现有 IPC 继续用它；
- * - 新 runtime 可以创建，但不会自动 start（P2 的多标签会按需 start）；
+ * - 新 runtime 由调用方决定何时 start；切回标签时 `activate` 会在
+ *   已停（空闲回收）的情况下重新 start；
  * - 每个 runtime 注入 `OMCP_RUNTIME_ID` / `OMCP_RUNTIME_TOKEN`，
- *   为下一步把 policy/kernel/artifact 按 token 路由做准备；
- * - `activate` 只改 activeId，不 stop/start 任何人。
+ *   为 policy/kernel/artifact 按 token 路由；
+ * - `activate` 切 active、记活动时间，并在需要时 resume。
  */
 import { SessionRuntime, type SessionRuntimeOptions } from "./session-runtime.ts";
 import { ServiceHub } from "./service-hub.ts";
@@ -17,6 +18,10 @@ export interface RuntimeInfo {
   id: string;
   active: boolean;
   workspace: string;
+  /** 是否还在跑（空闲回收后会停） */
+  running: boolean;
+  /** 是否正在跑一轮 */
+  busy: boolean;
 }
 
 export class RuntimeManager {
@@ -24,9 +29,21 @@ export class RuntimeManager {
   /** token → runtimeId；P1b2 的服务路由用 */
   readonly services = new ServiceHub();
   private activeId: string | null = null;
+  private maxRuntimes: number;
+
+  constructor(options: { maxRuntimes?: number } = {}) {
+    this.maxRuntimes = Math.max(1, options.maxRuntimes ?? 2);
+  }
+
+  setMaxRuntimes(value: number): void {
+    this.maxRuntimes = Math.max(1, Math.min(4, Math.floor(value)));
+  }
 
   create(opts: SessionRuntimeOptions): SessionRuntime {
     if (this.runtimes.has(opts.id)) throw new Error(`runtime 已存在：${opts.id}`);
+    if (this.runtimes.size >= this.maxRuntimes) {
+      throw new Error(`活跃 runtime 已达上限（${this.maxRuntimes}）；先关闭一个后台标签`);
+    }
     const runtime = new SessionRuntime(opts);
     // P1 的 side-channel 路由会用；当前服务仍读全局 token。
     runtime.setEnv("OMCP_RUNTIME_ID", runtime.id);
@@ -47,7 +64,6 @@ export class RuntimeManager {
     return runtime;
   }
 
-  /** 只切 active；不 stop/start，行为由 P2 的标签切换决定 */
   /** 会话切换时同步给 ServiceHub，供 policy/artifact 判定用 */
   updateSession(id: string, sessionFile: string | null): void {
     const runtime = this.require(id);
@@ -55,9 +71,12 @@ export class RuntimeManager {
     this.services.updateSession(runtime.token, sessionFile);
   }
 
+  /** 切 active；若目标已被空闲回收，重新 start 以 resume */
   activate(id: string): SessionRuntime {
     const runtime = this.require(id);
     this.activeId = id;
+    runtime.markActive();
+    if (!runtime.isRunning) runtime.start();
     return runtime;
   }
 
@@ -70,6 +89,8 @@ export class RuntimeManager {
       id: runtime.id,
       active: runtime.id === this.activeId,
       workspace: runtime.workspace,
+      running: runtime.isRunning,
+      busy: runtime.busy,
     }));
   }
 
@@ -83,6 +104,22 @@ export class RuntimeManager {
     if (this.activeId === id) {
       this.activeId = this.runtimes.keys().next().value ?? null;
     }
+  }
+
+  /**
+   * P3：停掉“非 active、非 busy、空闲超过 idleMs”的 runtime。
+   * 不删除 runtime（标签还在），切回时 activate 会重新 start。
+   */
+  reapIdle(idleMs: number, now = Date.now()): string[] {
+    const stopped: string[] = [];
+    for (const [id, runtime] of this.runtimes) {
+      if (id === "default" || id === this.activeId) continue;
+      if (runtime.busy || !runtime.isRunning) continue;
+      if (now - runtime.lastActiveAt < idleMs) continue;
+      runtime.stop();
+      stopped.push(id);
+    }
+    return stopped;
   }
 
   closeAll(): void {

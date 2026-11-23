@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## 0.6.11 — 2026-11-23
+
+### 修改 3 · P3a：runtime 上限与空闲回收
+
+- `RuntimeManager` 默认最多 2 个 runtime（`OMCP_MAX_RUNTIMES` 可设 1–4）；新建超限直接拒绝。
+- `SessionRuntime` 记录 `busy` / `lastActiveAt`；`RuntimeManager.reapIdle` 停掉非 active、非 busy、空闲超过阈值的 runtime（默认 30 分钟，`OMCP_RUNTIME_IDLE_MINUTES`）。
+- 被回收的 runtime 保留标签与会话，切回时 `activate` 重新 start（resume）。
+
+### 修改 3 · P3b：挂起状态与回收通知
+
+- `runtime:list` 带 `running` / `busy`；标签显示“挂起”、运行点。
+- 回收后主进程推送 `runtime:changed`，renderer 更新标签。
+- 切回挂起 runtime 时自动 resume；消息加载失败会重试一次。
+
+### 修改 3 · P3c：设置页多会话参数
+
+- 设置 → 多会话：最多活跃 runtime（1–4）、空闲回收分钟（1–1440），保存即时生效。
+- 默认值仍可由 `OMCP_MAX_RUNTIMES` / `OMCP_RUNTIME_IDLE_MINUTES` 提供。
+
+### 修改 3 · P3d：挂起提示与运行计数
+
+- 标签栏显示“N 运行 / M 标签”。
+- runtime 被回收/恢复时给出 toast 提示。
+
+### 修改 3 · P4a：审批来源与审计导出收尾
+
+- 审批弹窗显示“来源：默认/后台 N”。
+- `audit:export` 按 active runtime 导出；后台 runtime 文件名带 runtime id 后缀。
+- 尚无分屏/多窗口、跨工作区、进程/内存提示。
+- 已验收：`OMCP_RUNTIME_IDLE_MINUTES=1` 真机创建后台 runtime，约 140s 后 `running=false`；点回标签后 `running=true` 并恢复消息（空会话 0 条）。
+
 ## 0.6.10 — 2026-11-22
 
 ### 修改 1：权限弹层文字布局

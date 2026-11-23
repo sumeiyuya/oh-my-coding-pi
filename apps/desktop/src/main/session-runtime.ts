@@ -49,6 +49,8 @@ export class SessionRuntime {
   private workspaceRoot: string;
   private currentSessionFile: string | null;
   private currentSessionDir: string | null = null;
+  private activeAt = Date.now();
+  private busyFlag = false;
 
   constructor(opts: SessionRuntimeOptions) {
     this.id = opts.id;
@@ -58,7 +60,10 @@ export class SessionRuntime {
     this.supervisor = new PiSupervisor(opts.provider ?? "", opts.model ?? "");
     this.rpc = new RpcClient();
     this.pump = new EventPump({
-      emit: (ev) => opts.emit(ev, this.id),
+      emit: (ev) => {
+        this.touch(ev);
+        opts.emit(ev, this.id);
+      },
       enabled: opts.pumpEnabled ?? true,
     });
     if (opts.autoAttach) {
@@ -77,6 +82,19 @@ export class SessionRuntime {
 
   get workspace(): string {
     return this.workspaceRoot;
+  }
+
+  /** 最近一次活动 / 是否在跑：P3 的空闲回收用 */
+  get lastActiveAt(): number { return this.activeAt; }
+  get busy(): boolean { return this.busyFlag; }
+  get isRunning(): boolean { return this.supervisor.current !== null; }
+
+  markActive(): void { this.activeAt = Date.now(); }
+
+  private touch(ev: PiEvent): void {
+    this.activeAt = Date.now();
+    if (ev.type === "agent_start") this.busyFlag = true;
+    else if (ev.type === "agent_settled") this.busyFlag = false;
   }
 
   /** 当前 runtime 的环境变量快照（P1 注入子进程时用） */

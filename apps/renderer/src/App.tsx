@@ -466,6 +466,7 @@ export default function App() {
   const [tree, setTree] = useState<SessionTreeResult | null>(null);
   const [notice, setNotice] = useState("");
   const [runtimes, setRuntimes] = useState<RuntimeView[]>([]);
+  const runtimesRef = useRef<RuntimeView[]>([]);
   const [unreadByRuntime, setUnreadByRuntime] = useState<Record<string, number>>({});
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [appError, setAppError] = useState<AppError | null>(null);
@@ -682,11 +683,33 @@ export default function App() {
     await refreshTree();
   }, [refreshState, refreshStats, refreshTree, discardPendingText]);
 
+  function runtimeLabel(id?: string): string | undefined {
+    if (!id) return undefined;
+    if (id === "default") return "默认";
+    const index = runtimes.findIndex((item) => item.id === id);
+    return index >= 0 ? `后台 ${index}` : "后台";
+  }
+
+  function applyRuntimeList(list: RuntimeView[]): void {
+    const previous = runtimesRef.current;
+    for (const item of list) {
+      if (item.id === "default") continue;
+      const before = previous.find((x) => x.id === item.id);
+      if (before?.running && !item.running) {
+        setNotice("后台 runtime 已挂起（空闲回收）；切回标签会自动恢复。");
+      } else if (before && !before.running && item.running) {
+        setNotice("后台 runtime 已恢复。");
+      }
+    }
+    runtimesRef.current = list;
+    setRuntimes(list);
+  }
+
   const refreshRuntimes = useCallback(async () => {
     try {
-      setRuntimes(((await window.api.listRuntimes()) as RuntimeView[]) ?? []);
+      applyRuntimeList(((await window.api.listRuntimes()) as RuntimeView[]) ?? []);
     } catch {
-      setRuntimes([]);
+      applyRuntimeList([]);
     }
   }, []);
 
@@ -694,13 +717,20 @@ export default function App() {
     void refreshRuntimes();
   }, [refreshRuntimes]);
 
+  useEffect(() => {
+    return window.api.onRuntimeChanged((list) => {
+      applyRuntimeList((list as RuntimeView[]) ?? []);
+    });
+  }, []);
+
   const activateRuntime = useCallback(
     async (id: string) => {
       activeRuntimeRef.current = id;
       setActiveRuntimeId(id);
       setUnreadByRuntime((prev) => ({ ...prev, [id]: 0 }));
       try {
-        await window.api.activateRuntime(id);
+        const list = (await window.api.activateRuntime(id)) as RuntimeView[];
+        if (list) applyRuntimeList(list);
       } catch {
         // 主进程不可用时仍允许看本地缓冲
       }
@@ -709,7 +739,14 @@ export default function App() {
           const list = (await window.api.getRuntimeMessages(id)) as AgentMessage[];
           setMessagesFor(id, toMsgs(list));
         } catch {
-          setMessagesFor(id, []);
+          // runtime 可能刚被回收、正在 resume；等一拍再试一次
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          try {
+            const list = (await window.api.getRuntimeMessages(id)) as AgentMessage[];
+            setMessagesFor(id, toMsgs(list));
+          } catch {
+            setMessagesFor(id, []);
+          }
         }
       }
       try {
@@ -2280,7 +2317,9 @@ export default function App() {
             {runtimes.map((runtime, index) => (
               <div
                 key={runtime.id}
-                className={`runtime-tab ${runtime.id === activeRuntimeId ? "on" : ""}`}
+                className={`runtime-tab ${runtime.id === activeRuntimeId ? "on" : ""} ${
+                  runtime.id !== "default" && !runtime.running ? "suspended" : ""
+                }`}
               >
                 <button
                   type="button"
@@ -2288,13 +2327,30 @@ export default function App() {
                   role="tab"
                   aria-selected={runtime.id === activeRuntimeId}
                   onClick={() => void activateRuntime(runtime.id)}
-                  title={runtime.workspace || runtime.id}
+                  title={[
+                    runtime.workspace || runtime.id,
+                    runtime.id !== "default" && !runtime.running
+                      ? "已挂起，切回会恢复"
+                      : runtime.busy || busyByRuntime[runtime.id]
+                        ? "运行中"
+                        : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 >
                   <span
                     className="runtime-dot"
-                    data-busy={busyByRuntime[runtime.id] ? "1" : undefined}
+                    data-busy={
+                      runtime.busy || busyByRuntime[runtime.id] ? "1" : undefined
+                    }
+                    data-suspended={
+                      runtime.id !== "default" && !runtime.running ? "1" : undefined
+                    }
                   />
                   {runtime.id === "default" ? "默认" : `后台 ${index}`}
+                  {runtime.id !== "default" && !runtime.running ? (
+                    <span className="runtime-tab-state">挂起</span>
+                  ) : null}
                   {unreadByRuntime[runtime.id] ? (
                     <span className="runtime-badge">{unreadByRuntime[runtime.id]}</span>
                   ) : null}
@@ -2319,6 +2375,9 @@ export default function App() {
             >
               ＋
             </button>
+            <span className="runtime-count">
+              {runtimes.filter((item) => item.running).length} 运行 / {runtimes.length}
+            </span>
           </div>
           <div className="bar-right">
             <PermissionPill />
@@ -2869,7 +2928,13 @@ export default function App() {
           </div>
         </div>
       )}
-      {approval && <ApprovalModal request={approval} onRespond={respondApproval} />}
+      {approval && (
+        <ApprovalModal
+          request={approval}
+          onRespond={respondApproval}
+          runtimeLabel={runtimeLabel(approval.runtimeId)}
+        />
+      )}
 
       {imagePreview && (
         <div

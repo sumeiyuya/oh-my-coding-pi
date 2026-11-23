@@ -76,5 +76,9 @@ test("事件泵：dispose 前把缓冲的文本冲出来", () => {
   assert.equal(event.assistantMessageEvent.type, "text_delta");
   assert.equal(event.assistantMessageEvent.delta, "hi");
   assert.deepEqual(ids, ["r1"]);
+  runtime.pump.push({ type: "agent_start" } as PiEvent);
+  assert.equal(runtime.busy, true);
+  runtime.pump.push({ type: "agent_settled" } as PiEvent);
+  assert.equal(runtime.busy, false);
   runtime.dispose();
 });

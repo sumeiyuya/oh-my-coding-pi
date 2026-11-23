@@ -339,6 +339,38 @@ export default function Settings({
         )}
       </section>
 
+      <section className="perm-card">
+        <div className="perm-head">
+          <b>多会话</b>
+          <span className="perm-note">默认 2 个活跃 runtime</span>
+        </div>
+        <div className="perm-form">
+          <label>
+            最多活跃 runtime
+            <input
+              type="number"
+              min={1}
+              max={4}
+              value={String(value("maxRuntimes"))}
+              onChange={(e) => set("maxRuntimes", Number(e.target.value))}
+            />
+          </label>
+          <label>
+            空闲回收（分钟）
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              value={String(value("runtimeIdleMinutes"))}
+              onChange={(e) => set("runtimeIdleMinutes", Number(e.target.value))}
+            />
+          </label>
+        </div>
+        <div className="perm-note">
+          后台 runtime 空闲超过该分钟会停 pi，标签保留；切回时自动恢复。默认标签与当前标签不会被回收。
+        </div>
+      </section>
+
       {setupProvider && (
         <ProviderSetupDialog
           provider={setupProvider}

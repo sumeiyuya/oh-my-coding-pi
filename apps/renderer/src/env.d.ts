@@ -124,6 +124,7 @@ type P1Api = Pick<
   | "getRuntimeMessages"
   | "getRuntimeState"
   | "getRuntimeStats"
+  | "onRuntimeChanged"
   | "createRuntime"
   | "activateRuntime"
   | "closeRuntime"

@@ -571,6 +571,10 @@ export interface AppSettingsDetail {
   permissionMode: PermissionMode;
   /** 推理强度默认档：新会话/重启 pi 时沿用 */
   thinkingLevel: ThinkingLevel;
+  /** P3c：最多同时保留几个 runtime（默认 2） */
+  maxRuntimes: number;
+  /** P3c：后台 runtime 空闲多少分钟后停 pi（默认 30） */
+  runtimeIdleMinutes: number;
 }
 
 /** 切模型的结果：失败时带上 pi 的原文，界面不能假装换过了。 */
@@ -701,6 +705,10 @@ export interface RuntimeView {
   id: string;
   active: boolean;
   workspace: string;
+  /** P3b：runtime 是否还在跑（空闲回收后会停） */
+  running: boolean;
+  /** P3b：是否正在跑一轮 */
+  busy: boolean;
 }
 
 export interface McpLoginResult {
@@ -1413,6 +1421,7 @@ export interface PreloadApi {
   getRuntimeMessages(id: string): Promise<AgentMessage[]>;
   getRuntimeState(id: string): Promise<SessionState | null>;
   getRuntimeStats(id: string): Promise<SessionStats | null>;
+  onRuntimeChanged(cb: (list: RuntimeView[]) => void): () => void;
   createRuntime(input?: {
     workspaceRoot?: string;
     sessionFile?: string | null;

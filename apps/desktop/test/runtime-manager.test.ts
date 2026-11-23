@@ -61,3 +61,24 @@ test("创建时注入 runtime id/token 环境变量", () => {
   assert.equal(env.OMCP_RUNTIME_TOKEN, a.token);
   manager.closeAll();
 });
+
+test("maxRuntimes 上限拒绝第三个 runtime", () => {
+  const manager = new RuntimeManager({ maxRuntimes: 2 });
+  const base = { emit: () => {}, pumpEnabled: false };
+  manager.create({ id: "a", ...base });
+  manager.create({ id: "b", ...base });
+  assert.throws(() => manager.create({ id: "c", ...base }), /上限/);
+  manager.closeAll();
+});
+
+test("setMaxRuntimes 动态调整上限", () => {
+  const manager = new RuntimeManager({ maxRuntimes: 2 });
+  const base = { emit: () => {}, pumpEnabled: false };
+  manager.create({ id: "a", ...base });
+  manager.create({ id: "b", ...base });
+  assert.throws(() => manager.create({ id: "c", ...base }), /上限/);
+  manager.setMaxRuntimes(3);
+  manager.create({ id: "c", ...base });
+  assert.equal(manager.list().length, 3);
+  manager.closeAll();
+});

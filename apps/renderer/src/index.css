@@ -3947,3 +3947,16 @@ body.sash-dragging {
 .runtime-tab .runtime-dot[data-busy="1"] {
   background: var(--accent); opacity: 1;
 }
+.runtime-tab.suspended { opacity: .62; }
+.runtime-tab-state {
+  font-size: 9px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 99px;
+  padding: 0 4px; margin-left: 2px;
+}
+.runtime-tab .runtime-dot[data-suspended="1"] {
+  background: transparent; border: 1px solid var(--muted); opacity: 1;
+}
+.runtime-count {
+  font-size: 10.5px; color: var(--muted);
+  white-space: nowrap; padding-left: 2px;
+}

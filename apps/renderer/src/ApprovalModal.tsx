@@ -12,9 +12,11 @@ const SCOPE_HINT: Record<string, string> = {
 export default function ApprovalModal({
   request,
   onRespond,
+  runtimeLabel,
 }: {
   request: ApprovalRequest;
   onRespond: (scope: ApprovalScope) => void;
+  runtimeLabel?: string;
 }) {
   const [remaining, setRemaining] = useState(Math.max(0, Math.floor(request.timeoutMs / 1000)));
   const scopeHint = approvalScopeHint(request.ruleId);
@@ -43,6 +45,11 @@ export default function ApprovalModal({
           <span className={`approval-count ${remaining <= 10 ? "low" : ""}`}>{remaining}s</span>
         </div>
         <div className="approval-meta">
+          {runtimeLabel && (
+            <span>
+              来源 <code>{runtimeLabel}</code>
+            </span>
+          )}
           <span>
             工具 <code>{request.toolName}</code>
           </span>

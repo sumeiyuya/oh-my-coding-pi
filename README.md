@@ -12,9 +12,9 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 ## 版本
 
-- 当前版本：**0.6.10**（2026-11-22）
-- 发布说明：[`docs/release-notes-0.6.10.md`](docs/release-notes-0.6.10.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.10](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.10)
+- 当前版本：**0.6.11**（2026-11-23）
+- 发布说明：[`docs/release-notes-0.6.11.md`](docs/release-notes-0.6.11.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
+- 安装包：[GitHub Release v0.6.11](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.11)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么
@@ -31,18 +31,18 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 | MCP | 本地/远程 MCP 服务器管理、密钥安全存储、状态与 OAuth 登录、只读工具与审批适配 |
 | 诊断 | 回合级 `perf.jsonl`、错误分类、诊断包导出、内部自检模式 |
 
-0.6.10 的重点是 **多项目 / 多会话并行**：每个会话一个独立 runtime，标签切换不打断后台运行；消息、输入、附件、队列、审批、审计、统计各自归位。另含对话图片缩略图与权限弹层文字布局修复。细节见发布说明。
+0.6.11 在 0.6.10 的多 runtime 基础上补齐**长期开着的可用性**：默认最多 2 个活跃 runtime，后台空闲 30 分钟停 pi、标签保留，切回自动 resume；标签栏显示挂起状态与“N 运行 / M 标签”，设置页可调上限与回收时间。另含审批来源标签与按 runtime 导出审计。细节见发布说明。
 
 ## 安装
 
-1. 从 [Release v0.6.10](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.10) 下载 `oh.my.coding.pi.Setup.0.6.10.exe` 与 `SHA256SUMS.txt`。
+1. 从 [Release v0.6.11](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.11) 下载 `oh.my.coding.pi.Setup.0.6.11.exe` 与 `SHA256SUMS.txt`。
 2. 双击安装；默认装到 `%LOCALAPPDATA%\Programs\oh my coding pi\`。
 3. 静默安装（PowerShell）：
 
 ```powershell
-Start-Process "oh my coding pi Setup 0.6.10.exe" -ArgumentList "/S" -Wait
+Start-Process "oh my coding pi Setup 0.6.11.exe" -ArgumentList "/S" -Wait
 # 指定目录：/D 必须放最后，且不能加引号
-Start-Process "oh my coding pi Setup 0.6.10.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
+Start-Process "oh my coding pi Setup 0.6.11.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
 ```
 
 > 不要在 Git Bash 里直接传 `/S`，MSYS 会把它当路径。用 PowerShell。
@@ -62,6 +62,8 @@ Start-Process "oh my coding pi Setup 0.6.10.exe" -ArgumentList '/S', '/D=C:\Tool
 | `PI_PROVIDER` / `PI_MODEL` | 覆盖默认 provider / 模型 |
 | `OMCP_PERF_TRACE=0` | 关闭回合时序写盘（事件仍发给界面） |
 | `OMCP_EVENT_PUMP=0` | 关闭事件合并，退回逐条转发 |
+| `OMCP_MAX_RUNTIMES` | 最多同时保留的 runtime 数（1–4，默认 2） |
+| `OMCP_RUNTIME_IDLE_MINUTES` | 后台 runtime 空闲多少分钟后停 pi（1–1440，默认 30） |
 | `OMCP_KERNEL_PREWARM=python\|r` | 打开工作区后预热对应内核（默认关闭） |
 | `P1_SELFTEST=1` | 内部自检，正常使用不要设置 |
 

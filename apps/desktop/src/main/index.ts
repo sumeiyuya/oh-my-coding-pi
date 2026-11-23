@@ -184,6 +184,15 @@ const appSettings = {
   permissionMode: "ask-risky" as PermissionMode,
   /** 推理强度默认档：新会话与 pi 重启后沿用（pi 自带默认值是 medium，这里保持一致） */
   thinkingLevel: "medium" as ThinkingLevel,
+  /** P3c：活跃 runtime 上限与空闲回收分钟 */
+  maxRuntimes: Math.max(
+    1,
+    Math.min(4, Number(process.env.OMCP_MAX_RUNTIMES ?? 2) || 2),
+  ),
+  runtimeIdleMinutes: Math.max(
+    1,
+    Number(process.env.OMCP_RUNTIME_IDLE_MINUTES ?? 30) || 30,
+  ),
 };
 interface PendingApproval {
   request: ApprovalRequest;
@@ -226,7 +235,16 @@ const turnTrace = new TurnTrace({
 turnTrace.setPhaseSink((ev) => send("pi:turn", ev));
 
 /** 运行时管理器（P1a：默认 runtime 仍唯一激活；P2 再加标签） */
-const runtimeManager = new RuntimeManager();
+const runtimeManager = new RuntimeManager({ maxRuntimes: appSettings.maxRuntimes });
+if (!SELFTEST) {
+  const reaper = setInterval(() => {
+    const stopped = runtimeManager.reapIdle(
+      Math.max(1, appSettings.runtimeIdleMinutes) * 60_000,
+    );
+    if (stopped.length) send("runtime:changed", runtimeManager.list());
+  }, 60_000);
+  reaper.unref?.();
+}
 const defaultRuntime = runtimeManager.create({
   id: "default",
   provider: process.env.PI_PROVIDER || "",
@@ -1035,6 +1053,8 @@ function saveAppSettings(): void {
     existing.plugins = appSettings.plugins;
     existing.permissionMode = appSettings.permissionMode;
     existing.thinkingLevel = appSettings.thinkingLevel;
+    existing.maxRuntimes = appSettings.maxRuntimes;
+    existing.runtimeIdleMinutes = appSettings.runtimeIdleMinutes;
     writeFileSync(settingsFile, JSON.stringify(existing, null, 2) + "\n", "utf8");
   } catch (err) {
     // 保存失败不阻断；但要让日志里留下痕迹，否则用户会以为设置已生效
@@ -1067,6 +1087,8 @@ function loadSettings(): void {
       plugins?: Record<string, unknown>;
       permissionMode?: unknown;
       thinkingLevel?: unknown;
+      maxRuntimes?: number;
+      runtimeIdleMinutes?: number;
     };
     if (typeof data.policyPath === "string" && data.policyPath.trim()) {
       settingsPolicyPath = data.policyPath.trim();
@@ -1094,6 +1116,15 @@ function loadSettings(): void {
       data.permissionMode === "allow-all"
     ) {
       appSettings.permissionMode = data.permissionMode;
+    }
+    if (typeof data.maxRuntimes === "number" && Number.isFinite(data.maxRuntimes)) {
+      appSettings.maxRuntimes = Math.max(1, Math.min(4, Math.floor(data.maxRuntimes)));
+    }
+    if (
+      typeof data.runtimeIdleMinutes === "number" &&
+      Number.isFinite(data.runtimeIdleMinutes)
+    ) {
+      appSettings.runtimeIdleMinutes = Math.max(1, Math.min(1440, Math.floor(data.runtimeIdleMinutes)));
     }
     if (isThinkingLevel(data.thinkingLevel)) {
       appSettings.thinkingLevel = data.thinkingLevel;
@@ -3367,6 +3398,8 @@ ipcMain.handle(
     readonlyNotebook: appSettings.readonlyNotebook,
     permissionMode: appSettings.permissionMode,
     thinkingLevel: appSettings.thinkingLevel,
+    maxRuntimes: appSettings.maxRuntimes,
+    runtimeIdleMinutes: appSettings.runtimeIdleMinutes,
   }),
 );
 
@@ -3440,6 +3473,19 @@ ipcMain.handle(
       // 当前会话若没有单独覆盖，立即生效；有覆盖时保持会话档
       if (!sessionPermissionOverride()) policyService?.setMode(appSettings.permissionMode);
     }
+    if (typeof patch.maxRuntimes === "number" && Number.isFinite(patch.maxRuntimes)) {
+      appSettings.maxRuntimes = Math.max(1, Math.min(4, Math.floor(patch.maxRuntimes)));
+      runtimeManager.setMaxRuntimes(appSettings.maxRuntimes);
+    }
+    if (
+      typeof patch.runtimeIdleMinutes === "number" &&
+      Number.isFinite(patch.runtimeIdleMinutes)
+    ) {
+      appSettings.runtimeIdleMinutes = Math.max(
+        1,
+        Math.min(1440, Math.floor(patch.runtimeIdleMinutes)),
+      );
+    }
     if (isThinkingLevel(patch.thinkingLevel)) {
       appSettings.thinkingLevel = patch.thinkingLevel;
       defaultRuntime.setThinkingLevel(patch.thinkingLevel);
@@ -3496,6 +3542,8 @@ ipcMain.handle(
       readonlyNotebook: appSettings.readonlyNotebook,
       permissionMode: appSettings.permissionMode,
       thinkingLevel: appSettings.thinkingLevel,
+      maxRuntimes: appSettings.maxRuntimes,
+      runtimeIdleMinutes: appSettings.runtimeIdleMinutes,
     };
   },
 );
@@ -3612,12 +3660,18 @@ ipcMain.handle(
 );
 
 ipcMain.handle("audit:export", (): string | null => {
-  if (!workspaceRoot) return null;
-  const entries = (auditLog?.read(5000) ?? []) as AuditEntryView[];
+  const runtimeId = runtimeManager.active?.id;
+  const root =
+    runtimeId && runtimeId !== "default"
+      ? runtimeManager.get(runtimeId)?.workspace ?? workspaceRoot
+      : workspaceRoot;
+  if (!root) return null;
+  const entries = (auditFor(runtimeId)?.read(5000) ?? []) as AuditEntryView[];
   const dir = join(app.getPath("userData"), "exports");
   mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const file = join(dir, "audit-" + stamp + ".csv");
+  const suffix = runtimeId && runtimeId !== "default" ? "-" + runtimeId : "";
+  const file = join(dir, "audit-" + stamp + suffix + ".csv");
   const cell = (value: unknown) => '"' + String(value ?? "").replace(/"/g, '""') + '"';
   const header = ["ts", "toolName", "ruleId", "decision", "scope", "summary", "sessionId"].join(",");
   const body = entries
@@ -5318,6 +5372,8 @@ app.whenReady().then(async () => {
   settingsFile = join(app.getPath("userData"), "settings.json");
 
   loadSettings();
+  // 设置文件里的上限在 RuntimeManager 创建之后才读入，启动时要同步一次
+  runtimeManager.setMaxRuntimes(appSettings.maxRuntimes);
 
   grants = new GrantStore(join(app.getPath("userData"), "grants.json"));
   secretStore = new SecretStore(join(app.getPath("userData"), "secrets.json"));

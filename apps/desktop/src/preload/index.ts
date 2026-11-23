@@ -210,6 +210,11 @@ contextBridge.exposeInMainWorld("api", {
   getRuntimeMessages: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:messages", id),
   getRuntimeState: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:state", id),
   getRuntimeStats: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:stats", id),
+  onRuntimeChanged: (cb: (list: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, list: unknown) => cb(list);
+    ipcRenderer.on("runtime:changed", listener);
+    return () => ipcRenderer.removeListener("runtime:changed", listener);
+  },
   createRuntime: (input?: unknown): Promise<unknown> => ipcRenderer.invoke("runtime:create", input),
   activateRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:activate", id),
   closeRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:close", id),
