@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { pathsFromToolResult, type ArtifactLedger, type ArtifactListResult } from "./artifact-ledger";
+import { pathsFromToolResult, type ArtifactLedger, type ArtifactListResult } from "./artifact-ledger.ts";
 
 /**
  * 产物账本的本地 HTTP 端点：pi 扩展在每次 tool_result 后把「工具 + 入参」送过来。
@@ -16,11 +16,19 @@ export class ArtifactService {
   private readonly ledger: ArtifactLedger;
   private readonly workspace: () => string | null;
   private readonly session: () => string;
+  /** P1b2c：runtime token → 该 runtime 的 workspace */
+  private readonly resolve?: (token: string) => { runtimeId: string; workspace: string } | undefined;
 
-  constructor(ledger: ArtifactLedger, workspace: () => string | null, session: () => string) {
+  constructor(
+    ledger: ArtifactLedger,
+    workspace: () => string | null,
+    session: () => string,
+    resolve?: (token: string) => { runtimeId: string; workspace: string } | undefined,
+  ) {
     this.ledger = ledger;
     this.workspace = workspace;
     this.session = session;
+    this.resolve = resolve;
   }
 
   async start(): Promise<void> {
@@ -51,7 +59,14 @@ export class ArtifactService {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.headers.authorization !== `Bearer ${this.token}`) {
+    const authorization = req.headers.authorization;
+    const token =
+      typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "";
+    const resolved = this.resolve?.(token);
+    const legacy = token !== "" && token === this.token;
+    if (!resolved && !legacy) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return;
@@ -75,7 +90,7 @@ export class ArtifactService {
         return;
       }
       const tool = typeof body.toolName === "string" ? body.toolName : "";
-      const root = this.workspace();
+      const root = resolved?.workspace ?? this.workspace();
       if (!tool || !root) {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "toolName/workspace missing" }));

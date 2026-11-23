@@ -74,3 +74,30 @@ test("纯 toolResult 的 user 消息不会变成气泡", () => {
   ]);
   assert.equal(out.length, 0);
 });
+
+test("user 消息保留图片块，文字照常保留", () => {
+  const out = messagesFromAgent([
+    run(
+      [
+        { type: "text", text: "看图" },
+        { type: "image", data: "YWJj", mimeType: "image/png" },
+      ],
+      "user",
+    ),
+  ]);
+  assert.equal(out.length, 1);
+  const msg = out[0] as Extract<(typeof out)[number], { kind: "user" }>;
+  assert.equal(msg.text, "看图");
+  assert.equal(msg.attachments?.length, 1);
+  assert.equal(msg.attachments?.[0]?.mimeType, "image/png");
+  assert.equal(msg.attachments?.[0]?.data, "YWJj");
+});
+
+test("只有图片没有文字的 user 消息也保留", () => {
+  const out = messagesFromAgent([
+    run([{ type: "image", data: "eA==", mimeType: "image/jpeg" }], "user"),
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal((out[0] as { text?: string }).text, "");
+  assert.equal((out[0] as { attachments?: unknown[] }).attachments?.length, 1);
+});

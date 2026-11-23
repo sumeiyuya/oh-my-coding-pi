@@ -68,13 +68,25 @@ import type {
   FileReadResult,
   FileStatResult,
   ImageAttachment,
+  RuntimeView,
   ThinkingLevel,
   WorkspaceInfo,
   WorkspaceIndexEntry,
 } from "@oh-my-coding-pi/shared";
 
+type UserImage = { id: string; data: string; mimeType: string };
+
 type Msg = { id?: string } & (
-  | { kind: "user"; text: string; /** pi 没有接受这条消息 */ failed?: boolean }
+  | {
+      kind: "user";
+      text: string;
+      /** pi 没有接受这条消息 */
+      failed?: boolean;
+      /** 发送时附的图片；历史恢复也会带上 */
+      attachments?: UserImage[];
+      /** 发送时模型只收文本：图片已转述 */
+      textOnly?: boolean;
+    }
   | { kind: "assistant"; text: string }
   | {
       kind: "tool";
@@ -257,7 +269,125 @@ function TreeNodeView({
 }
 
 export default function App() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messagesByRuntime, setMessagesByRuntime] = useState<Record<string, Msg[]>>({});
+  const [activeRuntimeId, setActiveRuntimeId] = useState("default");
+  const activeRuntimeRef = useRef("default");
+  const messages = messagesByRuntime[activeRuntimeId] ?? [];
+
+  function setMessagesFor(
+    runtimeId: string,
+    updater: Msg[] | ((prev: Msg[]) => Msg[]),
+  ): void {
+    setMessagesByRuntime((prev) => {
+      const current = prev[runtimeId] ?? [];
+      const next = typeof updater === "function" ? updater(current) : updater;
+      return { ...prev, [runtimeId]: next };
+    });
+  }
+
+  /** 当前标签的 setter；事件回调用 runtimeId 指定，不靠猜 */
+  function setMessages(updater: Msg[] | ((prev: Msg[]) => Msg[])): void {
+    setMessagesFor(activeRuntimeRef.current, updater);
+  }
+
+  /** 非 active runtime 的轻量转写：只保留 assistant 文本与工具行；切回时会用 get_messages 校正 */
+  async function refreshStatsFor(runtimeId: string): Promise<void> {
+    try {
+      const stats = (runtimeId === "default"
+        ? await window.api.getStats()
+        : await window.api.getRuntimeStats(runtimeId)) as SessionStats | null;
+      setStatsByRuntime((prev) => ({ ...prev, [runtimeId]: stats }));
+      if (runtimeId === activeRuntimeRef.current) setStats(stats);
+    } catch {
+      // ignore
+    }
+  }
+
+  function applyBackgroundEvent(runtimeId: string, ev: PiEvent): void {
+    if (ev.type === "agent_start") {
+      setBusyFor(runtimeId, true);
+      return;
+    }
+    if (ev.type === "agent_settled") {
+      setBusyFor(runtimeId, false);
+      void refreshStatsFor(runtimeId);
+      return;
+    }
+    if (ev.type === "queue_update") {
+      setQueueByRuntime((prev) => ({
+        ...prev,
+        [runtimeId]: { steering: ev.steering ?? [], followUp: ev.followUp ?? [] },
+      }));
+      return;
+    }
+    if (ev.type === "message_start" && ev.message.role === "assistant") {
+      setMessagesFor(runtimeId, (prev) => [
+        ...prev,
+        { kind: "assistant", text: "", id: `${runtimeId}-${Date.now()}` },
+      ]);
+      return;
+    }
+    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+      const delta = ev.assistantMessageEvent.delta;
+      setMessagesFor(runtimeId, (prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          const item = next[i]!;
+          if (item.kind === "assistant") {
+            next[i] = { ...item, text: item.text + delta };
+            return next;
+          }
+        }
+        return [...next, { kind: "assistant", text: delta, id: `${runtimeId}-${Date.now()}` }];
+      });
+      return;
+    }
+    if (ev.type === "message_end" && ev.message.role === "assistant") {
+      const text = textOf(ev.message.content);
+      setMessagesFor(runtimeId, (prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          const item = next[i]!;
+          if (item.kind === "assistant") {
+            next[i] = { ...item, text: text || item.text };
+            return next;
+          }
+        }
+        return text ? [...next, { kind: "assistant", text, id: `${runtimeId}-${Date.now()}` }] : next;
+      });
+      setUnreadByRuntime((prev) => ({ ...prev, [runtimeId]: (prev[runtimeId] ?? 0) + 1 }));
+      return;
+    }
+    if (ev.type === "tool_execution_start") {
+      setMessagesFor(runtimeId, (prev) => [
+        ...prev,
+        {
+          kind: "tool",
+          id: ev.toolCallId,
+          name: ev.toolName,
+          args: JSON.stringify(ev.args ?? {}),
+          done: false,
+          startedAt: Date.now(),
+        },
+      ]);
+      return;
+    }
+    if (ev.type === "tool_execution_end") {
+      setMessagesFor(runtimeId, (prev) =>
+        prev.map((item) =>
+          item.kind === "tool" && item.id === ev.toolCallId
+            ? {
+                ...item,
+                done: true,
+                endedAt: Date.now(),
+                ...(ev.isError ? { isError: true } : {}),
+                result: textOf(ev.result?.content as never),
+              }
+            : item,
+        ),
+      );
+    }
+  }
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaceIndex, setWorkspaceIndex] = useState<WorkspaceIndexEntry[]>([]);
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
@@ -279,11 +409,39 @@ export default function App() {
   const pendingScroll = useRef<{ file: string; top: number } | null>(null);
   /** 用户按「停止」的时刻：用于把随后结束的工具记为「已停止」而不是失败 */
   const abortedAt = useRef<number | null>(null);
-  const [input, setInput] = useState("");
+  const [inputByRuntime, setInputByRuntime] = useState<Record<string, string>>({});
+  const input = inputByRuntime[activeRuntimeId] ?? "";
+  function setInput(value: string | ((prev: string) => string)): void {
+    const runtimeId = activeRuntimeRef.current;
+    setInputByRuntime((prev) => {
+      const current = prev[runtimeId] ?? "";
+      const next = typeof value === "function" ? value(current) : value;
+      return { ...prev, [runtimeId]: next };
+    });
+  }
+
   /** 待发队列以 pi 的 queue_update 为准（修改 2） */
-  const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
+  const [queueByRuntime, setQueueByRuntime] = useState<Record<string, QueueSnapshot>>({});
+  const queue = queueByRuntime[activeRuntimeId] ?? EMPTY_QUEUE;
+  function setQueue(value: QueueSnapshot | ((prev: QueueSnapshot) => QueueSnapshot)): void {
+    const runtimeId = activeRuntimeRef.current;
+    setQueueByRuntime((prev) => {
+      const current = prev[runtimeId] ?? EMPTY_QUEUE;
+      const next = typeof value === "function" ? value(current) : value;
+      return { ...prev, [runtimeId]: next };
+    });
+  }
   const newSessionIntent = useRef<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyByRuntime, setBusyByRuntime] = useState<Record<string, boolean>>({});
+  const busy = busyByRuntime[activeRuntimeId] ?? false;
+
+  function setBusyFor(runtimeId: string, value: boolean): void {
+    setBusyByRuntime((prev) => (prev[runtimeId] === value ? prev : { ...prev, [runtimeId]: value }));
+  }
+
+  function setBusy(value: boolean): void {
+    setBusyFor(activeRuntimeRef.current, value);
+  }
   /** 提交阶段：发送锁与“准备中”文案都看它 */
   const [submitPhase, setSubmitPhase] = useState<SubmitPhase>("idle");
   /** 本轮待确认的用户消息：失败时标记未送达并回填输入框 */
@@ -297,6 +455,7 @@ export default function App() {
   const [piReady, setPiReady] = useState(false);
   const piReadyRef = useRef(false);
   const [stats, setStats] = useState<SessionStats | null>(null);
+  const [statsByRuntime, setStatsByRuntime] = useState<Record<string, SessionStats | null>>({});
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelKey, setModelKey] = useState("");
   /** pi 当前会话实际生效的推理档；null = 还没读到 state */
@@ -306,6 +465,8 @@ export default function App() {
   const [tab, setTab] = useState<"sessions" | "tree">("sessions");
   const [tree, setTree] = useState<SessionTreeResult | null>(null);
   const [notice, setNotice] = useState("");
+  const [runtimes, setRuntimes] = useState<RuntimeView[]>([]);
+  const [unreadByRuntime, setUnreadByRuntime] = useState<Record<string, number>>({});
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [appError, setAppError] = useState<AppError | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
@@ -337,9 +498,17 @@ export default function App() {
   const modelSelectRef = useRef<HTMLButtonElement>(null);
   const dockSwitchRef = useRef<HTMLButtonElement>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
-  const [attachments, setAttachments] = useState<
-    Array<{ id: string; data: string; mimeType: string }>
-  >([]);
+  const [attachmentsByRuntime, setAttachmentsByRuntime] = useState<Record<string, UserImage[]>>({});
+  const attachments = attachmentsByRuntime[activeRuntimeId] ?? [];
+  function setAttachments(value: UserImage[] | ((prev: UserImage[]) => UserImage[])): void {
+    const runtimeId = activeRuntimeRef.current;
+    setAttachmentsByRuntime((prev) => {
+      const current = prev[runtimeId] ?? [];
+      const next = typeof value === "function" ? value(current) : value;
+      return { ...prev, [runtimeId]: next };
+    });
+  }
+  const [imagePreview, setImagePreview] = useState<UserImage | null>(null);
   /** 正在复制的外部文件：进度与取消都看它 */
   const [uploading, setUploading] = useState<{ id: string; name: string; percent: number } | null>(
     null,
@@ -364,7 +533,7 @@ export default function App() {
 
   const refreshSessions = useCallback(async () => {
     try {
-      setSessions(await window.api.getSessions());
+      setSessions(await window.api.getSessions(activeRuntimeRef.current));
     } catch {
       setSessions([]);
     }
@@ -446,8 +615,13 @@ export default function App() {
   );
 
   const refreshStats = useCallback(async () => {
+    const runtimeId = activeRuntimeRef.current;
     try {
-      setStats(await window.api.getStats());
+      const stats = (runtimeId === "default"
+        ? await window.api.getStats()
+        : await window.api.getRuntimeStats(runtimeId)) as SessionStats | null;
+      setStats(stats);
+      setStatsByRuntime((prev) => ({ ...prev, [runtimeId]: stats }));
     } catch {
       // ignore
     }
@@ -492,6 +666,8 @@ export default function App() {
   }, []);
 
   const refreshSession = useCallback(async () => {
+    // 后台标签激活时不要把默认会话的消息灌进来
+    if (activeRuntimeRef.current !== "default") return;
     // 切会话前把未落屏的 delta 丢掉，否则它会拼到新会话的最后一条回复上
     discardPendingText();
     streamChars.current = 0;
@@ -505,6 +681,112 @@ export default function App() {
     await refreshStats();
     await refreshTree();
   }, [refreshState, refreshStats, refreshTree, discardPendingText]);
+
+  const refreshRuntimes = useCallback(async () => {
+    try {
+      setRuntimes(((await window.api.listRuntimes()) as RuntimeView[]) ?? []);
+    } catch {
+      setRuntimes([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuntimes();
+  }, [refreshRuntimes]);
+
+  const activateRuntime = useCallback(
+    async (id: string) => {
+      activeRuntimeRef.current = id;
+      setActiveRuntimeId(id);
+      setUnreadByRuntime((prev) => ({ ...prev, [id]: 0 }));
+      try {
+        await window.api.activateRuntime(id);
+      } catch {
+        // 主进程不可用时仍允许看本地缓冲
+      }
+      if (id !== "default" || !messagesByRuntime[id]) {
+        try {
+          const list = (await window.api.getRuntimeMessages(id)) as AgentMessage[];
+          setMessagesFor(id, toMsgs(list));
+        } catch {
+          setMessagesFor(id, []);
+        }
+      }
+      try {
+        const state = (await window.api.getRuntimeState(id)) as {
+          model?: { provider?: string; id?: string };
+          thinkingLevel?: ThinkingLevel | null;
+        } | null;
+        const m = state?.model;
+        const usable = m && m.provider && m.id && m.provider !== "unknown" && m.id !== "unknown";
+        setModelKey(usable ? `${m.provider}/${m.id}` : "");
+        setThinkingLevel(state?.thinkingLevel ?? null);
+        const stats = (await window.api.getRuntimeStats(id)) as SessionStats | null;
+        if (stats) {
+          setStats(stats);
+          setStatsByRuntime((prev) => ({ ...prev, [id]: stats }));
+        }
+        setSessions(await window.api.getSessions(id));
+      } catch {
+        // 后台 runtime 可能还没就绪；保留当前显示
+      }
+    },
+    [messagesByRuntime],
+  );
+
+  const createRuntime = useCallback(async () => {
+    try {
+      const view = (await window.api.createRuntime({})) as RuntimeView | null;
+      await refreshRuntimes();
+      if (view) await activateRuntime(view.id);
+    } catch (error) {
+      setNotice(`创建后台运行时失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [activateRuntime, refreshRuntimes]);
+
+  const closeRuntime = useCallback(
+    async (id: string) => {
+      if (id === "default") return;
+      try {
+        await window.api.closeRuntime(id);
+        setMessagesByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setUnreadByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setBusyByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setInputByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setAttachmentsByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setQueueByRuntime((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        await refreshRuntimes();
+        if (activeRuntimeRef.current === id) await activateRuntime("default");
+      } catch (error) {
+        setNotice(`关闭后台运行时失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    [activateRuntime, refreshRuntimes],
+  );
 
   useEffect(() => {
     window.api.signalReady();
@@ -520,7 +802,13 @@ export default function App() {
 
     const offEvent = window.api.onEvent((raw: PiStreamItem) => {
       if (raw.type === "response") return;
+      // P2a：其他 runtime 的事件先丢掉，避免污染默认会话；P2b 会按 activeRuntimeId 分流
+      const runtimeId = (raw as unknown as { runtimeId?: unknown }).runtimeId;
       const ev = raw as PiEvent;
+      if (typeof runtimeId === "string" && runtimeId !== activeRuntimeRef.current) {
+        applyBackgroundEvent(runtimeId, ev);
+        return;
+      }
 
       switch (ev.type) {
         case "queue_update":
@@ -540,7 +828,7 @@ export default function App() {
           if (intent) {
             newSessionIntent.current = null;
             void (async () => {
-              const ok = await window.api.newSession().catch(() => false);
+              const ok = await window.api.newSession(activeRuntimeRef.current).catch(() => false);
               if (ok) {
                 setMessages((prev) => [...prev, { kind: "user", text: intent }]);
                 await window.api.prompt(intent).catch(() => undefined);
@@ -943,6 +1231,15 @@ export default function App() {
     el.scrollTop = el.scrollHeight;
   }, [messages, currentFile]);
 
+  useEffect(() => {
+    if (!imagePreview) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setImagePreview(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [imagePreview]);
+
   function startClientPerf() {
     // 默认不采样：只有自检/诊断显式打开 window.__omcpPerfEnabled 才跑
     if ((window as unknown as { __omcpPerfEnabled?: boolean }).__omcpPerfEnabled !== true) return;
@@ -1042,7 +1339,16 @@ export default function App() {
       pendingUser.current = { id: msgId, text, attachments: pendingAttachments };
       setSubmitPhase("submitting");
     }
-    setMessages((prev) => [...prev, { kind: "user", text, id: msgId }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        kind: "user",
+        text,
+        id: msgId,
+        ...(isPrompt && pendingAttachments.length ? { attachments: pendingAttachments } : {}),
+        ...(isPrompt && !modelSupportsImage && pendingAttachments.length ? { textOnly: true } : {}),
+      },
+    ]);
     setInput("");
     setMention(null);
     setMentionEntries([]);
@@ -1083,9 +1389,9 @@ export default function App() {
     try {
       const res =
         mode === "steer"
-          ? await window.api.steer(text)
+          ? await window.api.steer(text, activeRuntimeRef.current)
           : mode === "followUp"
-            ? await window.api.followUp(text)
+            ? await window.api.followUp(text, activeRuntimeRef.current)
             : await window.api.prompt(
                 text,
                 pendingAttachments.length
@@ -1095,6 +1401,8 @@ export default function App() {
                       mimeType: a.mimeType,
                     }))
                   : undefined,
+                undefined,
+                activeRuntimeRef.current,
               );
       if (!res.ok) {
         // pi 的拒绝原因要原样给出来（例如缺密钥、未知 provider），
@@ -1120,7 +1428,7 @@ export default function App() {
 
   /** 取回待发：文本回到输入框，转写里对应的气泡一起撤掉 */
   async function takeBackQueue(toInput = true): Promise<string[]> {
-    const res = await window.api.clearQueue().catch(() => ({ ok: false, steering: [], followUp: [] }));
+    const res = await window.api.clearQueue(activeRuntimeRef.current).catch(() => ({ ok: false, steering: [], followUp: [] }));
     const texts = [...res.steering, ...res.followUp];
     if (!texts.length) return [];
     setQueue(EMPTY_QUEUE);
@@ -1136,8 +1444,8 @@ export default function App() {
     const plan = planRedirect({ steering: [], followUp: texts }, index);
     if (!plan) return;
     setMessages((prev) => [...prev, ...texts.map((text) => ({ kind: "user" as const, text }))]);
-    await window.api.steer(plan.steer).catch(() => undefined);
-    for (const text of plan.followUp) await window.api.followUp(text).catch(() => undefined);
+    await window.api.steer(plan.steer, activeRuntimeRef.current).catch(() => undefined);
+    for (const text of plan.followUp) await window.api.followUp(text, activeRuntimeRef.current).catch(() => undefined);
   }
 
   /** 这一轮结束后另起会话：其余几条放回输入框，不静默丢 */
@@ -1153,12 +1461,13 @@ export default function App() {
 
   async function changeModel(provider: string, modelId: string): Promise<{ ok: boolean; error?: string }> {
     // 只有 pi 真的接受了才更新界面：没配 key 或模型不存在时不能显示成换过了
-    const res = await window.api.setModel(provider, modelId).catch((err: unknown) => ({
+    const res = await window.api.setModel(provider, modelId, activeRuntimeRef.current).catch((err: unknown) => ({
       ok: false,
       error: err instanceof Error ? err.message : String(err),
     }));
     if (res.ok) {
-      await refreshState();
+      if (activeRuntimeRef.current === "default") await refreshState();
+      else setModelKey(`${provider}/${modelId}`);
       return { ok: true };
     }
     setModelError(describeModelError(res.error ?? "切换模型失败"));
@@ -1167,7 +1476,7 @@ export default function App() {
 
   /** 顶栏推理强度：只有 pi 接受才更新显示（与切模型同一纪律） */
   async function changeThinkingLevel(level: ThinkingLevel): Promise<{ ok: boolean; error?: string }> {
-    const res = await window.api.setThinkingLevel(level).catch((err: unknown) => ({
+    const res = await window.api.setThinkingLevel(level, activeRuntimeRef.current).catch((err: unknown) => ({
       ok: false,
       error: err instanceof Error ? err.message : String(err),
     }));
@@ -1180,7 +1489,7 @@ export default function App() {
 
   const loadThinkingLevels = useCallback((): Promise<ThinkingLevel[]> => {
     // 不在这里吞异常：「pi 未响应」与「模型没有可调档位」必须能被组件区分
-    return window.api.getThinkingLevels();
+    return window.api.getThinkingLevels(activeRuntimeRef.current);
   }, []);
 
   /** 模型明确标 reasoning:false 时隐藏下拉；列表里查不到就保留（不拿“未知”当“不支持”） */
@@ -1198,7 +1507,7 @@ export default function App() {
     abortedAt.current = Date.now();
     setBusy(false);
     setStatus("ready");
-    await window.api.abort().catch(() => undefined);
+    await window.api.abort(activeRuntimeRef.current).catch(() => undefined);
   }
 
   async function loadSession(file: string) {
@@ -1207,7 +1516,7 @@ export default function App() {
       draftsRef.current[currentFile] = input;
       scrollRef.current[currentFile] = listRef.current?.scrollTop ?? 0;
     }
-    const ok = await window.api.switchSession(file).catch(() => false);
+    const ok = await window.api.switchSession(file, activeRuntimeRef.current).catch(() => false);
     if (ok) {
       ensureTab(file);
       // 只在有存过的位置时接管滚动，否则让它滚到底
@@ -1310,7 +1619,7 @@ export default function App() {
 
   async function newSession() {
     if (busy) return;
-    const ok = await window.api.newSession().catch(() => false);
+    const ok = await window.api.newSession(activeRuntimeRef.current).catch(() => false);
     if (ok) {
       discardPendingText();
       setMessages([]);
@@ -1323,7 +1632,7 @@ export default function App() {
 
   async function cloneCurrent() {
     if (busy) return;
-    const r = await window.api.clone().catch(() => ({ cancelled: true }));
+    const r = await window.api.clone(activeRuntimeRef.current).catch(() => ({ cancelled: true }));
     if (!r.cancelled) {
       await refreshSession();
       await refreshSessions();
@@ -1334,7 +1643,7 @@ export default function App() {
   async function forkFrom(entryId: string) {
     if (busy) return;
     if (!confirm("从这条消息创建分支？当前会话会切换到这个分支。")) return;
-    const r: ForkResult = await window.api.fork(entryId).catch(() => ({ cancelled: true }));
+    const r: ForkResult = await window.api.fork(entryId, activeRuntimeRef.current).catch(() => ({ cancelled: true }));
     if (r.cancelled) {
       setNotice("分支创建被取消");
       return;
@@ -1967,6 +2276,50 @@ export default function App() {
       />
 
         <header className="bar">
+          <div className="runtime-tabs" role="tablist" aria-label="运行时">
+            {runtimes.map((runtime, index) => (
+              <div
+                key={runtime.id}
+                className={`runtime-tab ${runtime.id === activeRuntimeId ? "on" : ""}`}
+              >
+                <button
+                  type="button"
+                  className="runtime-tab-main"
+                  role="tab"
+                  aria-selected={runtime.id === activeRuntimeId}
+                  onClick={() => void activateRuntime(runtime.id)}
+                  title={runtime.workspace || runtime.id}
+                >
+                  <span
+                    className="runtime-dot"
+                    data-busy={busyByRuntime[runtime.id] ? "1" : undefined}
+                  />
+                  {runtime.id === "default" ? "默认" : `后台 ${index}`}
+                  {unreadByRuntime[runtime.id] ? (
+                    <span className="runtime-badge">{unreadByRuntime[runtime.id]}</span>
+                  ) : null}
+                </button>
+                {runtime.id !== "default" && (
+                  <button
+                    type="button"
+                    className="runtime-tab-close"
+                    onClick={() => void closeRuntime(runtime.id)}
+                    title="关闭这个后台运行时"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              className="runtime-tab-add"
+              onClick={() => void createRuntime()}
+              title="新建后台运行时（同工作区）"
+            >
+              ＋
+            </button>
+          </div>
           <div className="bar-right">
             <PermissionPill />
             <ContextMeter sessionKey={currentFile} busy={busy} />
@@ -2142,6 +2495,21 @@ export default function App() {
               return (
                 <div className="msg user" key={m.id ?? i}>
                   <div className="bubble">
+                    {m.attachments?.length ? (
+                      <div className="msg-attachments">
+                        {m.attachments.map((img) => (
+                          <button
+                            key={img.id}
+                            type="button"
+                            className="msg-image"
+                            title="查看大图"
+                            onClick={() => setImagePreview(img)}
+                          >
+                            <img src={`data:${img.mimeType};base64,${img.data}`} alt="图片" />
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                     {m.text}
                     {m.failed && (
                       <span className="msg-failed" title="这条消息没有被 pi 接受">
@@ -2149,6 +2517,9 @@ export default function App() {
                       </span>
                     )}
                   </div>
+                  {m.textOnly && (
+                    <div className="msg-hint">当前模型仅文本：图片会先转述再发送</div>
+                  )}
                 </div>
               );
             }
@@ -2211,7 +2582,7 @@ export default function App() {
                 className="mini"
                 onClick={() => {
                   abortedAt.current = Date.now();
-                  void window.api.abort();
+                  void window.api.abort(activeRuntimeRef.current);
                 }}
               >
                 停止
@@ -2499,6 +2870,29 @@ export default function App() {
         </div>
       )}
       {approval && <ApprovalModal request={approval} onRespond={respondApproval} />}
+
+      {imagePreview && (
+        <div
+          className="msg-image-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setImagePreview(null)}
+        >
+          <button
+            className="msg-image-close"
+            type="button"
+            onClick={() => setImagePreview(null)}
+            title="关闭"
+          >
+            ✕
+          </button>
+          <img
+            src={`data:${imagePreview.mimeType};base64,${imagePreview.data}`}
+            alt="图片预览"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      )}
       {setupProvider && (
         <ProviderSetupDialog
           provider={setupProvider}

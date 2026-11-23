@@ -33,16 +33,21 @@ import type {
 } from "@oh-my-coding-pi/shared";
 
 contextBridge.exposeInMainWorld("api", {
-  prompt: (text: string, images?: unknown, opts?: unknown): Promise<PromptResult> =>
-    ipcRenderer.invoke("pi:prompt", text, images, opts),
-  clearQueue: (): Promise<import("@oh-my-coding-pi/shared").ClearQueueResult> =>
-    ipcRenderer.invoke("pi:clear-queue"),
-  steer: (text: string): Promise<PromptResult> => ipcRenderer.invoke("pi:steer", text),
-  followUp: (text: string): Promise<PromptResult> => ipcRenderer.invoke("pi:follow-up", text),
-  abort: (): Promise<boolean> => ipcRenderer.invoke("pi:abort"),
+  prompt: (
+    text: string,
+    images?: unknown,
+    opts?: unknown,
+    runtimeId?: string,
+  ): Promise<PromptResult> => ipcRenderer.invoke("pi:prompt", text, images, opts, runtimeId),
+  clearQueue: (runtimeId?: string): Promise<import("@oh-my-coding-pi/shared").ClearQueueResult> =>
+    ipcRenderer.invoke("pi:clear-queue", runtimeId),
+  steer: (text: string, runtimeId?: string): Promise<PromptResult> => ipcRenderer.invoke("pi:steer", text, runtimeId),
+  followUp: (text: string, runtimeId?: string): Promise<PromptResult> => ipcRenderer.invoke("pi:follow-up", text, runtimeId),
+  abort: (runtimeId?: string): Promise<boolean> => ipcRenderer.invoke("pi:abort", runtimeId),
   restart: (): Promise<boolean> => ipcRenderer.invoke("pi:restart"),
-  newSession: (): Promise<boolean> => ipcRenderer.invoke("pi:new-session"),
-  getSessions: (): Promise<SessionSummary[]> => ipcRenderer.invoke("pi:sessions"),
+  newSession: (runtimeId?: string): Promise<boolean> => ipcRenderer.invoke("pi:new-session", runtimeId),
+  getSessions: (runtimeId?: string): Promise<SessionSummary[]> =>
+    ipcRenderer.invoke("pi:sessions", runtimeId),
   getSessionMeta: (): Promise<SessionMetaResult> => ipcRenderer.invoke("session-meta:get"),
   setSessionMeta: (sessionFile: string, patch: SessionMetaPatch): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("session-meta:set", sessionFile, patch),
@@ -87,16 +92,19 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("pi:switch-session", sessionFile),
   getMessages: (): Promise<AgentMessage[]> => ipcRenderer.invoke("pi:messages"),
   getTree: (): Promise<SessionTreeResult> => ipcRenderer.invoke("pi:tree"),
-  fork: (entryId: string): Promise<ForkResult> => ipcRenderer.invoke("pi:fork", entryId),
-  clone: (): Promise<SessionSwitchResult> => ipcRenderer.invoke("pi:clone"),
+  fork: (entryId: string, runtimeId?: string): Promise<ForkResult> =>
+    ipcRenderer.invoke("pi:fork", entryId, runtimeId),
+  clone: (runtimeId?: string): Promise<SessionSwitchResult> =>
+    ipcRenderer.invoke("pi:clone", runtimeId),
   exportHtml: (outputPath?: string): Promise<string | null> =>
     ipcRenderer.invoke("pi:export-html", outputPath),
   getAvailableModels: (): Promise<ModelInfo[]> => ipcRenderer.invoke("pi:models"),
-  getThinkingLevels: (): Promise<ThinkingLevel[]> => ipcRenderer.invoke("pi:thinking-levels"),
-  setThinkingLevel: (level: ThinkingLevel): Promise<SetModelResult> =>
-    ipcRenderer.invoke("pi:set-thinking-level", level),
-  setModel: (provider: string, modelId: string): Promise<SetModelResult> =>
-    ipcRenderer.invoke("pi:set-model", provider, modelId),
+  getThinkingLevels: (runtimeId?: string): Promise<ThinkingLevel[]> =>
+    ipcRenderer.invoke("pi:thinking-levels", runtimeId),
+  setThinkingLevel: (level: ThinkingLevel, runtimeId?: string): Promise<SetModelResult> =>
+    ipcRenderer.invoke("pi:set-thinking-level", level, runtimeId),
+  setModel: (provider: string, modelId: string, runtimeId?: string): Promise<SetModelResult> =>
+    ipcRenderer.invoke("pi:set-model", provider, modelId, runtimeId),
   getState: (): Promise<SessionState> => ipcRenderer.invoke("pi:state"),
   getStats: (): Promise<SessionStats> => ipcRenderer.invoke("pi:stats"),
   getBudget: (): Promise<BudgetStatus> => ipcRenderer.invoke("pi:budget"),
@@ -198,6 +206,13 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("mcp:secret", { name, key, value }),
   openMcpConfig: (): Promise<unknown> => ipcRenderer.invoke("mcp:open-config"),
   loginMcpServer: (name: string): Promise<unknown> => ipcRenderer.invoke("mcp:login", name),
+  listRuntimes: (): Promise<unknown> => ipcRenderer.invoke("runtime:list"),
+  getRuntimeMessages: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:messages", id),
+  getRuntimeState: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:state", id),
+  getRuntimeStats: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:stats", id),
+  createRuntime: (input?: unknown): Promise<unknown> => ipcRenderer.invoke("runtime:create", input),
+  activateRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:activate", id),
+  closeRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:close", id),
   loadRoute: (): Promise<unknown> => ipcRenderer.invoke("route:load"),
   saveRoute: (doc: unknown): Promise<unknown> => ipcRenderer.invoke("route:save", doc),
   exportRoute: (): Promise<unknown> => ipcRenderer.invoke("route:export"),

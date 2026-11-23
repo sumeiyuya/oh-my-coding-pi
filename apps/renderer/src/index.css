@@ -3123,6 +3123,7 @@ body.sash-dragging {
   display: inline-flex; align-items: center; gap: 6px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
   border-radius: 7px; padding: 3px 8px; font-size: 12px; cursor: pointer;
+  white-space: nowrap;
 }
 .perm-pill-trigger:hover { background: var(--hover); }
 .perm-pill-trigger[data-tier="allow-all"] { border-color: #7f1d1d; color: #fca5a5; }
@@ -3133,7 +3134,10 @@ body.sash-dragging {
 
 .perm-pill-menu {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
-  width: 300px; max-width: calc(100vw - 24px);
+  width: 320px; max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 96px); overflow-y: auto;
+  /* 顶栏 .bar-right 的 nowrap 会继承进来；弹层内必须恢复换行 */
+  white-space: normal;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 14px 40px rgba(0, 0, 0, .45); padding: 6px;
 }
@@ -3147,8 +3151,12 @@ body.sash-dragging {
 .perm-pill-item[data-tier="allow-all"] .perm-pill-item-icon { color: var(--red); }
 .perm-pill-item[data-tier="ask-risky"] .perm-pill-item-icon { color: var(--amber); }
 .perm-pill-item[data-tier="deny-risky"] .perm-pill-item-icon { color: var(--green); }
+.perm-pill-item-text { min-width: 0; }
 .perm-pill-item-name { display: block; font-size: 12.5px; font-weight: 600; }
-.perm-pill-item-desc { display: block; font-size: 11.5px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+.perm-pill-item-desc {
+  display: block; font-size: 11.5px; color: var(--muted); line-height: 1.5; margin-top: 2px;
+  overflow-wrap: anywhere;
+}
 .perm-pill-item-mark { color: var(--accent); font-size: 12px; }
 .perm-pill-default {
   display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted);
@@ -3167,6 +3175,7 @@ body.sash-dragging {
 .perm-pill-note {
   margin: 6px 8px 4px; padding-top: 6px; border-top: 1px solid var(--line);
   font-size: 11px; color: var(--muted); line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 /* ── 模型选择面板（B2–B4）── */
@@ -3871,4 +3880,70 @@ body.sash-dragging {
   opacity: 1;
   outline: 2px solid #93b4f7;
   outline-offset: -1px;
+}
+
+/* ── 对话里的用户图片（修改 2）── */
+.msg-attachments { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.msg-image {
+  padding: 0; border: 1px solid var(--line); border-radius: 8px;
+  background: none; cursor: zoom-in; overflow: hidden; line-height: 0;
+}
+.msg-image img { display: block; width: 56px; height: 56px; object-fit: cover; }
+.msg-image:hover { border-color: var(--accent); }
+.msg-hint { margin-top: 4px; font-size: 11.5px; color: var(--warn-text); text-align: right; }
+.msg-image-overlay {
+  position: fixed; inset: 0; z-index: 200; background: rgba(4, 10, 16, .82);
+  display: flex; align-items: center; justify-content: center; padding: 40px;
+}
+.msg-image-overlay img {
+  max-width: min(92vw, 1200px); max-height: 88vh;
+  border-radius: 10px; box-shadow: 0 24px 80px rgba(0, 0, 0, .5);
+}
+.msg-image-close {
+  position: absolute; top: 16px; right: 18px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 8px; padding: 3px 10px; cursor: pointer;
+}
+
+/* ── P2b：运行时标签 ── */
+.runtime-tabs {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 0; max-width: 46%; overflow: auto;
+  flex: 0 1 auto; padding: 2px 4px;
+}
+.runtime-tab {
+  display: flex; align-items: center; flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); overflow: hidden;
+}
+.runtime-tab.on { background: var(--chip); border-color: var(--accent); }
+.runtime-tab-main {
+  border: 0; background: transparent; color: var(--text);
+  font: inherit; font-size: 12px; padding: 3px 8px;
+  cursor: pointer; display: flex; align-items: center; gap: 5px;
+  white-space: nowrap;
+}
+.runtime-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); opacity: .5;
+}
+.runtime-tab.on .runtime-dot { background: var(--ok-text); opacity: 1; }
+.runtime-tab-close {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 2px 6px; font-size: 13px;
+}
+.runtime-tab-close:hover { color: var(--danger-text); }
+.runtime-tab-add {
+  border: 1px dashed var(--line); background: transparent;
+  color: var(--muted); border-radius: 7px;
+  padding: 3px 8px; cursor: pointer; font-size: 13px;
+}
+.runtime-tab-add:hover { color: var(--text); border-color: var(--accent); }
+.runtime-badge {
+  min-width: 14px; height: 14px; padding: 0 4px;
+  border-radius: 99px; background: var(--accent); color: #fff;
+  font-size: 9.5px; line-height: 14px; text-align: center;
+}
+.runtime-tab .runtime-dot[data-busy="1"] {
+  background: var(--accent); opacity: 1;
 }

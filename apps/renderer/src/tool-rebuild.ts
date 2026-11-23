@@ -14,8 +14,10 @@ import type { AgentMessage, ContentBlock } from "@oh-my-coding-pi/shared";
  * 纯函数：不碰 DOM、不读文件，便于单测。
  */
 
+export type RebuiltImage = { id: string; data: string; mimeType: string };
+
 export type RebuiltMsg =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; attachments?: RebuiltImage[] }
   | { kind: "assistant"; text: string }
   | {
       kind: "tool";
@@ -123,7 +125,19 @@ export function messagesFromAgent(list: AgentMessage[]): RebuiltMsg[] {
     }
 
     const text = textOf(m.content);
-    if (text) out.push({ kind: "user", text });
+    const attachments = m.content
+      .filter(
+        (block): block is Extract<ContentBlock, { type: "image" }> =>
+          block.type === "image" && Boolean(block.data),
+      )
+      .map((block, index) => ({
+        id: `hist-${index}`,
+        data: block.data,
+        mimeType: block.mimeType,
+      }));
+    if (text || attachments.length) {
+      out.push({ kind: "user", text, ...(attachments.length ? { attachments } : {}) });
+    }
   }
 
   return out;

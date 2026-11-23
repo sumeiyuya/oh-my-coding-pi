@@ -114,7 +114,7 @@ export default function ModelPicker({
     }
   }
 
-  const title = current ? (current.model.name ?? current.model.id) : value || "（未选择模型）";
+  const title = current ? (current.model.name ?? current.model.id) : value || "选择模型";
 
   return (
     <div className="model-picker" ref={box}>

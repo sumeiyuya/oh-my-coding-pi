@@ -40,6 +40,13 @@ export interface PolicyServiceOptions {
   getSettingsPolicy?: () => string | undefined;
   /** 方案期门：enabled 且未 approved 时只放只读工具 */
   getPlanGate?: () => { enabled: boolean; approved: boolean };
+  /** P1b2c2：runtime token → 该 runtime 的 workspace */
+  resolveRuntime?: (token: string) => {
+    runtimeId: string;
+    workspace: string;
+    sessionKey?: string;
+    audit?: (entry: AuditEntry) => void;
+  } | undefined;
   /**
    * 批准后的内容复核：计划文件被改/被删时返回 ok=false，并由调用方撤销批准。
    * 只在已批准且工具非只读时调用，因此不会干扰“看方案”本身。
@@ -206,8 +213,14 @@ export class PolicyService {
     toolName: string,
     input: Record<string, unknown>,
     opts?: { readOnly?: boolean },
+    ctx?: {
+      runtimeId?: string;
+      workspaceRoot?: string;
+      sessionKey?: string;
+      audit?: (entry: AuditEntry) => void;
+    },
   ): PolicyDecision {
-    const root = this.opts.getWorkspaceRoot();
+    const root = ctx?.workspaceRoot ?? this.opts.getWorkspaceRoot();
 
     // 方案期：默认拒一切非只读操作（fail-closed 的同族规则）
     const gate = this.opts.getPlanGate?.();
@@ -226,7 +239,7 @@ export class PolicyService {
             summary,
             reason: "方案期只读：先写方案（.omcp/plans/），批准后再执行写操作。",
           };
-          this.auditDecision(decision, "deny", "plan", toolName);
+          this.auditDecision(decision, "deny", "plan", toolName, ctx?.audit);
           return decision;
         }
         // 已批准：确认批准的仍是“这份内容”（P1-01）
@@ -238,7 +251,7 @@ export class PolicyService {
             summary,
             reason: `方案内容已变更（${drift.reason ?? "与批准时不一致"}），批准已撤销；重新批准后再执行写操作。`,
           };
-          this.auditDecision(decision, "deny", "plan", toolName);
+          this.auditDecision(decision, "deny", "plan", toolName, ctx?.audit);
           return decision;
         }
       }
@@ -259,7 +272,7 @@ export class PolicyService {
         summary: risk.message,
         reason: risk.message,
       };
-      this.auditDecision(denied, "deny", "risk", toolName);
+      this.auditDecision(denied, "deny", "risk", toolName, ctx?.audit);
       return denied;
     }
     const riskGate = riskMode ? decideByMode(riskMode, risk) : null;
@@ -272,7 +285,7 @@ export class PolicyService {
         summary: riskGate.summary,
         reason: riskGate.reason,
       };
-      this.auditDecision(denied, "deny", "risk", toolName);
+      this.auditDecision(denied, "deny", "risk", toolName, ctx?.audit);
       return denied;
     }
     if (riskGate?.action === "ask") {
@@ -309,14 +322,14 @@ export class PolicyService {
     }
 
     if (decision.action === "ask") {
-      const sessionKey = this.opts.getSessionKey();
+      const sessionKey = ctx?.sessionKey ?? this.opts.getSessionKey();
       if (root && this.opts.grants.has(root, decision.ruleId, sessionKey)) {
         const granted: PolicyDecision = {
           ...decision,
           action: "allow",
           reason: `命中已授权规则 ${decision.ruleId}。`,
         };
-        this.auditDecision(decision, "allow", "grant", toolName);
+        this.auditDecision(decision, "allow", "grant", toolName, ctx?.audit);
         return granted;
       }
       return decision;
@@ -329,7 +342,7 @@ export class PolicyService {
       : decision;
     const kind: "allow" | "deny" = annotated.action === "deny" ? "deny" : "allow";
 
-    this.auditDecision(annotated, kind, "policy", toolName);
+    this.auditDecision(annotated, kind, "policy", toolName, ctx?.audit);
     return annotated;
   }
 
@@ -371,8 +384,9 @@ export class PolicyService {
     kind: "allow" | "deny" | "timeout",
     scope: string,
     toolName: string,
+    audit?: (entry: AuditEntry) => void,
   ): void {
-    this.opts.audit({
+    (audit ?? this.opts.audit)({
       ts: new Date().toISOString(),
       toolName,
       ruleId: decision.ruleId,
@@ -384,7 +398,14 @@ export class PolicyService {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.headers.authorization !== `Bearer ${this.token}`) {
+    const authorization = req.headers.authorization;
+    const token =
+      typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "";
+    const runtime = this.opts.resolveRuntime?.(token);
+    const legacy = token !== "" && token === this.token;
+    if (!runtime && !legacy) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return;
@@ -422,6 +443,7 @@ export class PolicyService {
         body.toolName,
         input,
         body.readOnly === true ? { readOnly: true } : undefined,
+        runtime ? { runtimeId: runtime.runtimeId, workspaceRoot: runtime.workspace } : undefined,
       );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, decision, policy: this.info() }));

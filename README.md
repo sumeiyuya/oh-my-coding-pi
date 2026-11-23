@@ -12,9 +12,9 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 ## 版本
 
-- 当前版本：**0.6.9**（2026-11-22）
-- 发布说明：[`docs/release-notes-0.6.9.md`](docs/release-notes-0.6.9.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.9](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.9)
+- 当前版本：**0.6.10**（2026-11-22）
+- 发布说明：[`docs/release-notes-0.6.10.md`](docs/release-notes-0.6.10.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
+- 安装包：[GitHub Release v0.6.10](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.10)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么
@@ -31,18 +31,18 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 | MCP | 本地/远程 MCP 服务器管理、密钥安全存储、状态与 OAuth 登录、只读工具与审批适配 |
 | 诊断 | 回合级 `perf.jsonl`、错误分类、诊断包导出、内部自检模式 |
 
-0.6.9 的重点是 **MCP 接入**：设置页可添加/管理本地与远程 MCP 服务器，密钥只进安全存储，状态分「未检查 / 需要登录 / 已连接 / 失败」，支持 OAuth 登录与启动健康检查；只读 MCP 工具可直接放行，写工具按服务器授权并弹审批。细节见发布说明。
+0.6.10 的重点是 **多项目 / 多会话并行**：每个会话一个独立 runtime，标签切换不打断后台运行；消息、输入、附件、队列、审批、审计、统计各自归位。另含对话图片缩略图与权限弹层文字布局修复。细节见发布说明。
 
 ## 安装
 
-1. 从 [Release v0.6.9](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.9) 下载 `oh.my.coding.pi.Setup.0.6.9.exe` 与 `SHA256SUMS.txt`。
+1. 从 [Release v0.6.10](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.10) 下载 `oh.my.coding.pi.Setup.0.6.10.exe` 与 `SHA256SUMS.txt`。
 2. 双击安装；默认装到 `%LOCALAPPDATA%\Programs\oh my coding pi\`。
 3. 静默安装（PowerShell）：
 
 ```powershell
-Start-Process "oh my coding pi Setup 0.6.9.exe" -ArgumentList "/S" -Wait
+Start-Process "oh my coding pi Setup 0.6.10.exe" -ArgumentList "/S" -Wait
 # 指定目录：/D 必须放最后，且不能加引号
-Start-Process "oh my coding pi Setup 0.6.8.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
+Start-Process "oh my coding pi Setup 0.6.10.exe" -ArgumentList '/S', '/D=C:\Tools\oh my coding pi' -Wait
 ```
 
 > 不要在 Git Bash 里直接传 `/S`，MSYS 会把它当路径。用 PowerShell。

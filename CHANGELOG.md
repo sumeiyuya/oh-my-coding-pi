@@ -1,5 +1,129 @@
 # CHANGELOG
 
+## 0.6.10 — 2026-11-22
+
+### 修改 1：权限弹层文字布局
+
+- 权限弹层不再继承顶栏的 `white-space: nowrap`：三档描述与底部说明正常换行，不再向右溢出。
+- 弹层宽度 300 → 320px，加 `max-height` 与纵向滚动；长词/路径可断行。
+- 未选择模型时，触发器文案由「（未选择模型）」改为「选择模型」，减少顶栏挤压。
+
+### 修改 2：对话图片显示
+
+- 用户消息气泡显示发送时的图片（56px 缩略图，多图换行）；点击应用内大图，Escape / 点背景关闭。
+- 发送时 attachments 进入消息；历史恢复保留 image block。
+- 纯文本模型显示“图片会先转述再发送”提示；失败时图片仍在，并回填输入框。
+
+### 修改 3 · P0：会话运行时容器
+
+- 新增 `SessionRuntime`：id / token / env / supervisor / rpc / eventPump 收在一个对象里。
+- 主进程默认 runtime 接入；`supervisor`、`rpc`、`eventPump` 从 runtime 取，单会话行为不变。
+- 为 P1 的多 runtime、per-runtime token 路由留基础；尚未改变 IPC/事件协议。
+
+### 修改 3 · P1a：RuntimeManager
+
+- 新增 `RuntimeManager`：`Map<runtimeId, SessionRuntime>`，提供 create / get / activate / close / list。
+- 默认 runtime 由 manager 创建；`activate` 只切 active，不 stop/start 其他 runtime。
+- 创建时注入 `OMCP_RUNTIME_ID` / `OMCP_RUNTIME_TOKEN`（P1b 的服务路由备用，当前未消费）。
+- 单会话行为不变；尚无多标签 UI、服务 token 路由、KernelManager。
+
+### 修改 3 · P1b1：事件 runtimeId 与 ServiceHub
+
+- `pi:event` 负载带 `runtimeId`（renderer 暂忽略，P2 按 runtime 分流）。
+- 新增 `ServiceHub`：`token → runtimeId`；`RuntimeManager` 创建/关闭时登记/注销。
+- 服务端仍未消费 token；policy/kernel/artifact 仍是全局路由（P1b2）。
+
+### 修改 3 · P1b2a：KernelManager
+
+- 新增 `KernelManager`：一对内核按 `runtimeId` 懒创建；`setWorkspace` / `dispose` 只影响该 runtime。
+- 默认 runtime 的内核改由 manager 提供；单会话行为不变。
+- 尚未把 `KernelBroker` 按 token 路由（P1b2b）。
+
+### 修改 3 · P1b2b：KernelBroker 按 runtime token 路由
+
+- `KernelBroker` 接受 `ServiceHub.resolve`：runtime token → 该 runtime 的内核；legacy 全局 token 仍兼容。
+- 默认 runtime 的 `OMCP_KERNEL_TOKEN` 改为 runtime token；broker 通过 ServiceHub 找 default 内核。
+- policy / artifact / browser 仍是全局 token（P1b2c）。
+
+### 修改 3 · P1b2c1：ArtifactService 按 runtime token 路由
+
+- `ArtifactService` 接受 `ServiceHub.resolve`：runtime token → 该 runtime 的 workspace；legacy 全局 token 仍兼容。
+- 默认 runtime 的 `OMCP_ARTIFACTS_TOKEN` 改为 runtime token。
+- policy / 审批仍是全局 token（P1b2c2）。
+
+### 修改 3 · P1b2c2：PolicyService 按 runtime token 路由
+
+- `PolicyService` 接受 `ServiceHub.resolve`：runtime token → 该 runtime 的 workspace；legacy 全局 token 仍兼容。
+- 默认 runtime 的 `OMCP_POLICY_TOKEN` 改为 runtime token。
+- `ApprovalRequest` 增加可选 `runtimeId`；审批队列本身仍是全局 Map（P1b2c3）。
+- 方案期 / grants / audit 仍按全局 workspace，未按 runtime 隔离。
+
+### 修改 3 · P1b2c3：审批按 runtime 标记与会话绑定
+
+- `PendingApproval` / `ApprovalRequest` 带 `runtimeId`；`cancelPendingApprovals(runtimeId?)` 可按 runtime 取消。
+- `ServiceHub` binding 带 `session`；`RuntimeManager.updateSession` 在切会话时同步；PolicyService 的 grants 用 runtime sessionKey。
+- 审批仍是单个 Map、UI 未按 runtime 分组；grants/plan/audit 仍全局（P2）。
+
+### 修改 3 · P2a：运行时接口
+
+- 新增 `runtime:list / create / activate / close` IPC；新 runtime 自动接 spawn/event，并注入自己的 kernel/policy/artifact token。
+- renderer 暂时丢弃非 `default` runtime 的事件，避免串流；P2b 再按 activeRuntimeId 分流。
+- 尚无多标签 UI；messages/busy/queue 仍是单份。
+
+### 修改 3 · P2b1：多运行时标签与消息切换
+
+- 顶栏新增运行时标签：默认 / 后台 N；可新建、切换、关闭（默认不可关）。
+- renderer 按 runtimeId 存 messages；切换只改 active，后台 runtime 的事件暂不混入当前列表。
+- 新增 `runtime:messages` IPC：按 runtime 读取历史消息。
+- 后台标签的发送接口仍关闭（P2b2）；队列/附件/审批分组未拆。
+
+### 修改 3 · P2b2：后台标签发送与事件分流
+
+- `pi:prompt` / `pi:abort` 增加可选 runtimeId；后台标签也能发新消息与停止。
+- 非 active runtime 的事件进入轻量转写槽位，标签显示未读；切回时用 `get_messages` 校正。
+- 后台标签仍不支持排队/追加；输入草稿、附件、队列仍全局。
+
+### 修改 3 · P2b3a：每 runtime busy、审批回程与关闭清理
+
+- `busy` 按 runtime 存；标签用运行点显示。
+- 新 runtime 的 `extension_ui_request` 接到统一审批流；回复发回对应 `rpc`，不再只回默认进程。
+- `runtime:close` 取消该 runtime 审批并停对应内核。
+- 输入/附件/队列/统计仍全局（P2b4）。
+
+### 修改 3 · P2b4a：每 runtime 输入/附件/队列
+
+- 输入草稿、未发附件、待发队列按 runtime 存；切标签各自保留。
+- 后台标签的 `queue_update` 也写入自己的槽位。
+- 关闭 runtime 时清理本地 messages/未读/busy/输入/附件/队列。
+- 审批的 sessionKey / grants 改用该 runtime 的 session/workspace。
+- stats/model/thinking 仍默认（P2b5）。
+
+### 修改 3 · P2b5a：每 runtime 模型/队列/统计
+
+- `setModel` / `setThinkingLevel` / `getThinkingLevels` / `steer` / `followUp` / `clearQueue` 支持 runtimeId。
+- 切标签时读该 runtime 的 `state` / `stats`，恢复模型与推理档。
+- 默认 runtime 的模型/推理档仍写应用设置；后台 runtime 只改自己的进程。
+- 审计仍写默认 workspace（P2b6）。
+
+### 修改 3 · P2b6a：会话操作按 runtime
+
+- `new-session` / `switch-session` / `fork` / `clone` 支持 runtimeId；后台 runtime 的会话切换不再误操作默认进程。
+- 默认 runtime 仍维护 workspace state / 权限档；后台只更新自己的 session 绑定。
+- 会话列表、审计、后台事件结束后的 stats 仍是默认（P2b6b）。
+
+### 修改 3 · P2b6b：审计按 runtime
+
+- 审批、policy 决策、run_code outcome 的审计写入各自 runtime 的 `<workspace>/.omcp/logs/audit.jsonl`。
+- `runtime:close` 清掉该 runtime 的审计缓存。
+- 会话列表 / 审计查看页 / 后台 stats 仍默认（P2b6c）。
+
+### 修改 3 · P2b6c：会话列表/审计视图/统计按 runtime
+
+- `getSessions` 支持 runtimeId；切标签刷新该 runtime 的会话列表。
+- `audit:read` / `audit:query` 读 active runtime 的审计文件。
+- `refreshStats` 用 active runtime；后台 `agent_settled` 刷新并缓存各自 stats。
+- 审计导出、方案门/grants 仍全局（P3）。
+
 ## 0.6.9 — 2026-11-22
 
 ### MCP 接入

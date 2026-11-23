@@ -359,6 +359,8 @@ export interface ApprovalTitlePayload {
 export interface ApprovalRequest {
   id: string;
   toolName: string;
+  /** P1b2c2：审批来自哪个 runtime；旧路径没有这个字段 */
+  runtimeId?: string;
   /** 命中的规则 id，例如 rm-rf；授权按它记录 */
   ruleId: string;
   /** 原始命令或操作摘要 */
@@ -693,6 +695,12 @@ export interface McpSaveResult {
   name: string;
   needsSecrets: string[];
   list: McpListView;
+}
+
+export interface RuntimeView {
+  id: string;
+  active: boolean;
+  workspace: string;
 }
 
 export interface McpLoginResult {
@@ -1256,15 +1264,20 @@ export interface ClearQueueResult {
 }
 
 export interface PreloadApi {
-  prompt(text: string, images?: ImageAttachment[], opts?: PromptOptions): Promise<PromptResult>;
-  steer(text: string): Promise<PromptResult>;
+  prompt(
+    text: string,
+    images?: ImageAttachment[],
+    opts?: PromptOptions,
+    runtimeId?: string,
+  ): Promise<PromptResult>;
+  steer(text: string, runtimeId?: string): Promise<PromptResult>;
   /** 撤掉 pi 的待发队列，返回被撤回的文本（修改 2） */
-  clearQueue(): Promise<ClearQueueResult>;
-  followUp(text: string): Promise<PromptResult>;
-  abort(): Promise<boolean>;
+  clearQueue(runtimeId?: string): Promise<ClearQueueResult>;
+  followUp(text: string, runtimeId?: string): Promise<PromptResult>;
+  abort(runtimeId?: string): Promise<boolean>;
   restart(): Promise<boolean>;
-  newSession(): Promise<boolean>;
-  getSessions(): Promise<SessionSummary[]>;
+  newSession(runtimeId?: string): Promise<boolean>;
+  getSessions(runtimeId?: string): Promise<SessionSummary[]>;
   getSessionMeta(): Promise<SessionMetaResult>;
   setSessionMeta(sessionFile: string, patch: SessionMetaPatch): Promise<{ ok: boolean; error?: string }>;
   listFiles(path: string): Promise<FileListResult>;
@@ -1350,12 +1363,12 @@ export interface PreloadApi {
   getForkMessages(): Promise<ForkMessage[]>;
   getAvailableModels(): Promise<ModelInfo[]>;
   /** 当前模型可用的推理档位（顺序以 pi 为准） */
-  getThinkingLevels(): Promise<ThinkingLevel[]>;
-  switchSession(sessionFile: SessionFile): Promise<SessionSwitchResult>;
-  fork(entryId: EntryId): Promise<ForkResult>;
-  clone(): Promise<SessionSwitchResult>;
-  setModel(provider: string, modelId: string): Promise<SetModelResult>;
-  setThinkingLevel(level: ThinkingLevel): Promise<SetModelResult>;
+  getThinkingLevels(runtimeId?: string): Promise<ThinkingLevel[]>;
+  switchSession(sessionFile: SessionFile, runtimeId?: string): Promise<SessionSwitchResult>;
+  fork(entryId: EntryId, runtimeId?: string): Promise<ForkResult>;
+  clone(runtimeId?: string): Promise<SessionSwitchResult>;
+  setModel(provider: string, modelId: string, runtimeId?: string): Promise<SetModelResult>;
+  setThinkingLevel(level: ThinkingLevel, runtimeId?: string): Promise<SetModelResult>;
   getPermission(): Promise<PermissionState>;
   setPermission(mode: PermissionMode, asDefault: boolean): Promise<PermissionState>;
   exportHtml(outputPath?: string): Promise<string | null>;
@@ -1396,6 +1409,16 @@ export interface PreloadApi {
   setMcpSecret(name: string, key: string, value: string): Promise<{ ok: boolean; list: McpListView }>;
   openMcpConfig(): Promise<{ ok: boolean; path: string; error?: string }>;
   loginMcpServer(name: string): Promise<McpLoginResult>;
+  listRuntimes(): Promise<RuntimeView[]>;
+  getRuntimeMessages(id: string): Promise<AgentMessage[]>;
+  getRuntimeState(id: string): Promise<SessionState | null>;
+  getRuntimeStats(id: string): Promise<SessionStats | null>;
+  createRuntime(input?: {
+    workspaceRoot?: string;
+    sessionFile?: string | null;
+  }): Promise<RuntimeView | null>;
+  activateRuntime(id: string): Promise<RuntimeView[]>;
+  closeRuntime(id: string): Promise<RuntimeView[]>;
 }
 
 export type IpcRequest =

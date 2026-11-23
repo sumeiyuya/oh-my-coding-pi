@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { BridgeStatus, ThinkingLevel } from "@oh-my-coding-pi/shared";
-import { expectedVersion, resolvePi, runVersion } from "./pi-runtime";
+import { expectedVersion, resolvePi, runVersion } from "./pi-runtime.ts";
 
 export interface PiExit {
   code: number | null;

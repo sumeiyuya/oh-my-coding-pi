@@ -55,6 +55,9 @@ import type {
 import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX, UPLOAD_IMAGE_MAX_BYTES, UPLOAD_IMAGE_MAX_COUNT } from "@oh-my-coding-pi/shared";
 import { isThinkingLevel } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
+import { SessionRuntime } from "./session-runtime";
+import { KernelManager } from "./kernel-manager";
+import { RuntimeManager } from "./runtime-manager";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
 import { EventPump } from "./event-pump";
@@ -74,7 +77,7 @@ import { PolicyService } from "./policy-service";
 import { ArtifactLedger } from "./artifact-ledger";
 import { ArtifactService } from "./artifact-service";
 import { GrantStore } from "./grants";
-import { AuditLog } from "./audit";
+import { AuditLog, type AuditEntry } from "./audit";
 import { createSkill, readSkill, scanSkills, setSkillEnabled } from "./skills";
 import { SecretStore } from "./secrets";
 import { describeImage, formatDescription } from "./vision";
@@ -148,8 +151,9 @@ let selftestDone = false;
 let selftestTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 
-const supervisor = new PiSupervisor();
-const rpc = new RpcClient();
+let kernelManager: KernelManager | null = null;
+/** 新建 runtime 时复用同一套扩展 */
+let runtimeExtensions: string[] = [];
 let pythonKernel: KernelService | null = null;
 let rKernel: KernelService | null = null;
 let kernelBroker: KernelBroker | null = null;
@@ -185,6 +189,12 @@ interface PendingApproval {
   request: ApprovalRequest;
   timer: NodeJS.Timeout;
   sessionKey: string;
+  /** P1b2c3：审批来自哪个 runtime；默认 default */
+  runtimeId: string;
+  /** 回复 extension_ui_response 要发回哪个进程 */
+  rpc: RpcClient;
+  /** 审批所属 runtime 的工作区；grants 按它记 */
+  workspaceRoot: string;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
 let secretStore: SecretStore | null = null;
@@ -215,14 +225,25 @@ const turnTrace = new TurnTrace({
 });
 turnTrace.setPhaseSink((ev) => send("pi:turn", ev));
 
-/** 合并逐 token 的 text/thinking 增量；OMCP_EVENT_PUMP=0 时退化为逐条转发。 */
-const eventPump = new EventPump({
-  emit: (ev) => {
-    turnTrace.countIpcSent();
-    send("pi:event", ev as PiStreamItem);
-  },
-  enabled: process.env.OMCP_EVENT_PUMP !== "0",
+/** 运行时管理器（P1a：默认 runtime 仍唯一激活；P2 再加标签） */
+const runtimeManager = new RuntimeManager();
+const defaultRuntime = runtimeManager.create({
+  id: "default",
+  provider: process.env.PI_PROVIDER || "",
+  model: process.env.PI_MODEL || "",
+  emit: emitRuntimeEvent,
+  pumpEnabled: process.env.OMCP_EVENT_PUMP !== "0",
 });
+const supervisor = defaultRuntime.supervisor;
+const rpc = defaultRuntime.rpc;
+/** 合并逐 token 的 text/thinking 增量；OMCP_EVENT_PUMP=0 时退化为逐条转发。 */
+const eventPump = defaultRuntime.pump;
+
+/** P2a：所有 runtime 的事件统一出口；renderer 按 runtimeId 分流 */
+function emitRuntimeEvent(ev: PiEvent, runtimeId: string): void {
+  turnTrace.countIpcSent();
+  send("pi:event", { ...ev, runtimeId } as unknown as PiStreamItem);
+}
 
 /**
  * pi 进程“已启动”与“已响应”不是一回事：spawn 成功只代表进程起来了，
@@ -277,12 +298,34 @@ function startPiProbe(): void {
 /* 权限门：审批、授权、审计                                            */
 /* ------------------------------------------------------------------ */
 
-function auditFile(): string | null {
-  if (!workspaceRoot) return null;
-  return join(workspaceRoot, ".omcp", "logs", "audit.jsonl");
+function auditFileAt(root: string | null): string | null {
+  return root ? join(root, ".omcp", "logs", "audit.jsonl") : null;
 }
 
-function handleExtensionUi(ev: Extract<PiEvent, { type: "extension_ui_request" }>): void {
+function auditFile(): string | null {
+  return auditFileAt(workspaceRoot);
+}
+
+/** P2b6b：后台 runtime 的审计写到它自己的 workspace */
+const runtimeAuditLogs = new Map<string, AuditLog>();
+
+function auditFor(runtimeId?: string): AuditLog | null {
+  if (!runtimeId || runtimeId === "default") return auditLog;
+  const runtime = runtimeManager.get(runtimeId);
+  if (!runtime?.workspace) return auditLog;
+  let log = runtimeAuditLogs.get(runtimeId);
+  if (!log) {
+    const root = runtime.workspace;
+    log = new AuditLog(() => auditFileAt(root));
+    runtimeAuditLogs.set(runtimeId, log);
+  }
+  return log;
+}
+
+function handleExtensionUi(
+  ev: Extract<PiEvent, { type: "extension_ui_request" }>,
+  targetRuntime: SessionRuntime = defaultRuntime,
+): void {
   if (
     ev.method === "select" &&
     typeof ev.title === "string" &&
@@ -296,7 +339,7 @@ function handleExtensionUi(ev: Extract<PiEvent, { type: "extension_ui_request" }
     }
     if (!payload || typeof payload.ruleId !== "string") {
       try {
-        rpc.sendRaw({ type: "extension_ui_response", id: ev.id, cancelled: true });
+        targetRuntime.rpc.sendRaw({ type: "extension_ui_response", id: ev.id, cancelled: true });
       } catch {
         // pi 已退出
       }
@@ -304,9 +347,14 @@ function handleExtensionUi(ev: Extract<PiEvent, { type: "extension_ui_request" }
     }
     const rawTimeout = typeof ev.timeout === "number" ? ev.timeout : 120;
     const timeoutMs = Math.max(5_000, Math.min(rawTimeout * 1000, 600_000));
+    const runtimeId =
+      typeof (ev as unknown as { runtimeId?: unknown }).runtimeId === "string"
+        ? (ev as unknown as { runtimeId: string }).runtimeId
+        : targetRuntime.id;
     const request: ApprovalRequest = {
       id: ev.id,
       toolName: typeof payload.toolName === "string" ? payload.toolName : "unknown",
+      ...(runtimeId ? { runtimeId } : {}),
       ruleId: payload.ruleId,
       summary: String(payload.summary ?? ""),
       options: [...APPROVAL_OPTIONS],
@@ -317,7 +365,10 @@ function handleExtensionUi(ev: Extract<PiEvent, { type: "extension_ui_request" }
     pendingApprovals.set(ev.id, {
       request,
       timer,
-      sessionKey: currentSessionFile ?? "session:none",
+      sessionKey: targetRuntime.sessionFile ?? currentSessionFile ?? "session:none",
+      runtimeId,
+      rpc: targetRuntime.rpc,
+      workspaceRoot: targetRuntime.workspace || workspaceRoot,
     });
     send("approval:request", request);
     return;
@@ -340,21 +391,25 @@ function resolveApproval(requestId: string, scope: ApprovalScope): void {
   const allowed = scope === "once" || scope === "session" || scope === "always";
   const label = APPROVAL_OPTIONS.find((o) => o.value === scope)?.label ?? "拒绝";
   try {
-    rpc.sendRaw({ type: "extension_ui_response", id: requestId, value: label });
+    pending.rpc.sendRaw({ type: "extension_ui_response", id: requestId, value: label });
   } catch {
     // pi 已退出：审计仍然记录
   }
 
-  if (allowed && grants && workspaceRoot) {
+  if (allowed && grants) {
     if (scope === "session") {
-      grants.grantSession(workspaceRoot, pending.request.ruleId, pending.sessionKey);
+      grants.grantSession(pending.workspaceRoot, pending.request.ruleId, pending.sessionKey);
     }
     if (scope === "always") {
-      grants.grantPersistent(workspaceRoot, pending.request.ruleId, appSettings.grantTtlDays);
+      grants.grantPersistent(
+        pending.workspaceRoot,
+        pending.request.ruleId,
+        appSettings.grantTtlDays,
+      );
     }
   }
 
-  auditLog?.write({
+  auditFor(pending.runtimeId)?.write({
     ts: new Date().toISOString(),
     toolName: pending.request.toolName,
     ruleId: pending.request.ruleId,
@@ -366,8 +421,9 @@ function resolveApproval(requestId: string, scope: ApprovalScope): void {
   send("approval:resolved", { requestId, scope });
 }
 
-function cancelPendingApprovals(): void {
+function cancelPendingApprovals(runtimeId?: string): void {
   for (const [id, pending] of [...pendingApprovals]) {
+    if (runtimeId && pending.runtimeId !== runtimeId) continue;
     clearTimeout(pending.timer);
     pendingApprovals.delete(id);
     auditLog?.write({
@@ -439,6 +495,26 @@ function applyPermissionMode(): void {
 }
 
 
+/**
+ * P1b2b/c：给一个 runtime 注入它自己的服务 token。
+ * 服务端已支持 runtime token；新 runtime 不能沿用默认 runtime 的 token。
+ */
+function applyRuntimeServiceEnv(runtime: SessionRuntime): void {
+  runtime.setEnvs({
+    OMCP_KERNEL_URL: kernelBroker?.url ?? "",
+    OMCP_KERNEL_TOKEN: runtime.token,
+    OMCP_POLICY_URL: policyService?.url ?? "",
+    OMCP_POLICY_TOKEN: runtime.token,
+    OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
+    OMCP_ARTIFACTS_TOKEN: runtime.token,
+    OMCP_PLUGINS: JSON.stringify(enabledFamilyKeys(appSettings.plugins)),
+    OMCP_MEMORY_DIR: memoryDirPath(),
+    ...(browserService
+      ? { OMCP_BROWSER_URL: browserService.url, OMCP_BROWSER_TOKEN: browserService.token }
+      : {}),
+  });
+}
+
 function registryFile(): string {
   return join(app.getPath("userData"), "model-registry.json");
 }
@@ -469,8 +545,8 @@ function getMcpService(): McpService {
     trustFile: () => join(app.getPath("userData"), "mcp-trust.json"),
     onConfigSaved: () => {
       // 与插件开关同一套：重启 pi，下一段会话按新配置连接
-      supervisor.stop();
-      setTimeout(() => supervisor.start(), 300);
+      defaultRuntime.stop();
+      setTimeout(() => defaultRuntime.start(), 300);
     },
   });
   return mcpService;
@@ -554,7 +630,7 @@ function applyRegistryEnv(): void {
     const key = secretStore?.get(`provider:${id}:apiKey`);
     if (!key) continue;
     for (const name of credentialEnvNames(id, catalogProvider(id)?.envKeys)) {
-      supervisor.setEnv(name, key);
+      defaultRuntime.setEnv(name, key);
     }
   }
 }
@@ -664,19 +740,22 @@ function firstUserText(file: string): string | null {
   return null;
 }
 
-function listSessions(): SessionSummary[] {
-  if (!sessionDir) return [];
-  mkdirSync(sessionDir, { recursive: true });
+function listSessions(
+  dir: string | null = sessionDir,
+  root: string = workspaceRoot,
+): SessionSummary[] {
+  if (!dir) return [];
+  mkdirSync(dir, { recursive: true });
   const out: SessionSummary[] = [];
   // 老会话没有标题：列表加载时补一次（写进 meta 缓存，重启不重算）
-  const meta = workspaceRoot ? loadSessionMeta(workspaceRoot) : null;
+  const meta = root ? loadSessionMeta(root) : null;
   const taken = Object.values(meta?.sessions ?? {})
     .map((e) => e.title)
     .filter((t): t is string => Boolean(t));
   const autoTitles: Record<string, string> = {};
-  for (const name of readdirSync(sessionDir)) {
+  for (const name of readdirSync(dir)) {
     if (!name.endsWith(".jsonl")) continue;
-    const file = join(sessionDir, name);
+    const file = join(dir, name);
     let sessionId = name;
     let updatedAt: string | undefined;
     try {
@@ -695,7 +774,7 @@ function listSessions(): SessionSummary[] {
     out.push({ sessionId, sessionFile: file, updatedAt });
 
     const known = meta?.sessions[name];
-    if (workspaceRoot && !known?.title && !known?.renamed) {
+    if (root && !known?.title && !known?.renamed) {
       const source = firstUserText(file);
       const base = source ? briefTitle(source) : null;
       if (base) {
@@ -705,7 +784,7 @@ function listSessions(): SessionSummary[] {
       }
     }
   }
-  if (workspaceRoot && Object.keys(autoTitles).length) applyAutoTitles(workspaceRoot, autoTitles);
+  if (root && Object.keys(autoTitles).length) applyAutoTitles(root, autoTitles);
   return out.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
 
@@ -870,25 +949,24 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const newSessionDir = join(science, "sessions");
   const migratedSessions = migrateSessions(newSessionDir);
 
-  supervisor.stop();
+  defaultRuntime.stop();
   rpc.detach();
   await new Promise((r) => setTimeout(r, 350));
 
   workspaceRoot = resolved;
-  supervisor.setCwd(resolved);
-  supervisor.setTrustProject(appSettings.trustProject);
+  defaultRuntime.setWorkspace(resolved);
+  defaultRuntime.setTrustProject(appSettings.trustProject);
   policyService?.reload();
   grants?.clearSession();
   planGate.approved = false;
   planGate.planPath = null;
   planGate.digest = null;
-  pythonKernel?.setWorkspace(resolved);
-  rKernel?.setWorkspace(resolved);
+  kernelManager?.setWorkspace("default", resolved);
   scheduleKernelPrewarm();
   sessionDir = newSessionDir;
   invalidateWorkspaceIndex();
   workspaceStateFile = join(science, "state.json");
-  supervisor.setSessionDir(sessionDir);
+  defaultRuntime.setSessionDir(sessionDir);
 
   let provider = appSettings.provider;
   let model = appSettings.model;
@@ -901,8 +979,8 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   } catch {
     // defaults
   }
-  supervisor.setModel(provider, model);
-  supervisor.setThinkingLevel(appSettings.thinkingLevel);
+  defaultRuntime.setModel(provider, model);
+  defaultRuntime.setThinkingLevel(appSettings.thinkingLevel);
   try {
     writeFileSync(
       join(science, "workspace.json"),
@@ -916,7 +994,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const wsState = readWorkspaceState();
   const last = wsState.lastSessionFile ?? null;
   currentSessionFile = last && existsSync(last) ? last : null;
-  supervisor.setSessionFile(currentSessionFile);
+  runtimeManager.updateSession("default", currentSessionFile);
   // 每次打开工作区/启动都重建一次 models.json：
   // pi 自己也会写这个文件（远端目录缓存），不重建就可能某天发现我们的条目没了。
   applyRegistryEnv();
@@ -925,7 +1003,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
     const stale = (reg.managed ?? []).filter((id) => !(id in reg.providers));
     syncRegistryToPi(reg, stale);
   }
-  supervisor.start();
+  defaultRuntime.start();
 
   const all = readWorkspaces();
   const recent = [resolved, ...(all.recent ?? []).filter((x) => x !== resolved)].slice(0, 8);
@@ -1238,7 +1316,7 @@ async function syncCurrentSession(): Promise<void> {
     const file = normalizeSessionFile(state?.sessionFile);
     if (file) {
       currentSessionFile = file;
-      supervisor.setSessionFile(file);
+      runtimeManager.updateSession("default", file);
       if (existsSync(file)) writeWorkspaceState({ lastSessionFile: file });
     }
   } catch {
@@ -1594,8 +1672,13 @@ ipcMain.handle(
     text: string,
     images?: ImageAttachment[],
     opts?: { streamingBehavior?: "steer" | "followUp" },
+    runtimeId?: string,
   ): Promise<PromptResult> => {
-    if (!piReady) {
+    const target =
+      runtimeId && runtimeId !== "default"
+        ? runtimeManager.require(runtimeId)
+        : defaultRuntime;
+    if (target.id === "default" ? !piReady : !target.rpc.attached) {
       console.log("[pi] prompt blocked: not ready");
       return { ok: false, error: "pi 正在启动，请稍候再发送" };
     }
@@ -1627,7 +1710,7 @@ ipcMain.handle(
     const ackStart = performance.now();
     try {
       if (list.length === 0) {
-        res = await rpc.request(
+        res = await target.rpc.request(
           behavior
             ? { type: "prompt", message: text, streamingBehavior: behavior }
             : { type: "prompt", message: text },
@@ -1636,14 +1719,14 @@ ipcMain.handle(
         for (const img of list) saveAttachment(img.data, img.mimeType);
         const supports = await modelSupportsImage();
         if (supports) {
-          res = await rpc.request(
+          res = await target.rpc.request(
             behavior
               ? { type: "prompt", message: text, images: list, streamingBehavior: behavior }
               : { type: "prompt", message: text, images: list },
           );
         } else {
           const description = await transcribeImages(list);
-          res = await rpc.request({
+          res = await target.rpc.request({
             type: "prompt",
             message: text + "\n\n" + description,
             ...(behavior ? { streamingBehavior: behavior } : {}),
@@ -1656,7 +1739,7 @@ ipcMain.handle(
     }
     if (own) turnTrace.note("promptAckMs", performance.now() - ackStart);
     if (res.success) {
-      maybeAutoTitle(text);
+      if (target.id === "default") maybeAutoTitle(text);
     } else if (own) {
       turnTrace.fail("rejected");
     }
@@ -1893,20 +1976,30 @@ ipcMain.handle(
     })(),
 );
 
-ipcMain.handle("pi:steer", async (_event, text: string): Promise<PromptResult> => {
-  if (!piReady) return { ok: false, error: "pi 正在启动，请稍候再发送" };
+ipcMain.handle("pi:steer", async (_event, text: string, runtimeId?: string): Promise<PromptResult> => {
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  if (target.id === "default" ? !piReady : !target.rpc.attached) {
+    return { ok: false, error: "pi 正在启动，请稍候再发送" };
+  }
   if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
-  return promptResult(await rpc.request({ type: "steer", message: text }));
+  return promptResult(await target.rpc.request({ type: "steer", message: text }));
 });
 
-ipcMain.handle("pi:follow-up", async (_event, text: string): Promise<PromptResult> => {
-  if (!piReady) return { ok: false, error: "pi 正在启动，请稍候再发送" };
+ipcMain.handle("pi:follow-up", async (_event, text: string, runtimeId?: string): Promise<PromptResult> => {
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  if (target.id === "default" ? !piReady : !target.rpc.attached) {
+    return { ok: false, error: "pi 正在启动，请稍候再发送" };
+  }
   if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
-  return promptResult(await rpc.request({ type: "follow_up", message: text }));
+  return promptResult(await target.rpc.request({ type: "follow_up", message: text }));
 });
 
-ipcMain.handle("pi:clear-queue", async () => {
-  const res = await rpc.request({ type: "clear_queue" });
+ipcMain.handle("pi:clear-queue", async (_event, runtimeId?: string) => {
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  const res = await target.rpc.request({ type: "clear_queue" });
   const data = res.data as { steering?: unknown; followUp?: unknown } | undefined;
   const steering = Array.isArray(data?.steering)
     ? data!.steering.filter((x): x is string => typeof x === "string")
@@ -1917,39 +2010,55 @@ ipcMain.handle("pi:clear-queue", async () => {
   return { ok: Boolean(res.success), steering, followUp };
 });
 
-ipcMain.handle("pi:abort", async () => {
+ipcMain.handle("pi:abort", async (_event, runtimeId?: string) => {
+  const target =
+    runtimeId && runtimeId !== "default"
+      ? runtimeManager.require(runtimeId)
+      : defaultRuntime;
   turnTrace.abort("user");
   // Optimistic: do not wait for the RPC abort response.
-  rpc.send({ type: "abort" });
+  target.rpc.send({ type: "abort" });
   clearAbortTimer();
   abortTimer = setTimeout(() => {
     abortTimer = null;
-    // Hard fallback: restart pi, resuming the current session file.
-    supervisor.stop();
-    setTimeout(() => supervisor.start(), 250);
+    // Hard fallback: restart this runtime, resuming its session file.
+    target.stop();
+    setTimeout(() => target.start(), 250);
   }, 3000);
   return true;
 });
 
-ipcMain.handle("pi:new-session", async () => {
+ipcMain.handle("pi:new-session", async (_event, runtimeId?: string) => {
   invalidateStats();
-  const res = await rpc.request({ type: "new_session" });
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  const res = await target.rpc.request({ type: "new_session" });
   if (res.success) {
-    invalidateWorkspaceIndex();
-    currentSessionFile = null;
-    applyPermissionMode();
-    supervisor.setSessionFile(null);
-    writeWorkspaceState({ lastSessionFile: null });
-    void resetBudgetBaseline();
+    if (target.id === "default") {
+      invalidateWorkspaceIndex();
+      currentSessionFile = null;
+      applyPermissionMode();
+      runtimeManager.updateSession("default", null);
+      writeWorkspaceState({ lastSessionFile: null });
+      void resetBudgetBaseline();
+    } else {
+      const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
+      const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
+      runtimeManager.updateSession(target.id, file);
+    }
     // 新会话沿用“设为默认”的推理档（旧会话各自保留自己的记录）
-    await rpc
+    await target.rpc
       .request({ type: "set_thinking_level", level: appSettings.thinkingLevel })
       .catch(() => null);
   }
   return res.success;
 });
 
-ipcMain.handle("pi:sessions", () => listSessions());
+ipcMain.handle("pi:sessions", (_event, runtimeId?: string) => {
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  return listSessions(target.sessionDir ?? sessionDir, target.workspace || workspaceRoot);
+});
 
 ipcMain.handle("session-meta:get", () => {
   if (!workspaceRoot) return { version: 1, sessions: {} };
@@ -2198,10 +2307,10 @@ ipcMain.handle("kernel:save-path", async (_event, language: "python" | "r", raw:
   }
   if (language === "r") {
     appSettings.rPath = next;
-    rKernel?.setRPath(next);
+    kernelManager?.setRPath(next);
   } else {
     appSettings.pythonPath = next;
-    pythonKernel?.setPythonPath(next);
+    kernelManager?.setPythonPath(next);
   }
   saveAppSettings();
   const service = language === "r" ? rKernel : pythonKernel;
@@ -2478,20 +2587,37 @@ ipcMain.handle("pi:tree", async () => {
   return res.data as SessionTreeResult;
 });
 
-ipcMain.handle("pi:fork", async (_event, entryId: string) => {
+ipcMain.handle("pi:fork", async (_event, entryId: string, runtimeId?: string) => {
   invalidateStats();
-  const res = await rpc.request({ type: "fork", entryId });
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  const res = await target.rpc.request({ type: "fork", entryId });
   const data = (res.data ?? {}) as ForkResult;
-  await syncCurrentSession();
-  const persisted = !!(currentSessionFile && existsSync(currentSessionFile));
-  return { ...data, sessionFile: currentSessionFile ?? undefined, persisted };
+  if (target.id === "default") {
+    await syncCurrentSession();
+  } else {
+    const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
+    const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
+    runtimeManager.updateSession(target.id, file);
+  }
+  const sessionFile = target.id === "default" ? currentSessionFile : target.sessionFile;
+  const persisted = !!(sessionFile && existsSync(sessionFile));
+  return { ...data, sessionFile: sessionFile ?? undefined, persisted };
 });
 
-ipcMain.handle("pi:clone", async () => {
+ipcMain.handle("pi:clone", async (_event, runtimeId?: string) => {
   invalidateStats();
-  const res = await rpc.request({ type: "clone" });
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  const res = await target.rpc.request({ type: "clone" });
   const data = (res.data ?? {}) as SessionSwitchResult;
-  await syncCurrentSession();
+  if (target.id === "default") {
+    await syncCurrentSession();
+  } else {
+    const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
+    const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
+    runtimeManager.updateSession(target.id, file);
+  }
   return data;
 });
 
@@ -2509,8 +2635,8 @@ ipcMain.handle("pi:export-html", async (_event, outputPath?: string) => {
 });
 
 ipcMain.handle("pi:restart", async () => {
-  supervisor.stop();
-  setTimeout(() => supervisor.start(), 300);
+  defaultRuntime.stop();
+  setTimeout(() => defaultRuntime.start(), 300);
   return true;
 });
 
@@ -2574,8 +2700,8 @@ ipcMain.handle("models:registry-set", (_event, raw: unknown) => {
   applyRegistryEnv();
   const sync = syncRegistryToPi(registry, stale);
   if (sync.written) {
-    supervisor.stop();
-    setTimeout(() => supervisor.start(), 300);
+    defaultRuntime.stop();
+    setTimeout(() => defaultRuntime.start(), 300);
   }
   return {
     ok: sync.ok,
@@ -2741,8 +2867,8 @@ ipcMain.handle("model:setup-save", (_event, input: unknown) => {
 
   applyRegistryEnv();
   const sync = syncRegistryToPi(checked.registry, stale);
-  supervisor.stop();
-  setTimeout(() => supervisor.start(), 300);
+  defaultRuntime.stop();
+  setTimeout(() => defaultRuntime.start(), 300);
   return {
     ok: sync.ok,
     errors: sync.error ? [sync.error] : [],
@@ -2783,8 +2909,8 @@ ipcMain.handle("models:add-provider", (_event, input: unknown) => {
   applyRegistryEnv();
   const sync = syncRegistryToPi(registry);
   if (sync.written) {
-    supervisor.stop();
-    setTimeout(() => supervisor.start(), 300);
+    defaultRuntime.stop();
+    setTimeout(() => defaultRuntime.start(), 300);
   }
   return {
     ok: sync.ok,
@@ -2805,15 +2931,17 @@ ipcMain.handle("models:key-set", (_event, id: string, key: string) => {
   const sync = syncRegistryToPi();
   // 密钥走环境变量注入，pi 进程只在启动时读一次。models.json 里写的是 $OMCP_KEY_*，
   // 换密钥时文件内容不变，靠 sync.written 判断就不会重启，新密钥对运行中的 pi 无效。
-  supervisor.stop();
-  setTimeout(() => supervisor.start(), 300);
+  defaultRuntime.stop();
+  setTimeout(() => defaultRuntime.start(), 300);
   return { ok: sync.ok, error: sync.error, written: sync.written, warnings: sync.warnings, restarted: true };
 });
 
 ipcMain.handle(
   "pi:set-model",
-  async (_event, provider: string, modelId: string): Promise<SetModelResult> => {
-    const res = await rpc.request({ type: "set_model", provider, modelId });
+  async (_event, provider: string, modelId: string, runtimeId?: string): Promise<SetModelResult> => {
+    const target =
+      runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+    const res = await target.rpc.request({ type: "set_model", provider, modelId });
     if (!res.success) {
       const error = String(res.error ?? "").trim() || "pi 未说明原因";
       reportError({
@@ -2827,18 +2955,23 @@ ipcMain.handle(
       });
       return { ok: false, error };
     }
-    // 顶栏选过的模型要成为下次启动的默认值（supervisor 是 settings:detail 的读取源）
-    appSettings.provider = provider;
-    appSettings.model = modelId;
-    supervisor.setModel(provider, modelId);
-    saveAppSettings();
+    target.setModel(provider, modelId);
+    // 只有默认 runtime 的模型才成为下次启动的默认值
+    if (target.id === "default") {
+      appSettings.provider = provider;
+      appSettings.model = modelId;
+      defaultRuntime.setModel(provider, modelId);
+      saveAppSettings();
+    }
     return { ok: true };
   },
 );
 
-ipcMain.handle("pi:thinking-levels", async (): Promise<ThinkingLevel[]> => {
+ipcMain.handle("pi:thinking-levels", async (_event, runtimeId?: string): Promise<ThinkingLevel[]> => {
+  const target =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
   // 失败必须抛错：空数组是合法结果（模型没有可调档位），两者不能混
-  const res = await rpc.request({ type: "get_available_thinking_levels" }, 8000);
+  const res = await target.rpc.request({ type: "get_available_thinking_levels" }, 8000);
   if (!res.success) throw new Error(String(res.error ?? "pi 没有返回可用档位"));
   const levels = (res.data as { levels?: unknown } | undefined)?.levels;
   if (!Array.isArray(levels)) throw new Error("pi 返回的档位格式不正确");
@@ -2847,15 +2980,20 @@ ipcMain.handle("pi:thinking-levels", async (): Promise<ThinkingLevel[]> => {
 
 ipcMain.handle(
   "pi:set-thinking-level",
-  async (_event, level: unknown): Promise<SetModelResult> => {
+  async (_event, level: unknown, runtimeId?: string): Promise<SetModelResult> => {
     if (!isThinkingLevel(level)) return { ok: false, error: "未知的推理档位" };
-    const res = await rpc.request({ type: "set_thinking_level", level });
+    const target =
+      runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+    const res = await target.rpc.request({ type: "set_thinking_level", level });
     if (!res.success) {
       return { ok: false, error: String(res.error ?? "").trim() || "pi 未说明原因" };
     }
-    appSettings.thinkingLevel = level;
-    supervisor.setThinkingLevel(level);
-    saveAppSettings();
+    target.setThinkingLevel(level);
+    if (target.id === "default") {
+      appSettings.thinkingLevel = level;
+      defaultRuntime.setThinkingLevel(level);
+      saveAppSettings();
+    }
     return { ok: true };
   },
 );
@@ -2873,7 +3011,7 @@ ipcMain.handle("pi:state", async () => {
   if (file) {
     state.sessionFile = file;
     currentSessionFile = file;
-    supervisor.setSessionFile(file);
+    defaultRuntime.setSessionFile(file);
     planGate.approved = false;
     planGate.planPath = null;
     planGate.digest = null;
@@ -2924,13 +3062,13 @@ ipcMain.handle("grants:clear", () => {
 });
 
 ipcMain.handle("audit:read", (_event, limit?: number): AuditEntryView[] =>
-  (auditLog?.read(limit ?? 500) ?? []) as AuditEntryView[],
+  (auditFor(runtimeManager.active?.id)?.read(limit ?? 500) ?? []) as AuditEntryView[],
 );
 
 ipcMain.handle("grants:prune", (): number => grants?.prune() ?? 0);
 
 ipcMain.handle("audit:query", (_event, query?: AuditQuery): AuditPage => {
-  const page = auditLog?.query(query ?? {}) ?? { total: 0, items: [] };
+  const page = auditFor(runtimeManager.active?.id)?.query(query ?? {}) ?? { total: 0, items: [] };
   return { total: page.total, items: page.items as AuditEntryView[] };
 });
 
@@ -2962,8 +3100,8 @@ ipcMain.handle("skills:set-enabled", (_event, name: string, enabled: boolean): b
       summary: `技能 ${name} ${enabled ? "启用" : "停用"}`,
     });
     // 技能清单在 pi 启动时读取，改动后重启才生效
-    supervisor.stop();
-    setTimeout(() => supervisor.start(), 300);
+    defaultRuntime.stop();
+    setTimeout(() => defaultRuntime.start(), 300);
   }
   return ok;
 });
@@ -3027,10 +3165,92 @@ ipcMain.handle("mcp:login", async (_event, name: string) => {
   const result = await getMcpService().login(String(name));
   if (result.ok) {
     // 登录令牌写进了 agentDir；运行中的 pi 还拿着旧连接，重启后按新令牌连
-    supervisor.stop();
-    setTimeout(() => supervisor.start(), 300);
+    defaultRuntime.stop();
+    setTimeout(() => defaultRuntime.start(), 300);
   }
   return result;
+});
+
+/* ------------------------------------------------------------------ */
+/* P2a：runtime 管理（UI 标签在 P2b 接）                                  */
+/* ------------------------------------------------------------------ */
+
+ipcMain.handle("runtime:list", () => runtimeManager.list());
+
+ipcMain.handle(
+  "runtime:create",
+  (
+    _event,
+    input?: { workspaceRoot?: string; sessionFile?: string | null },
+  ) => {
+    const root = input?.workspaceRoot?.trim() || workspaceRoot;
+    if (!root) throw new Error("请先打开一个工作区，再创建 runtime");
+    const id = `runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    let created: SessionRuntime | null = null;
+    created = runtimeManager.create({
+      id,
+      provider: supervisor.getProvider(),
+      model: supervisor.getModel(),
+      emit: emitRuntimeEvent,
+      pumpEnabled: process.env.OMCP_EVENT_PUMP !== "0",
+      workspaceRoot: root,
+      sessionFile: input?.sessionFile ?? null,
+      autoAttach: true,
+      onExtensionUi: (ev) => {
+        if (created && ev.type === "extension_ui_request") handleExtensionUi(ev, created);
+      },
+    });
+    const runtime = created;
+    if (sessionDir) runtime.setSessionDir(sessionDir);
+    runtime.setTrustProject(appSettings.trustProject);
+    runtime.setExtensions(runtimeExtensions);
+    runtime.setThinkingLevel(appSettings.thinkingLevel);
+    applyRuntimeServiceEnv(runtime);
+    runtime.start();
+    return runtimeManager.list().find((item) => item.id === id) ?? null;
+  },
+);
+
+ipcMain.handle("runtime:messages", async (_event, id: string) => {
+  const target = String(id);
+  const runtime = target === "default" ? defaultRuntime : runtimeManager.require(target);
+  const timeout = target === "default" ? (piReady ? 30_000 : 3_000) : 10_000;
+  const res = await runtime.rpc.request({ type: "get_messages" }, timeout);
+  const data = res.data as { messages?: AgentMessage[] } | undefined;
+  return data?.messages ?? [];
+});
+
+ipcMain.handle("runtime:state", async (_event, id: string) => {
+  const target = String(id) === "default" ? defaultRuntime : runtimeManager.require(String(id));
+  const res = await target.rpc.request(
+    { type: "get_state" },
+    String(id) === "default" ? (piReady ? 30_000 : 3_000) : 10_000,
+  );
+  return (res.data as SessionState | undefined) ?? null;
+});
+
+ipcMain.handle("runtime:stats", async (_event, id: string) => {
+  const target = String(id) === "default" ? defaultRuntime : runtimeManager.require(String(id));
+  const res = await target.rpc.request(
+    { type: "get_session_stats" },
+    String(id) === "default" ? (piReady ? 30_000 : 3_000) : 10_000,
+  );
+  return (res.data as SessionStats | undefined) ?? null;
+});
+
+ipcMain.handle("runtime:activate", (_event, id: string) => {
+  runtimeManager.activate(String(id));
+  return runtimeManager.list();
+});
+
+ipcMain.handle("runtime:close", (_event, id: string) => {
+  const target = String(id);
+  if (target === "default") throw new Error("默认 runtime 不能关闭");
+  cancelPendingApprovals(target);
+  kernelManager?.dispose(target);
+  runtimeAuditLogs.delete(target);
+  runtimeManager.close(target);
+  return runtimeManager.list();
 });
 
 ipcMain.handle("mcp:open-config", async () => {
@@ -3087,9 +3307,9 @@ ipcMain.handle(
     saveAppSettings();
     // 只有工具集真的变了才重启 pi（ADR-045）：改一个不影响启用集的开关不该搬动进程
     if (before !== after) {
-      supervisor.setEnv("OMCP_PLUGINS", JSON.stringify(enabledFamilyKeys(appSettings.plugins)));
-      supervisor.stop();
-      setTimeout(() => supervisor.start(), 300);
+      defaultRuntime.setEnv("OMCP_PLUGINS", JSON.stringify(enabledFamilyKeys(appSettings.plugins)));
+      defaultRuntime.stop();
+      setTimeout(() => defaultRuntime.start(), 300);
     }
     return pluginViews();
   },
@@ -3195,15 +3415,15 @@ ipcMain.handle(
     if (typeof patch.updateRepo === "string") appSettings.updateRepo = patch.updateRepo.trim();
     if (typeof patch.piConfigDir === "string" && patch.piConfigDir.trim() !== appSettings.piConfigDir) {
       appSettings.piConfigDir = patch.piConfigDir.trim();
-      supervisor.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
-      supervisor.stop();
-      setTimeout(() => supervisor.start(), 300);
+      defaultRuntime.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
+      defaultRuntime.stop();
+      setTimeout(() => defaultRuntime.start(), 300);
     }
     if (typeof patch.trustProject === "boolean" && patch.trustProject !== appSettings.trustProject) {
       appSettings.trustProject = patch.trustProject;
-      supervisor.setTrustProject(patch.trustProject);
-      supervisor.stop();
-      setTimeout(() => supervisor.start(), 300);
+      defaultRuntime.setTrustProject(patch.trustProject);
+      defaultRuntime.stop();
+      setTimeout(() => defaultRuntime.start(), 300);
     }
     if (typeof patch.grantTtlDays === "number") {
       appSettings.grantTtlDays = Math.max(0, Math.min(3650, Math.floor(patch.grantTtlDays)));
@@ -3222,7 +3442,7 @@ ipcMain.handle(
     }
     if (isThinkingLevel(patch.thinkingLevel)) {
       appSettings.thinkingLevel = patch.thinkingLevel;
-      supervisor.setThinkingLevel(patch.thinkingLevel);
+      defaultRuntime.setThinkingLevel(patch.thinkingLevel);
       await rpc
         .request({ type: "set_thinking_level", level: patch.thinkingLevel })
         .catch(() => null);
@@ -3231,7 +3451,7 @@ ipcMain.handle(
     const providerChanged = appSettings.provider !== beforeProvider;
     const modelChanged = appSettings.model !== beforeModel;
     if (providerChanged || modelChanged) {
-      supervisor.setModel(appSettings.provider, appSettings.model);
+      defaultRuntime.setModel(appSettings.provider, appSettings.model);
       try {
         if (workspaceRoot) {
           writeFileSync(
@@ -3244,15 +3464,15 @@ ipcMain.handle(
         // 工作区不可写时只影响下次启动
       }
       if (providerChanged) {
-        supervisor.stop();
-        setTimeout(() => supervisor.start(), 300);
+        defaultRuntime.stop();
+        setTimeout(() => defaultRuntime.start(), 300);
       } else {
         const res = await rpc
           .request({ type: "set_model", provider: appSettings.provider, modelId: appSettings.model })
           .catch(() => null);
         if (!res?.success) {
-          supervisor.stop();
-          setTimeout(() => supervisor.start(), 300);
+          defaultRuntime.stop();
+          setTimeout(() => defaultRuntime.start(), 300);
         }
       }
     }
@@ -3411,17 +3631,23 @@ ipcMain.handle("audit:export", (): string | null => {
   return file;
 });
 
-ipcMain.handle("pi:switch-session", async (_event, file: string) => {
+ipcMain.handle("pi:switch-session", async (_event, file: string, runtimeId?: string) => {
   invalidateStats();
   const target = normalizeSessionFile(file) ?? file;
-  const res = await rpc.request({ type: "switch_session", sessionPath: target });
+  const runtime =
+    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+  const res = await runtime.rpc.request({ type: "switch_session", sessionPath: target });
   const data = res.data as { cancelled?: boolean } | undefined;
   if (res.success && !data?.cancelled) {
-    currentSessionFile = target;
-    applyPermissionMode();
-    supervisor.setSessionFile(target);
-    writeWorkspaceState({ lastSessionFile: target });
-    void resetBudgetBaseline();
+    if (runtime.id === "default") {
+      currentSessionFile = target;
+      applyPermissionMode();
+      defaultRuntime.setSessionFile(target);
+      writeWorkspaceState({ lastSessionFile: target });
+      void resetBudgetBaseline();
+    } else {
+      runtimeManager.updateSession(runtime.id, target);
+    }
     const key = sessionMetaKey(target);
     if (workspaceRoot && key && existsSync(join(sessionDir, key))) {
       patchSessionMeta(workspaceRoot, key, { lastOpenedAt: new Date().toISOString() });
@@ -3978,13 +4204,13 @@ async function runSelftestMode(): Promise<void> {
       );
       const restoredSession = currentSessionFile;
       currentSessionFile = null;
-      supervisor.setSessionFile(null);
+      defaultRuntime.setSessionFile(null);
       const beforeTrust = appSettings.trustProject;
       appSettings.trustProject = true;
-      supervisor.setTrustProject(true);
-      supervisor.stop();
+      defaultRuntime.setTrustProject(true);
+      defaultRuntime.stop();
       await sleep(600);
-      supervisor.start();
+      defaultRuntime.start();
       await sleep(2500);
 
       const e2eCsv = join(workspaceRoot, "results", "tables", "e2e-stats.csv");
@@ -4082,15 +4308,15 @@ async function runSelftestMode(): Promise<void> {
 
       // ---------- 还原 ----------
       appSettings.trustProject = beforeTrust;
-      supervisor.setTrustProject(beforeTrust);
+      defaultRuntime.setTrustProject(beforeTrust);
       saveAppSettings();
       if (restoredSession) {
         currentSessionFile = restoredSession;
-        supervisor.setSessionFile(restoredSession);
+        defaultRuntime.setSessionFile(restoredSession);
       }
-      supervisor.stop();
+      defaultRuntime.stop();
       await sleep(400);
-      supervisor.start();
+      defaultRuntime.start();
 
       console.log(
         "P3_SELFTEST_P54 " +
@@ -4314,13 +4540,13 @@ async function runSelftestMode(): Promise<void> {
       // 2) 信任本项目（否则 pi 不加载 .agents/skills），并用新会话验证索引
       const restoredSession = currentSessionFile;
       currentSessionFile = null;
-      supervisor.setSessionFile(null);
+      defaultRuntime.setSessionFile(null);
       const beforeTrust = appSettings.trustProject;
       appSettings.trustProject = true;
-      supervisor.setTrustProject(true);
-      supervisor.stop();
+      defaultRuntime.setTrustProject(true);
+      defaultRuntime.stop();
       await sleep(600);
-      supervisor.start();
+      defaultRuntime.start();
       await sleep(2500);
 
       // 3) 启停（只重命名 SKILL.md）
@@ -4406,14 +4632,14 @@ async function runSelftestMode(): Promise<void> {
       // 6) 还原信任状态与会话
       if (restoredSession) {
         currentSessionFile = restoredSession;
-        supervisor.setSessionFile(restoredSession);
+        defaultRuntime.setSessionFile(restoredSession);
       }
       appSettings.trustProject = beforeTrust;
-      supervisor.setTrustProject(beforeTrust);
+      defaultRuntime.setTrustProject(beforeTrust);
       saveAppSettings();
-      supervisor.stop();
+      defaultRuntime.stop();
       await sleep(400);
-      supervisor.start();
+      defaultRuntime.start();
 
       console.log(
         "P3_SELFTEST_P51 " +
@@ -4443,10 +4669,10 @@ async function runSelftestMode(): Promise<void> {
       // 用新会话验证：恢复旧会话时 header 里的 cwd 是历史的，不能作为本次进程的证据
       const restoredSession = currentSessionFile;
       currentSessionFile = null;
-      supervisor.setSessionFile(null);
-      supervisor.stop();
+      defaultRuntime.setSessionFile(null);
+      defaultRuntime.stop();
       await sleep(600);
-      supervisor.start();
+      defaultRuntime.start();
       await sleep(2500);
 
       await js('window.api.prompt("只回复：p50-ok")');
@@ -4506,10 +4732,10 @@ async function runSelftestMode(): Promise<void> {
       // 恢复原会话，避免测试改变用户的当前会话
       if (restoredSession) {
         currentSessionFile = restoredSession;
-        supervisor.setSessionFile(restoredSession);
-        supervisor.stop();
+        defaultRuntime.setSessionFile(restoredSession);
+        defaultRuntime.stop();
         await sleep(400);
-        supervisor.start();
+        defaultRuntime.start();
       }
 
       console.log(
@@ -4585,12 +4811,12 @@ async function runSelftestMode(): Promise<void> {
       );
       const opened = await waitModal(60_000);
       const pendingBefore = pendingApprovals.size;
-      supervisor.stop();
+      defaultRuntime.stop();
       await sleep(1500);
       const modalGone = !(await js<boolean>('!!document.querySelector(".approval-options button")'));
       const pendingAfter = pendingApprovals.size;
       const auditAbort = (auditLog?.read(50) ?? []).some((e) => e.scope === "abort");
-      supervisor.start();
+      defaultRuntime.start();
       await sleep(1500);
       console.log(
         "P3_SELFTEST_ABORT " +
@@ -5112,6 +5338,17 @@ app.whenReady().then(async () => {
     getSettingsPolicy: () => settingsPolicyPath,
     getPlanGate: () => ({ enabled: planGate.enabled, approved: planGate.approved }),
     revalidatePlan: () => revalidatePlanGate(),
+    resolveRuntime: (token) => {
+      const binding = runtimeManager.services.resolve(token);
+      return binding
+        ? {
+            runtimeId: binding.runtimeId,
+            workspace: binding.workspace,
+            ...(binding.session ? { sessionKey: binding.session } : {}),
+            audit: (entry: AuditEntry) => auditFor(binding.runtimeId)?.write(entry),
+          }
+        : undefined;
+    },
     onChange: (info) => send("policy:changed", info),
     onError: (message) =>
       reportError({
@@ -5131,6 +5368,10 @@ app.whenReady().then(async () => {
     new ArtifactLedger(() => workspaceRoot),
     () => workspaceRoot,
     () => currentSessionFile ?? "session:none",
+    (token) => {
+      const binding = runtimeManager.services.resolve(token);
+      return binding ? { runtimeId: binding.runtimeId, workspace: binding.workspace } : undefined;
+    },
   );
   await artifactService.start();
 
@@ -5153,13 +5394,13 @@ app.whenReady().then(async () => {
     (app.isPackaged
       ? join(process.resourcesPath, "science-ext", "src", "index.ts")
       : resolve(app.getAppPath(), "../../packages/science-ext/src/index.ts"));
-  pythonKernel = new KernelService(sidecarPath, app.getPath("userData"), "python");
-  pythonKernel.setPythonPath(appSettings.pythonPath);
-  rKernel = new KernelService(sidecarPath, app.getPath("userData"), "r");
   // 生成的 spec 放应用私有目录，不写用户的 %APPDATA%\jupyter
   const kernelSpecDir = join(app.getPath("userData"), "kernels");
-  pythonKernel.setSpecDir(kernelSpecDir);
-  rKernel.setSpecDir(kernelSpecDir);
+  kernelManager = new KernelManager(sidecarPath, app.getPath("userData"), kernelSpecDir);
+  const defaultKernels = kernelManager.get("default");
+  pythonKernel = defaultKernels.python;
+  rKernel = defaultKernels.r;
+  pythonKernel.setPythonPath(appSettings.pythonPath);
   rKernel.setRPath(appSettings.rPath);
   kernelBroker = new KernelBroker(
     { python: pythonKernel, r: rKernel },
@@ -5176,7 +5417,7 @@ app.whenReady().then(async () => {
     },
     // 审计补 outcome：只记 allow 的日志复盘不了“哪一步失败”（自测报告 P4）
     (o) => {
-      auditLog?.write({
+      auditFor(o.runtimeId)?.write({
         ts: new Date().toISOString(),
         toolName: "run_code",
         ruleId: "kernel:execute",
@@ -5195,6 +5436,13 @@ app.whenReady().then(async () => {
           ...(o.kernelPid ? { kernelPid: o.kernelPid } : {}),
         },
       });
+    },
+    // P1b2b：runtime token → 该 runtime 的内核；legacy 全局 token 仍由 broker 兜底
+    (token) => {
+      const binding = runtimeManager.services.resolve(token);
+      if (!binding) return undefined;
+      const pair = kernelManager?.get(binding.runtimeId);
+      return pair ? { runtimeId: binding.runtimeId, services: pair } : undefined;
     },
   );
   await kernelBroker.start();
@@ -5232,32 +5480,19 @@ app.whenReady().then(async () => {
       ? join(process.resourcesPath, "plugin-ext", "index.mjs")
       : resolve(app.getAppPath(), "../../packages/plugin-ext/src/index.ts"));
 
-  supervisor.setExtraEnv({
-    OMCP_KERNEL_URL: kernelBroker.url,
-    OMCP_KERNEL_TOKEN: kernelBroker.token,
-    OMCP_POLICY_URL: policyService.url,
-    OMCP_POLICY_TOKEN: policyService.token,
-    OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
-    OMCP_ARTIFACTS_TOKEN: artifactService?.token ?? "",
-  });
-  // 插件开关（ADR-045）：只下发真正要注册的族键；记忆不落工作区（ADR-046）
-  supervisor.setEnv("OMCP_PLUGINS", JSON.stringify(enabledFamilyKeys(appSettings.plugins)));
-  supervisor.setEnv("OMCP_MEMORY_DIR", memoryDirPath());
-  if (browserService) {
-    supervisor.setEnv("OMCP_BROWSER_URL", browserService.url);
-    supervisor.setEnv("OMCP_BROWSER_TOKEN", browserService.token);
-  }
+  applyRuntimeServiceEnv(defaultRuntime);
   // playwright-core 在 payload/node_modules（electron-builder 跳过根部 node_modules）
-  supervisor.setEnv(
+  defaultRuntime.setEnv(
     "OMCP_PLAYWRIGHT_CORE",
     app.isPackaged
       ? join(process.resourcesPath, "plugin-ext", "payload", "node_modules", "playwright-core")
       : "",
   );
   if (appSettings.piConfigDir) {
-    supervisor.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
+    defaultRuntime.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
   }
-  supervisor.setExtensions([extensionPath, permissionExtPath, pluginExtPath]);
+  runtimeExtensions = [extensionPath, permissionExtPath, pluginExtPath];
+  defaultRuntime.setExtensions(runtimeExtensions);
 
   const ws = readWorkspaces();
   const initial = ws.lastWorkspace ?? join(app.getPath("userData"), "workspace");
@@ -5305,7 +5540,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  supervisor.stop();
+  defaultRuntime.stop();
   app.quit();
 });
 
@@ -5327,7 +5562,7 @@ app.on("before-quit", (event) => {
     // ignore
   }
   clearAbortTimer();
-  supervisor.stop();
+  defaultRuntime.stop();
   for (const service of [pythonKernel, rKernel]) {
     const pid = service?.pid;
     if (pid) {

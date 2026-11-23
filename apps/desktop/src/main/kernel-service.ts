@@ -3,8 +3,8 @@ import { createInterface, type Interface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { diagnoseLaunch } from "./kernel-diagnose";
-import { SerialQueue } from "./serial-queue";
+import { diagnoseLaunch } from "./kernel-diagnose.ts";
+import { SerialQueue } from "./serial-queue.ts";
 
 export interface KernelRuntimeEvent {
   ev: string;

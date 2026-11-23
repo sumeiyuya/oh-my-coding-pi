@@ -20,6 +20,8 @@ function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
  */
 export interface KernelOutcome {
   lang: "python" | "r";
+  /** P2b6b：这次执行属于哪个 runtime；默认 runtime 可缺 */
+  runtimeId?: string;
   ok: boolean;
   status: string;
   durationMs: number;
@@ -32,14 +34,35 @@ export class KernelBroker {
   url = "";
   token = "";
 
+  private readonly services: { python: KernelService; r: KernelService };
+  private readonly onImage?: (data: string) => void;
+  private readonly describeImage?: (data: string, mimeType: string) => Promise<string | null>;
+  private readonly onOutcome?: (outcome: KernelOutcome) => void;
+  private readonly resolve?: (
+    token: string,
+  ) => { runtimeId: string; services: { python: KernelService; r: KernelService } } | undefined;
+
   constructor(
-    private readonly services: { python: KernelService; r: KernelService },
-    private readonly onImage?: (data: string) => void,
+    services: { python: KernelService; r: KernelService },
+    onImage?: (data: string) => void,
     /** 纯文本模型下把图片转述成文字；返回 null 表示按原样透传图片 */
-    private readonly describeImage?: (data: string, mimeType: string) => Promise<string | null>,
+    describeImage?: (data: string, mimeType: string) => Promise<string | null>,
     /** 每次 run_code 结束后报一次结果，供审计落盘（报告 P4） */
-    private readonly onOutcome?: (outcome: KernelOutcome) => void,
-  ) {}
+    onOutcome?: (outcome: KernelOutcome) => void,
+    /**
+     * P1b2b：runtime token → 该 runtime 的内核。
+     * 返回 undefined 时回落到 legacy 全局 token（默认 runtime 兼容）。
+     */
+    resolve?: (
+      token: string,
+    ) => { runtimeId: string; services: { python: KernelService; r: KernelService } } | undefined,
+  ) {
+    this.services = services;
+    this.onImage = onImage;
+    this.describeImage = describeImage;
+    this.onOutcome = onOutcome;
+    this.resolve = resolve;
+  }
 
   async start(): Promise<void> {
     if (this.server) return;
@@ -65,7 +88,14 @@ export class KernelBroker {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.headers.authorization !== `Bearer ${this.token}`) {
+    const authorization = req.headers.authorization;
+    const token =
+      typeof authorization === "string" && authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "";
+    const resolved = this.resolve?.(token);
+    const services = resolved?.services ?? (token && token === this.token ? this.services : undefined);
+    if (!services) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return;
@@ -78,8 +108,8 @@ export class KernelBroker {
       res.end(
         JSON.stringify({
           ok: true,
-          python: this.services.python.isReady,
-          r: this.services.r.isReady,
+          python: services.python.isReady,
+          r: services.r.isReady,
         }),
       );
       return;
@@ -91,7 +121,7 @@ export class KernelBroker {
       body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
     }
     const service: KernelService =
-      body.lang === "r" ? this.services.r : this.services.python;
+      body.lang === "r" ? services.r : services.python;
 
     if (req.method === "POST" && path === "/execute") {
       if (typeof body.code !== "string") {
@@ -142,6 +172,7 @@ export class KernelBroker {
         if (pending.length) await Promise.all(pending);
         this.onOutcome?.({
           lang,
+          ...(resolved ? { runtimeId: resolved.runtimeId } : {}),
           ok: true,
           status,
           durationMs: Date.now() - startedAt,
@@ -166,6 +197,7 @@ export class KernelBroker {
         res.write(JSON.stringify({ ev: "result", id: body.id, status: "error" }) + "\n");
         this.onOutcome?.({
           lang,
+          ...(resolved ? { runtimeId: resolved.runtimeId } : {}),
           ok: false,
           status: "error",
           durationMs: Date.now() - startedAt,

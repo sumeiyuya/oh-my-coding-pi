@@ -120,6 +120,13 @@ type P1Api = Pick<
   | "setMcpSecret"
   | "openMcpConfig"
   | "loginMcpServer"
+  | "listRuntimes"
+  | "getRuntimeMessages"
+  | "getRuntimeState"
+  | "getRuntimeStats"
+  | "createRuntime"
+  | "activateRuntime"
+  | "closeRuntime"
 >;
 
 declare global {

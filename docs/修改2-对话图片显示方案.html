@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修改 2 · 对话图片显示方案（可视化版）</title>
+<style>
+  :root{
+    --ink:#10202b; --body:#273a45; --muted:#63757f; --line:#d9e3e9;
+    --bg:#f4f7f9; --card:#ffffff; --soft:#eef4f6;
+    --blue:#1d4ed8; --blue-soft:#e8eefc;
+    --teal:#0f766e; --teal-soft:#e3f2f0;
+    --red:#b91c1c; --red-soft:#fdeaea;
+    --amber:#b45309; --amber-soft:#fdf1e3;
+    --green:#15803d; --green-soft:#e7f5ec;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--body);
+    font:15px/1.7 "Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,.mono{font-family:"Cascadia Mono",Consolas,monospace}
+  a{color:var(--blue);text-decoration:none}
+  .topbar{position:sticky;top:0;z-index:50;background:rgba(244,247,249,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}
+  .topbar-inner{max-width:1160px;margin:0 auto;padding:10px 28px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .brand{font-weight:700;color:var(--ink)}
+  .brand span{color:var(--blue)}
+  .nav{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
+  .nav a{color:var(--muted)}
+  .nav a:hover{color:var(--blue)}
+  .pill{margin-left:auto;font-size:12px;color:var(--muted);border:1px solid var(--line);background:#fff;border-radius:99px;padding:3px 12px}
+  main{max-width:1160px;margin:0 auto;padding:34px 28px 80px}
+
+  .cover{background:linear-gradient(135deg,#0b1b2a 0%,#13394a 60%,#0f766e 140%);color:#eaf3f5;border-radius:18px;padding:40px 42px;position:relative;overflow:hidden}
+  .cover:after{content:"";position:absolute;right:-80px;top:-90px;width:320px;height:320px;border:1px solid rgba(255,255,255,.15);border-radius:50%;box-shadow:0 0 0 48px rgba(255,255,255,.05),0 0 0 96px rgba(255,255,255,.03)}
+  .cover .kicker{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:#7fd1c8;font-weight:700}
+  .cover h1{margin:10px 0 8px;font-size:32px;line-height:1.3}
+  .cover p{margin:0;color:#b7cbd2;max-width:800px}
+  .facts{display:flex;gap:28px;margin-top:26px;flex-wrap:wrap;position:relative;z-index:1}
+  .facts .facts{display:flex;align-items:baseline;gap:8px}
+  .facts b{display:block;font-size:22px;color:#fff}
+  .facts span{font-size:12px;color:#9fb7bf}
+
+  section{margin-top:34px}
+  h2{font-size:20px;color:var(--ink);margin:0 0 14px;padding-left:12px;border-left:4px solid var(--blue)}
+  h2 .no{color:var(--blue);font-size:13px;letter-spacing:.12em;margin-right:8px;font-weight:700}
+  h3{font-size:15px;color:var(--ink);margin:22px 0 8px}
+  .lead{color:var(--muted);margin:-4px 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px 10px;margin-top:14px}
+  .figure .cap{font-size:12.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:10px;margin-top:6px}
+  .figure .cap b{color:var(--ink)}
+  .figure svg{display:block;width:100%;height:auto}
+
+  table{width:100%;border-collapse:collapse;background:var(--card);font-size:13.5px}
+  .tablewrap{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{background:var(--soft);color:var(--ink);font-size:12.5px;font-weight:700}
+  tr:last-child td{border-bottom:none}
+  td code{background:var(--soft);padding:1px 5px;border-radius:5px;font-size:12.5px;color:#123}
+
+  pre{background:#0f1b24;color:#d9e6ea;border-radius:12px;padding:16px 18px;overflow:auto;font-size:12.6px;line-height:1.62;margin:10px 0}
+  pre .c{color:#7f9aa3}
+  pre .k{color:#7fd1c8}
+  pre .s{color:#f0c987}
+
+  .chip{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:99px;border:1px solid transparent;font-weight:700}
+  .chip.blue{background:var(--blue-soft);color:var(--blue);border-color:#c9d7f8}
+  .chip.teal{background:var(--teal-soft);color:var(--teal);border-color:#bfe0da}
+  .chip.red{background:var(--red-soft);color:var(--red);border-color:#f3c2c2}
+  .chip.amber{background:var(--amber-soft);color:var(--amber);border-color:#f0d5ae}
+  .chip.green{background:var(--green-soft);color:var(--green);border-color:#bfe3cb}
+  .chip.gray{background:var(--soft);color:var(--muted);border-color:var(--line)}
+
+  .callout{border-left:4px solid var(--blue);background:var(--blue-soft);border-radius:0 12px 12px 0;padding:14px 18px;margin:14px 0;color:#12305e}
+  .callout.warn{border-color:var(--amber);background:var(--amber-soft);color:#5b3a11}
+  .callout.bad{border-color:var(--red);background:var(--red-soft);color:#5a1414}
+  .callout.good{border-color:var(--green);background:var(--green-soft);color:#14532d}
+
+  ul.check{list-style:none;padding:0;margin:8px 0 0}
+  ul.check li{padding:7px 0 7px 30px;position:relative;border-bottom:1px dashed var(--line);font-size:14px}
+  ul.check li:last-child{border-bottom:none}
+  ul.check li:before{content:"";position:absolute;left:2px;top:11px;width:15px;height:15px;border:2px solid #9db3bd;border-radius:4px}
+  ul.check li b{color:var(--ink)}
+
+  /* 聊天线框 */
+  .chat{background:#0b1520;border-radius:14px;padding:18px 18px 14px;color:#dce8ec}
+  .chat-head{display:flex;align-items:center;gap:8px;font-size:12px;color:#8fa6b0;border-bottom:1px solid #1d3040;padding-bottom:10px;margin-bottom:14px}
+  .chat-head .dot{width:7px;height:7px;border-radius:50%;background:#3b5566}
+  .chat-body{display:flex;flex-direction:column;gap:12px}
+  .msg-user{align-self:flex-end;max-width:78%}
+  .msg-user .bubble{background:#e8eef5;color:#13212b;border:1px solid #c9d6e2;border-radius:10px;padding:9px 12px;font-size:14px;line-height:1.5;white-space:normal}
+  .msg-user.failed .bubble{border-color:#b91c1c}
+  .msg-failed{display:inline-block;margin-left:8px;padding:0 6px;border-radius:99px;border:1px solid #b91c1c;background:#fdeaea;color:#b91c1c;font-size:10.5px;vertical-align:middle}
+  .thumb-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .thumb{width:56px;height:56px;border-radius:8px;border:1px solid #b9c9d6;background:linear-gradient(135deg,#7fb7c9,#2c6f8a);position:relative;overflow:hidden}
+  .thumb:after{content:"IMG";position:absolute;left:5px;bottom:3px;font-size:9px;letter-spacing:.08em;color:rgba(255,255,255,.72)}
+  .thumb.alt{background:linear-gradient(135deg,#d7a86e,#8a5a2c)}
+  .thumb.alt2{background:linear-gradient(135deg,#8bc48a,#2f6b46)}
+  .hint{font-size:11.5px;color:#fcd34d;margin-top:6px}
+  .caption{font-size:12px;color:#8fa6b0;margin-top:10px;border-top:1px dashed #1d3040;padding-top:10px}
+
+  .overlay{position:relative;height:180px;border-radius:12px;background:#0b1520;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .overlay .big{width:150px;height:110px;border-radius:8px;background:linear-gradient(135deg,#7fb7c9,#2c6f8a);border:1px solid #4d7f95}
+  .overlay .close{position:absolute;right:10px;top:8px;color:#bcd0d8;font-size:12px;border:1px solid #2b4354;border-radius:6px;padding:1px 8px}
+
+  .footer{max-width:1160px;margin:0 auto;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding:16px 28px 40px}
+
+  @media print{
+    *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}
+    .topbar{display:none} body{background:#fff} main{max-width:none;padding:0}
+    .cover{border-radius:0}
+    .figure,.card,.tablewrap{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">修改 2 <span>·</span> 对话图片</div>
+    <nav class="nav">
+      <a href="#symptom">现象</a>
+      <a href="#root">根因</a>
+      <a href="#compare">方案对比</a>
+      <a href="#flow">方案 B</a>
+      <a href="#ui">界面</a>
+      <a href="#code">改动</a>
+      <a href="#accept">验收</a>
+      <a href="#ask">待确认</a>
+    </nav>
+    <div class="pill" style="border-color:#bfe3cb;background:#e7f5ec;color:#15803d">已实施 · 方案 B</div>
+  </div>
+</div>
+
+<main>
+
+  <header class="cover">
+    <div class="kicker">UI Fix · Visual Plan</div>
+    <h1>对话里发送的图片<br>为什么只剩一句话</h1>
+    <p>图片已经被保存、也可能已经发给模型；但用户消息只带 text，历史恢复又把 image block 过滤掉。
+       本方案只解决“看得见”，不改变发图的模型链路。</p>
+    <div class="facts">
+      <div class="facts"><b>2 处</b><span>断点</span></div>
+      <div class="facts"><b>3 个</b><span>候选方案</span></div>
+      <div class="facts"><b>B</b><span>推荐</span></div>
+      <div class="facts"><b>8 条</b><span>验收</span></div>
+    </div>
+  </header>
+
+  <!-- 01 现象 -->
+  <section id="symptom">
+    <h2><span class="no">01</span>现象：图片在输入框里有，发出去就没了</h2>
+    <p class="lead">截图里的用户气泡只有文字；输入框的附件预览是正常的。说明问题发生在“发送 → 消息列表”之间，不是上传。</p>
+
+    <div class="figure">
+      <div class="grid2" style="align-items:start">
+        <div class="chat">
+          <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">当前对话</span></div>
+          <div class="chat-body">
+            <div class="msg-user">
+              <div class="bubble">图片中你的路线功能详细介绍其作用和使用场景</div>
+            </div>
+            <div style="align-self:flex-start;color:#8fa6b0;font-size:12px">（图片没有出现在气泡里）</div>
+          </div>
+          <div class="caption">实际：用户消息只渲染了 text</div>
+        </div>
+
+        <div class="chat" style="background:#0f1b24">
+          <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">输入框（正常）</span></div>
+          <div style="border:1px solid #243b4b;border-radius:10px;padding:12px;background:#0b1520">
+            <div class="thumb-row">
+              <span class="thumb"></span>
+              <span class="thumb alt"></span>
+            </div>
+            <div style="font-size:13px;color:#dce8ec">图片中你的路线功能详细介绍其作用和使用场景</div>
+            <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+              <span style="font-size:11px;color:#8fa6b0">附件预览 56×56</span>
+              <span style="margin-left:auto;background:#1d4ed8;color:#fff;border-radius:6px;padding:3px 12px;font-size:12px">发送</span>
+            </div>
+          </div>
+          <div class="caption">输入框里能看到缩略图；发送后消息里没有</div>
+        </div>
+      </div>
+      <div class="cap"><b>图 1 · 同一张图，两个位置两种结果。</b>上传/粘贴流程把 base64 放进了 <span class="mono">attachments</span>；发送时只把 <span class="mono">text</span> 放进了 <span class="mono">messages</span>。</div>
+    </div>
+
+    <div class="callout warn" style="margin-top:16px">
+      <b>先别急着怪模型：</b>图片可能已经通过 <span class="mono">rpc.request({ images })</span> 发给了 pi。气泡没图 ≠ 模型没收到图。
+      如果模型不支持图片，主进程会先把图片转述成文字；这条链路是另一件事，本次不改。
+    </div>
+  </section>
+
+  <!-- 02 根因 -->
+  <section id="root">
+    <h2><span class="no">02</span>根因：两个断点，一个在发送，一个在历史</h2>
+    <p class="lead">数据流画出来就清楚了：附件在输入框里是完整的，进入消息列表时被丢掉；历史恢复时 image block 又被 textOf 过滤。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 560" role="img" aria-label="图片消息数据流与两个断点">
+        <defs>
+          <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+          </marker>
+          <marker id="a-red" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#b91c1c"/>
+          </marker>
+          <marker id="a-green" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#15803d"/>
+          </marker>
+        </defs>
+
+        <!-- 发送路径 -->
+        <text x="24" y="30" font-size="12" font-weight="700" fill="#0f766e">发送路径</text>
+        <rect x="24" y="46" width="210" height="76" rx="10" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="42" y="70" font-size="12.5" font-weight="700" fill="#0f1b24">输入框 attachments</text>
+        <text x="42" y="89" font-size="10.5" fill="#5d6f7c">id / data(base64) / mimeType</text>
+        <text x="42" y="106" font-size="10.5" fill="#5d6f7c">最多 4 张，单张 ≤4MB</text>
+
+        <path d="M234 84 H310" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <text x="242" y="78" font-size="10.5" fill="#475569">send()</text>
+
+        <rect x="310" y="46" width="250" height="76" rx="10" fill="#fdeaea" stroke="#f3c2c2"/>
+        <text x="328" y="70" font-size="12.5" font-weight="700" fill="#7f1d1d">setMessages({ kind:"user", text })</text>
+        <text x="328" y="89" font-size="10.5" fill="#991b1b">只传 text，attachments 没带</text>
+        <text x="328" y="106" font-size="10.5" fill="#991b1b">← 断点 1</text>
+
+        <path d="M560 84 H636" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <rect x="636" y="46" width="170" height="76" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="654" y="70" font-size="12.5" font-weight="700" fill="#0f1b24">消息列表</text>
+        <text x="654" y="89" font-size="10.5" fill="#5d6f7c">messages: Msg[]</text>
+        <text x="654" y="106" font-size="10.5" fill="#5d6f7c">只有 text / failed</text>
+
+        <path d="M806 84 H882" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <rect x="882" y="46" width="134" height="76" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="900" y="70" font-size="12.5" font-weight="700" fill="#0f1b24">气泡渲染</text>
+        <text x="900" y="89" font-size="10.5" fill="#5d6f7c">只输出 m.text</text>
+        <text x="900" y="106" font-size="10.5" fill="#b91c1c">没有 &lt;img&gt;</text>
+
+        <!-- 主进程：图片其实已处理 -->
+        <rect x="310" y="156" width="250" height="70" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="328" y="180" font-size="12.5" font-weight="700" fill="#0f1b24">主进程 pi:prompt</text>
+        <text x="328" y="199" font-size="10.5" fill="#5d6f7c">saveAttachment → .omcp/attachments</text>
+        <text x="328" y="215" font-size="10.5" fill="#5d6f7c">rpc.request({ images }) 或转述</text>
+        <path d="M234 122 V190 H302" stroke="#15803d" stroke-width="1.5" fill="none" marker-end="url(#a-green)"/>
+        <text x="240" y="162" font-size="10" fill="#15803d">同一份 base64</text>
+
+        <path d="M560 190 H636" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <rect x="636" y="154" width="170" height="72" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="654" y="178" font-size="12.5" font-weight="700" fill="#0f1b24">pi 会话</text>
+        <text x="654" y="197" font-size="10.5" fill="#5d6f7c">user content</text>
+        <text x="654" y="213" font-size="10.5" fill="#5d6f7c">text + image block</text>
+
+        <!-- 历史路径 -->
+        <text x="24" y="300" font-size="12" font-weight="700" fill="#1d4ed8">历史恢复路径</text>
+        <rect x="24" y="316" width="210" height="76" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="42" y="340" font-size="12.5" font-weight="700" fill="#0f1b24">getMessages()</text>
+        <text x="42" y="359" font-size="10.5" fill="#5d6f7c">AgentMessage[]</text>
+        <text x="42" y="376" font-size="10.5" fill="#5d6f7c">content 里含 image</text>
+
+        <path d="M234 354 H310" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <rect x="310" y="316" width="250" height="76" rx="10" fill="#fdeaea" stroke="#f3c2c2"/>
+        <text x="328" y="340" font-size="12.5" font-weight="700" fill="#7f1d1d">messagesFromAgent</text>
+        <text x="328" y="359" font-size="10.5" fill="#991b1b">textOf(m.content) 只取 text</text>
+        <text x="328" y="376" font-size="10.5" fill="#991b1b">← 断点 2</text>
+
+        <path d="M560 354 H636" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+        <rect x="636" y="316" width="170" height="76" rx="10" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="654" y="340" font-size="12.5" font-weight="700" fill="#0f1b24">消息列表</text>
+        <text x="654" y="359" font-size="10.5" fill="#5d6f7c">只剩文字</text>
+        <text x="654" y="376" font-size="10.5" fill="#b91c1c">image 被丢掉</text>
+
+        <!-- 纯文本分支 -->
+        <text x="24" y="454" font-size="12" font-weight="700" fill="#b45309">纯文本模型分支</text>
+        <rect x="24" y="470" width="496" height="66" rx="10" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="42" y="494" font-size="12" font-weight="700" fill="#78350f">模型不支持图片 → transcribeImages() 转述</text>
+        <text x="42" y="513" font-size="10.5" fill="#92400e">pi 历史里只有“转述文字”，没有 image block；切换会话后无法从历史恢复图片</text>
+
+        <rect x="636" y="470" width="380" height="66" rx="10" fill="#f1f5f9" stroke="#cbd5e1" stroke-dasharray="4 3"/>
+        <text x="654" y="494" font-size="12" font-weight="700" fill="#334155">本次方案 B 的范围</text>
+        <text x="654" y="513" font-size="10.5" fill="#64748b">当前会话显示；纯文本模型的“历史恢复”留到方案 C</text>
+      </svg>
+      <div class="cap"><b>图 2 · 两个断点。</b>红色是必须补的；绿色是已经存在、不用重做的部分。纯文本模型的分支单独标出，避免把“历史不恢复”误认为 bug。</div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <span class="chip red">断点 1</span>
+        <h3>发送时没带附件</h3>
+        <pre><span class="c">// App.tsx ~1045</span>
+setMessages((prev) =&gt; [
+  ...prev,
+  { kind: "user", text, id: msgId }
+]);</pre>
+        <p style="margin:0;color:var(--muted);font-size:13px"><code>pendingAttachments</code> 只进了 <code>pendingUser</code>（失败回填用），没有进消息。</p>
+      </div>
+      <div class="card">
+        <span class="chip red">断点 2</span>
+        <h3>历史恢复只取文字</h3>
+        <pre><span class="c">// tool-rebuild.ts ~126</span>
+const text = textOf(m.content);
+if (text) out.push({ kind: "user", text });</pre>
+        <p style="margin:0;color:var(--muted);font-size:13px"><code>textOf</code> 只保留 <code>type === "text"</code>；<code>image</code> block 被过滤。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 03 方案对比 ============ -->
+  <section id="compare">
+    <h2><span class="no">03</span>三个方案：先修到哪一步</h2>
+    <p class="lead">区别只有一个：历史恢复要不要覆盖“纯文本模型”。覆盖它，就需要额外的附件索引。</p>
+
+    <div class="grid3">
+      <div class="card">
+        <span class="chip gray">方案 A</span>
+        <h3>只修发送时</h3>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 8px">消息里带上 attachments，气泡渲染缩略图。</p>
+        <p style="font-size:12.5px;margin:0"><b>覆盖：</b>发送后立即显示<br><b>不覆盖：</b>切换会话、重启、历史</p>
+        <p style="font-size:12.5px;margin:6px 0 0;color:var(--red)">改动最小，但用户会觉得“图还是丢了”</p>
+      </div>
+      <div class="card" style="border-color:#bfe0da;background:#f7fcfb">
+        <span class="chip teal">方案 B · 推荐</span>
+        <h3>发送时 + 历史 image block</h3>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 8px">发送时带 attachments；历史恢复保留 image block。</p>
+        <p style="font-size:12.5px;margin:0"><b>覆盖：</b>发送后、有图模型的切会话/重启<br><b>不覆盖：</b>纯文本模型的历史</p>
+        <p style="font-size:12.5px;margin:6px 0 0;color:var(--green)">主流程完整，改动可控</p>
+      </div>
+      <div class="card">
+        <span class="chip amber">方案 C</span>
+        <h3>完整附件索引</h3>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 8px">发送时写 msgId + 附件路径到索引；历史按索引关联。</p>
+        <p style="font-size:12.5px;margin:0"><b>覆盖：</b>包括纯文本模型的历史<br><b>代价：</b>存储格式、清理、fork/queue 关联</p>
+        <p style="font-size:12.5px;margin:6px 0 0;color:var(--amber)">等确认“纯文本历史必须恢复”再做</p>
+      </div>
+    </div>
+
+    <div class="tablewrap" style="margin-top:14px">
+      <table>
+        <thead><tr><th style="width:16%">方案</th><th style="width:30%">覆盖范围</th><th style="width:26%">改动</th><th>风险</th></tr></thead>
+        <tbody>
+          <tr><td><b>A</b></td><td>发送后当前会话</td><td>App.tsx + CSS</td><td>切会话后图片消失</td></tr>
+          <tr><td><b>B</b></td><td>A + 有图模型的历史</td><td>App.tsx + tool-rebuild.ts + CSS</td><td>纯文本模型历史仍不显示</td></tr>
+          <tr><td><b>C</b></td><td>全部（含纯文本模型）</td><td>B + 附件索引/清理</td><td>关联不稳、改动大</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 04 方案 B ============ -->
+  <section id="flow">
+    <h2><span class="no">04</span>方案 B：两条路都补上</h2>
+    <p class="lead">发送时把附件放进消息；历史恢复时把 image block 留下来。两条路都指向同一个气泡渲染。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 440" role="img" aria-label="方案 B 的两条数据路径">
+        <defs>
+          <marker id="b" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+          </marker>
+          <marker id="b-green" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+            <path d="M0,0 L9,4.5 L0,9 z" fill="#15803d"/>
+          </marker>
+        </defs>
+
+        <text x="24" y="28" font-size="12" font-weight="700" fill="#0f766e">发送时</text>
+        <rect x="24" y="44" width="190" height="64" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="42" y="68" font-size="12" font-weight="700" fill="#0f1b24">attachments</text>
+        <text x="42" y="86" font-size="10.5" fill="#5d6f7c">data / mimeType</text>
+
+        <path d="M214 76 H292" stroke="#15803d" stroke-width="1.8" marker-end="url(#b-green)"/>
+        <rect x="292" y="44" width="230" height="64" rx="9" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="310" y="68" font-size="12" font-weight="700" fill="#14532d">user message</text>
+        <text x="310" y="86" font-size="10.5" fill="#166534">{ text, attachments }</text>
+
+        <path d="M522 76 H612" stroke="#15803d" stroke-width="1.8" marker-end="url(#b-green)"/>
+        <rect x="612" y="44" width="180" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="630" y="68" font-size="12" font-weight="700" fill="#0f1b24">气泡</text>
+        <text x="630" y="86" font-size="10.5" fill="#5d6f7c">缩略图 + 文字</text>
+
+        <text x="24" y="176" font-size="12" font-weight="700" fill="#1d4ed8">历史恢复</text>
+        <rect x="24" y="192" width="190" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="42" y="216" font-size="12" font-weight="700" fill="#0f1b24">AgentMessage</text>
+        <text x="42" y="234" font-size="10.5" fill="#5d6f7c">content: text + image</text>
+
+        <path d="M214 224 H292" stroke="#1d4ed8" stroke-width="1.8" marker-end="url(#b)"/>
+        <rect x="292" y="192" width="230" height="64" rx="9" fill="#e8eefc" stroke="#c9d7f8"/>
+        <text x="310" y="216" font-size="12" font-weight="700" fill="#12305e">messagesFromAgent</text>
+        <text x="310" y="234" font-size="10.5" fill="#1d4ed8">保留 image block</text>
+
+        <path d="M522 224 H612" stroke="#1d4ed8" stroke-width="1.8" marker-end="url(#b)"/>
+        <rect x="612" y="192" width="180" height="64" rx="9" fill="#ffffff" stroke="#bfd4dc"/>
+        <text x="630" y="216" font-size="12" font-weight="700" fill="#0f1b24">气泡</text>
+        <text x="630" y="234" font-size="10.5" fill="#5d6f7c">缩略图 + 文字</text>
+
+        <text x="24" y="326" font-size="12" font-weight="700" fill="#b45309">纯文本模型</text>
+        <rect x="24" y="342" width="768" height="64" rx="9" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="42" y="366" font-size="12" font-weight="700" fill="#78350f">pi 历史 = 转述文字，没有 image block</text>
+        <text x="42" y="384" font-size="10.5" fill="#92400e">当前会话靠发送时的 attachments 显示；切换会话后不恢复（方案 C 才能做）</text>
+
+        <rect x="812" y="342" width="204" height="64" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-dasharray="4 3"/>
+        <text x="830" y="366" font-size="11.5" font-weight="700" fill="#334155">本次不做</text>
+        <text x="830" y="384" font-size="10.5" fill="#64748b">纯文本历史恢复</text>
+      </svg>
+      <div class="cap"><b>图 3 · 方案 B。</b>绿色是发送路径，蓝色是历史路径；两者都产出同一种消息结构，渲染层只认 <span class="mono">attachments</span>。</div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">数据结构</h3>
+        <pre><span class="k">type</span> UserImage = {
+  id: string;
+  data: string;      <span class="c">// base64</span>
+  mimeType: string;
+};
+
+<span class="c">// App.tsx 的 Msg</span>
+| { kind: <span class="s">"user"</span>; text: string;
+    attachments?: UserImage[];
+    failed?: boolean; id?: string }</pre>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">渲染</h3>
+        <pre>{m.attachments?.length ? (
+  &lt;div className=<span class="s">"msg-attachments"</span>&gt;
+    {m.attachments.map((img) =&gt; (
+      &lt;button onClick={() =&gt; openPreview(img)}&gt;
+        &lt;img src={`data:${img.mimeType};base64,${img.data}`} /&gt;
+      &lt;/button&gt;
+    ))}
+  &lt;/div&gt;
+) : null}
+&lt;div&gt;{m.text}&lt;/div&gt;</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 05 界面 ============ -->
+  <section id="ui">
+    <h2><span class="no">05</span>界面：缩略图、失败、纯文本提示</h2>
+    <p class="lead">复用输入框已有的 56×56 缩略图尺寸；气泡里只多一行图片，不改文字排版。</p>
+
+    <div class="grid2">
+      <div class="chat">
+        <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">单图</span></div>
+        <div class="chat-body">
+          <div class="msg-user">
+            <div class="bubble">
+              <div class="thumb-row"><span class="thumb"></span></div>
+              图片中你的路线功能详细介绍其作用和使用场景
+            </div>
+          </div>
+        </div>
+        <div class="caption">缩略图 56×56，文字在下方；点击看大图</div>
+      </div>
+
+      <div class="chat">
+        <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">多图</span></div>
+        <div class="chat-body">
+          <div class="msg-user">
+            <div class="bubble">
+              <div class="thumb-row">
+                <span class="thumb"></span><span class="thumb alt"></span><span class="thumb alt2"></span>
+              </div>
+              对比这三张图的差异
+            </div>
+          </div>
+        </div>
+        <div class="caption">多图横向排列，满行自动换行</div>
+      </div>
+
+      <div class="chat">
+        <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">发送失败</span></div>
+        <div class="chat-body">
+          <div class="msg-user failed">
+            <div class="bubble">
+              <div class="thumb-row"><span class="thumb"></span></div>
+              这张图说明了什么<span class="msg-failed">未送达</span>
+            </div>
+          </div>
+        </div>
+        <div class="caption">失败时图片仍在，输入框回填附件</div>
+      </div>
+
+      <div class="chat">
+        <div class="chat-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">纯文本模型</span></div>
+        <div class="chat-body">
+          <div class="msg-user">
+            <div class="bubble">
+              <div class="thumb-row"><span class="thumb"></span></div>
+              这张图说明了什么
+            </div>
+            <div class="hint">当前模型仅文本：图片会先转述再发送</div>
+          </div>
+        </div>
+        <div class="caption">保留现有提示；不把“转述”说成“看到原图”</div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">点击缩略图：应用内大图</h3>
+        <div class="overlay">
+          <span class="close">✕ 关闭</span>
+          <span class="big"></span>
+        </div>
+        <p style="margin:8px 0 0;font-size:13px;color:var(--muted)">用现有 overlay 样式；不使用 <code>window.open</code>，避免被窗口/CSP 拦。</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">不改变的部分</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px;color:var(--muted)">
+          <li>输入框的附件预览与移除逻辑不变</li>
+          <li>上传/粘贴/拖拽的格式与大小限制不变（4 张、单张 4MB、合计 12MB）</li>
+          <li>发给 pi 的 <code>images</code> 参数与转述链路不变</li>
+          <li>无图消息的排版完全不变</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 06 改动 ============ -->
+  <section id="code">
+    <h2><span class="no">06</span>改动清单：3 个文件，约 80 行</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:32%">文件</th><th style="width:18%">动作</th><th>内容</th></tr></thead>
+        <tbody>
+          <tr><td><code>apps/renderer/src/App.tsx</code></td><td>改</td><td>user 消息类型加 <code>attachments</code>；发送时带上；气泡渲染缩略图；点击打开 overlay</td></tr>
+          <tr><td><code>apps/renderer/src/tool-rebuild.ts</code></td><td>改</td><td><code>RebuiltMsg</code> 加 <code>attachments</code>；<code>messagesFromAgent</code> 对 user 保留 image block</td></tr>
+          <tr><td><code>apps/renderer/src/index.css</code></td><td>改</td><td><code>.msg-attachments</code> / <code>.msg-image</code> / 大图 overlay 样式</td></tr>
+          <tr><td><code>apps/desktop/src/main/index.ts</code></td><td>可选</td><td>返回附件路径，支持“在文件夹中显示”；本次可不做</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout" style="margin-top:14px">
+      <b>不动的文件：</b>主进程的 <code>saveAttachment</code>、<code>transcribeImages</code>、<code>pi:prompt</code> 的 images 分支都不需要改——图片已经在那儿了，问题在前端消息结构。
+    </div>
+  </section>
+
+  <!-- ============ 07 验收 ============ -->
+  <section id="accept">
+    <h2><span class="no">07</span>验收：八条</h2>
+    <div class="card">
+      <ul class="check">
+        <li><b>发送：</b>附一张图发送，用户气泡立即显示 56px 缩略图，文字不被挤坏。</li>
+        <li><b>多图：</b>附 3–4 张，缩略图横向排列、满行换行，不撑破气泡。</li>
+        <li><b>历史（有图模型）：</b>切走再回来，图片仍在（<code>getMessages</code> 恢复）。</li>
+        <li><b>纯文本模型：</b>当前会话显示缩略图；模型收到转述；视觉服务未配有明确提示。</li>
+        <li><b>失败：</b>消息标“未送达”，输入框回填文字 + 图片。</li>
+        <li><b>大图：</b>点击缩略图打开应用内大图，可关闭。</li>
+        <li><b>无图：</b>原有纯文字消息排版不变。</li>
+        <li><b>工程：</b>typecheck、build 通过；现有附件上传测试不回归。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============ 08 风险与待确认 ============ -->
+  <section id="ask">
+    <h2><span class="no">08</span>风险与待确认</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:24%">风险</th><th style="width:40%">说明</th><th>处理</th></tr></thead>
+        <tbody>
+          <tr><td><b>base64 内存</b></td><td>单张最大 4MB、最多 4 张；气泡直接渲染原图会解码整张</td><td>先直接渲染；滚动卡再加 canvas 缩略图（160px）</td></tr>
+          <tr><td><b>历史体积</b></td><td>pi 历史本身保存 image block；前端不额外持久化</td><td>不在 <code>.omcp</code> 重复存 base64（除非做 C）</td></tr>
+          <tr><td><b>纯文本模型历史</b></td><td>pi 历史只有转述文字，没有 image block</td><td>本次接受“历史不显示”；需要则做 C</td></tr>
+          <tr><td><b>隐私</b></td><td>原图已写入 <code>&lt;workspace&gt;/.omcp/attachments/</code></td><td>保持现有目录；后续可加清理策略</td></tr>
+          <tr><td><b>大图打开</b></td><td>data URL 直接 <code>window.open</code> 可能被拦</td><td>用应用内 overlay</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>需要确认</h3>
+    <div class="grid2">
+      <div class="card"><b>1 · 范围</b><p style="margin:6px 0 0;font-size:13.5px;color:var(--muted)">只做 B（有图模型历史可恢复，纯文本模型历史不恢复）？</p></div>
+      <div class="card"><b>2 · 缩略图</b><p style="margin:6px 0 0;font-size:13.5px;color:var(--muted)">先直接渲染原图，还是一开始就加 canvas 压缩？</p></div>
+      <div class="card"><b>3 · 点击</b><p style="margin:6px 0 0;font-size:13.5px;color:var(--muted)">应用内大图 overlay，还是系统看图器？</p></div>
+      <div class="card"><b>4 · 位置</b><p style="margin:6px 0 0;font-size:13.5px;color:var(--muted)">图片放在文字上方可以吗？</p></div>
+    </div>
+
+    <div class="callout good" style="margin-top:16px">
+      <b>确认后按 B 实施，记为「修改 2」。</b>预计 3 个文件、约 80 行，不改主进程的图片发送链路。
+    </div>
+  </section>
+</main>
+
+<div class="footer">
+  本文件是方案，不包含代码改动。代码位置以 omcp 0.6.9 为准；截图中的现象对应“用户消息气泡”，不是上传流程。
+</div>
+
+</body>
+</html>
