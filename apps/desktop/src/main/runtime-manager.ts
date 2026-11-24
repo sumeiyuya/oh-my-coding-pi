@@ -122,6 +122,25 @@ export class RuntimeManager {
     return stopped;
   }
 
+
+  /** 修改 4 · M0：池子接管后，槽对象由 SlotPool 持有，这里只做登记表 */
+  forget(id: string): void {
+    const runtime = this.runtimes.get(id);
+    if (!runtime) return;
+    this.services.unregister(runtime.token);
+    this.runtimes.delete(id);
+    if (this.activeId === id) this.activeId = this.runtimes.keys().next().value ?? null;
+  }
+
+  /** 修改 4 · M0：激活状态由槽池决定，这里只跟着记 */
+  setActive(id: string | null): void {
+    if (id === null) {
+      this.activeId = null;
+      return;
+    }
+    if (this.runtimes.has(id)) this.activeId = id;
+  }
+
   closeAll(): void {
     for (const runtime of this.runtimes.values()) {
       this.services.unregister(runtime.token);

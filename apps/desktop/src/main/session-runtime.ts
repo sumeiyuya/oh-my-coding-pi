@@ -51,6 +51,8 @@ export class SessionRuntime {
   private currentSessionDir: string | null = null;
   private activeAt = Date.now();
   private busyFlag = false;
+  /** 修改 4 · M0：就绪以一次成功的 get_state 为准，不是 rpc.attached（G5） */
+  private readyFlag = false;
 
   constructor(opts: SessionRuntimeOptions) {
     this.id = opts.id;
@@ -77,6 +79,13 @@ export class SessionRuntime {
         this.pump.push(ev as PiEvent);
       });
     }
+    // 进程一退，就绪状态必须作废——不管这条 runtime 由谁接线
+    this.supervisor.on("exit", () => {
+      this.readyFlag = false;
+    });
+    this.supervisor.on("spawn", () => {
+      this.readyFlag = false;
+    });
     for (const [key, value] of Object.entries(opts.env ?? {})) this.setEnv(key, value);
   }
 
@@ -88,8 +97,42 @@ export class SessionRuntime {
   get lastActiveAt(): number { return this.activeAt; }
   get busy(): boolean { return this.busyFlag; }
   get isRunning(): boolean { return this.supervisor.current !== null; }
+  get ready(): boolean { return this.readyFlag; }
+
+  /**
+   * 等 pi 真的能接活。
+   *
+   * 进程在 ≠ 就绪：扩展加载 / 首次编译期间 RPC 会几十秒不理人，
+   * 这时发 prompt 会被拒（老代码只判断 `rpc.attached`，所以挂起的会话
+   * 切回来第一句经常失败）。判据是一次成功的 `get_state`。
+   */
+  async waitReady(timeoutMs = 45_000): Promise<void> {
+    if (this.readyFlag) return;
+    const deadline = Date.now() + timeoutMs;
+    let delay = 120;
+    for (;;) {
+      if (this.readyFlag) return;
+      if (this.rpc.attached) {
+        try {
+          await this.rpc.request({ type: "get_state" }, 1500);
+          this.readyFlag = true;
+          return;
+        } catch {
+          // 还没起来；继续等
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`pi 在 ${Math.round(timeoutMs / 1000)} 秒内没有就绪`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(Math.round(delay * 1.5), 800);
+    }
+  }
 
   markActive(): void { this.activeAt = Date.now(); }
+
+  /** 外部探活成功（默认槽由 index.ts 的探测接线）时标记就绪 */
+  markReady(): void { this.readyFlag = true; }
 
   private touch(ev: PiEvent): void {
     this.activeAt = Date.now();
@@ -166,10 +209,12 @@ export class SessionRuntime {
   }
 
   start(): void {
+    this.readyFlag = false;
     this.supervisor.start();
   }
 
   stop(): void {
+    this.readyFlag = false;
     this.supervisor.stop();
   }
 

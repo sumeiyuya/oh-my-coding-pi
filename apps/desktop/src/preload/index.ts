@@ -218,6 +218,20 @@ contextBridge.exposeInMainWorld("api", {
   createRuntime: (input?: unknown): Promise<unknown> => ipcRenderer.invoke("runtime:create", input),
   activateRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:activate", id),
   closeRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:close", id),
+  // 修改 4 · M0：会话级入口
+  getSessionBoard: (): Promise<unknown> => ipcRenderer.invoke("session:board"),
+  openSession: (file: string): Promise<unknown> => ipcRenderer.invoke("session:open", file),
+  closeSession: (file: string): Promise<unknown> => ipcRenderer.invoke("session:close", file),
+  onSessionChanged: (cb: (board: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, board: unknown) => cb(board);
+    ipcRenderer.on("session:changed", listener);
+    return () => ipcRenderer.removeListener("session:changed", listener);
+  },
+  onSessionOpened: (cb: (payload: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown) => cb(payload);
+    ipcRenderer.on("session:opened", listener);
+    return () => ipcRenderer.removeListener("session:opened", listener);
+  },
   loadRoute: (): Promise<unknown> => ipcRenderer.invoke("route:load"),
   saveRoute: (doc: unknown): Promise<unknown> => ipcRenderer.invoke("route:save", doc),
   exportRoute: (): Promise<unknown> => ipcRenderer.invoke("route:export"),
