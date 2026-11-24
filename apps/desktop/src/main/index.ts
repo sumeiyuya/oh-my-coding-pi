@@ -64,6 +64,7 @@ import { RuntimeManager } from "./runtime-manager";
 import { SessionRegistry, crashOutcome, sessionKey } from "./session-registry";
 import { TranscriptHub } from "./transcript-hub";
 import { SlotPool } from "./slot-pool";
+import { SubagentGate, startSubagentGateServer } from "./subagent-gate";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
 import { EventPump } from "./event-pump";
@@ -311,6 +312,15 @@ const eventPump = defaultRuntime.pump;
  * 转录中枢（修改 4 · M1）：会话的转写由主进程按会话记，切走不停、刷新不丢。
  * 键与会话登记表一致：`session:<规范化路径>`，还没有会话文件时按槽兜底。
  */
+/**
+ * 子任务并发闸（修改 4 · M4）：名额是**全局**的，因为限流的是 provider。
+ * 2 个槽 × 每槽 4 个子任务 = 8 个请求同时在飞，不挡就会整批 429。
+ */
+const subagentGate = new SubagentGate({
+  capacity: Math.max(1, Math.min(16, Number(process.env.OMCP_SUBAGENT_CONCURRENCY ?? 4) || 4)),
+});
+let subagentGateServer: { url: string; token: string; close(): void } | null = null;
+
 const transcriptHub = new TranscriptHub();
 
 function hubKeyForFile(file: string | null | undefined): string {
@@ -388,6 +398,8 @@ const slotPool = new SlotPool({
   },
   disposeSlot: (slot) => {
     cancelPendingApprovals(slot.id);
+    // 这个槽的子进程可能没来得及还名额；不留孤儿占用
+    subagentGate.releaseAll(slot.id);
     // 内核跟着会话走：关槽不动内核，交给空闲回收（M2）
     runtimeAuditLogs.delete(slot.id);
     runtimeManager.forget(slot.id);
@@ -752,6 +764,13 @@ function applyRuntimeServiceEnv(runtime: SessionRuntime): void {
     OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
     OMCP_ARTIFACTS_TOKEN: runtime.token,
     OMCP_PLUGINS: JSON.stringify(enabledFamilyKeys(appSettings.plugins)),
+    // 修改 4 · M4：子任务并发闸 + 子 agent 名册位置
+    OMCP_GATE_URL: subagentGateServer?.url ?? "",
+    OMCP_GATE_TOKEN: subagentGateServer?.token ?? "",
+    ...(() => {
+      const dir = join(app.getPath("userData"), "agents");
+      return { OMCP_AGENTS_DIR: dir };
+    })(),
     OMCP_MEMORY_DIR: memoryDirPath(),
     ...(browserService
       ? { OMCP_BROWSER_URL: browserService.url, OMCP_BROWSER_TOKEN: browserService.token }
@@ -5952,6 +5971,10 @@ app.whenReady().then(async () => {
     },
   );
   await kernelBroker.start();
+  // 修改 4 · M4：子任务并发闸的入口（扩展进程来领名额）
+  subagentGateServer = await startSubagentGateServer(subagentGate, {
+    onError: (message) => console.error("[子任务闸]", message),
+  });
   browserService = new BrowserService({
     playwrightDir: app.isPackaged
       ? join(process.resourcesPath, "plugin-ext", "payload", "node_modules", "playwright-core")
@@ -5986,6 +6009,13 @@ app.whenReady().then(async () => {
       ? join(process.resourcesPath, "plugin-ext", "index.mjs")
       : resolve(app.getAppPath(), "../../packages/plugin-ext/src/index.ts"));
 
+  // 修改 4 · M4：子任务扩展（族开关 subagent，默认关）
+  const subagentExtPath =
+    process.env.OMCP_SUBAGENT_EXT ||
+    (app.isPackaged
+      ? join(process.resourcesPath, "subagent-ext", "src", "index.ts")
+      : resolve(app.getAppPath(), "../../packages/subagent-ext/src/index.ts"));
+
   applyRuntimeServiceEnv(defaultRuntime);
   // playwright-core 在 payload/node_modules（electron-builder 跳过根部 node_modules）
   defaultRuntime.setEnv(
@@ -5997,7 +6027,7 @@ app.whenReady().then(async () => {
   if (appSettings.piConfigDir) {
     defaultRuntime.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
   }
-  runtimeExtensions = [extensionPath, permissionExtPath, pluginExtPath];
+  runtimeExtensions = [extensionPath, permissionExtPath, pluginExtPath, subagentExtPath];
   defaultRuntime.setExtensions(runtimeExtensions);
 
   const ws = readWorkspaces();
@@ -6085,6 +6115,8 @@ app.on("before-quit", (event) => {
   // 内核按会话记（M2）：退出一律全关，别只关当前可见的那一对
   kernelManager?.disposeAll();
   kernelBroker?.stop();
+  subagentGate.dispose();
+  subagentGateServer?.close();
   setTimeout(() => app.quit(), 800);
   event.preventDefault();
 });

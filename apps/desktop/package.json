@@ -51,6 +51,10 @@
         "to": "plugin-ext"
       },
       {
+        "from": "../../packages/subagent-ext/src",
+        "to": "subagent-ext/src"
+      },
+      {
         "from": "../../vendor/pi-bundle",
         "to": "pi",
         "filter": [
