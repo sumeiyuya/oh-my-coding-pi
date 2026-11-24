@@ -62,6 +62,7 @@ import { SessionRuntime } from "./session-runtime";
 import { KernelManager, kernelKeyFor } from "./kernel-manager";
 import { RuntimeManager } from "./runtime-manager";
 import { SessionRegistry, sessionKey } from "./session-registry";
+import { TranscriptHub } from "./transcript-hub";
 import { SlotPool } from "./slot-pool";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
@@ -306,6 +307,29 @@ const eventPump = defaultRuntime.pump;
  * 默认 runtime 作为第一个槽被领养：它仍然叫 `default`，所有老 IPC 继续用它，
  * 但它现在也会被准入规则停掉/复用——这正是「切走不停、满员挂起最久未用」的基础。
  */
+/**
+ * 转录中枢（修改 4 · M1）：会话的转写由主进程按会话记，切走不停、刷新不丢。
+ * 键与会话登记表一致：`session:<规范化路径>`，还没有会话文件时按槽兜底。
+ */
+const transcriptHub = new TranscriptHub();
+
+function hubKeyForFile(file: string | null | undefined): string {
+  return file ? `session:${sessionKey(file)}` : "session:none";
+}
+
+function hubKeyForSlot(runtimeId: string): string {
+  return hubKeyForFile(slotPool.get(runtimeId)?.sessionFile ?? null).replace(
+    "session:none",
+    `runtime:${runtimeId}`,
+  );
+}
+
+/** 这段会话此刻就显示在窗口里（用来决定要不要计未读） */
+function isVisibleSession(file: string | null): boolean {
+  if (!file || !currentSessionFile) return false;
+  return sessionKey(file) === sessionKey(currentSessionFile);
+}
+
 const slotPool = new SlotPool({
   registry: sessionRegistry,
   maxSlots: appSettings.maxRuntimes,
@@ -358,10 +382,14 @@ if (!SELFTEST) {
     const reapedKernels = kernelManager?.reapIdle(kernelIdleMs()) ?? [];
     for (const item of reapedKernels) {
       if (!item.wasRunning) continue;
-      send("session:kernel-reaped", {
-        key: item.key,
-        file: item.key.startsWith("session:") ? item.key.slice("session:".length) : null,
-      });
+      const file = item.key.startsWith("session:") ? item.key.slice("session:".length) : null;
+      if (file) {
+        transcriptHub.system(
+          hubKeyForFile(file),
+          "内核已因空闲关闭：变量已清空，再运行代码会重新启动内核。",
+        );
+      }
+      send("session:kernel-reaped", { key: item.key, file });
     }
   }, 60_000);
   reaper.unref?.();
@@ -370,6 +398,17 @@ if (!SELFTEST) {
 /** P2a：所有 runtime 的事件统一出口；renderer 按 runtimeId 分流 */
 function emitRuntimeEvent(ev: PiEvent, runtimeId: string): void {
   turnTrace.countIpcSent();
+  // 修改 4 · M1：转写归约在主进程做一份，后台会话照样记（切走不停的基础）
+  const hubKey = hubKeyForSlot(runtimeId);
+  const slotFile = slotPool.get(runtimeId)?.sessionFile ?? null;
+  const before = transcriptHub.summary(hubKey).unread;
+  transcriptHub.ingest(hubKey, ev);
+  if (isVisibleSession(slotFile)) {
+    transcriptHub.clearUnread(hubKey);
+  } else if (transcriptHub.summary(hubKey).unread !== before) {
+    // 后台会话多了一轮：把未读数推到界面（只给标量，不搬条目）
+    send("session:changed", sessionBoard());
+  }
   // 标签上的状态点：会话忙/闲跟着事件走（默认槽也在这里，不另接一份）
   if (ev.type === "agent_start" || ev.type === "agent_settled") {
     if (markSessionFromEvent(runtimeId, ev.type === "agent_start")) {
@@ -1563,7 +1602,8 @@ function sessionBoard(): SessionBoardView {
       workspace: record.workspace,
       ...(record.title ? { title: record.title } : {}),
       state: record.state,
-      unread: record.unread,
+      // 未读以转录中枢为准（渲染端刷新后仍准）
+      unread: transcriptHub.summary(hubKeyForFile(record.file)).unread,
       slotId: record.slotId,
       running: Boolean(slot?.isRunning),
       busy: Boolean(slot?.busy),
@@ -2001,6 +2041,16 @@ ipcMain.handle(
     }
     const list = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
     const behavior = opts?.streamingBehavior;
+    // 用户这句话进转写：事件流里没有"用户消息"，主进程收下 prompt 时补一条
+    transcriptHub.userTurn(
+      hubKeyForSlot(target.id),
+      text,
+      list.map((img, index) => ({
+        id: `${Date.now().toString(36)}-${index}`,
+        data: img.data,
+        mimeType: img.mimeType,
+      })),
+    );
     // 只有没有进行中的回合时才开新记录；排队/追加不另起一条，避免把计时算到别人头上
     const trace = traceOf(target.id);
     const turnId = trace.begin("prompt", {
@@ -2310,6 +2360,7 @@ ipcMain.handle("pi:steer", async (_event, text: string, runtimeId?: string): Pro
   const notReady = await ensureSlotReady(target);
   if (notReady) return notReady;
   if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  transcriptHub.userTurn(hubKeyForSlot(target.id), text);
   return promptResult(await target.rpc.request({ type: "steer", message: text }));
 });
 
@@ -2319,6 +2370,7 @@ ipcMain.handle("pi:follow-up", async (_event, text: string, runtimeId?: string):
   const notReady = await ensureSlotReady(target);
   if (notReady) return notReady;
   if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  transcriptHub.userTurn(hubKeyForSlot(target.id), text);
   return promptResult(await target.rpc.request({ type: "follow_up", message: text }));
 });
 
@@ -3520,8 +3572,20 @@ ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpen
   applyPermissionMode();
   pointKernelsAt(target);
   sessionRegistry.clearUnread(target);
+  transcriptHub.clearUnread(hubKeyForFile(target));
   if (existsSync(target)) writeWorkspaceState({ lastSessionFile: target });
   return { ...outcome, board: sessionBoard() };
+});
+
+/**
+ * 转写快照（修改 4 · M1）。
+ *
+ * 界面切到一个会话时先问这里：有就整段拿，`cold` 说明中枢里还没有
+ * （重启后第一次），由界面用 `get_messages` 重建后再 `seed` 回来。
+ */
+ipcMain.handle("transcript:snapshot", (_event, file: string) => {
+  const target = normalizeSessionFile(file) ?? file;
+  return transcriptHub.snapshot(hubKeyForFile(target));
 });
 
 /** 关闭一个会话的槽：进程停掉、会话保留（可以再打开） */

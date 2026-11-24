@@ -30,7 +30,7 @@ import Markdown from "./Markdown";
 import UploadMenu from "./UploadMenu";
 import ToolCard from "./ToolCard";
 import ToolGroup from "./ToolGroup";
-import { messagesFromAgent } from "./tool-rebuild";
+import { applyPiEvent, messagesFromAgent } from "./tool-rebuild";
 import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
@@ -72,6 +72,7 @@ import type {
   SessionBoardView,
   SessionOpenView,
   SessionView,
+  ChatItem,
   ThinkingLevel,
   WorkspaceInfo,
   WorkspaceIndexEntry,
@@ -323,72 +324,17 @@ export default function App() {
       }));
       return;
     }
-    if (ev.type === "message_start" && ev.message.role === "assistant") {
-      setMessagesFor(runtimeId, (prev) => [
-        ...prev,
-        { kind: "assistant", text: "", id: `${runtimeId}-${Date.now()}` },
-      ]);
-      return;
-    }
-    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
-      const delta = ev.assistantMessageEvent.delta;
-      setMessagesFor(runtimeId, (prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const item = next[i]!;
-          if (item.kind === "assistant") {
-            next[i] = { ...item, text: item.text + delta };
-            return next;
-          }
-        }
-        return [...next, { kind: "assistant", text: delta, id: `${runtimeId}-${Date.now()}` }];
-      });
-      return;
-    }
-    if (ev.type === "message_end" && ev.message.role === "assistant") {
-      const text = textOf(ev.message.content);
-      setMessagesFor(runtimeId, (prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const item = next[i]!;
-          if (item.kind === "assistant") {
-            next[i] = { ...item, text: text || item.text };
-            return next;
-          }
-        }
-        return text ? [...next, { kind: "assistant", text, id: `${runtimeId}-${Date.now()}` }] : next;
-      });
-      setUnreadByRuntime((prev) => ({ ...prev, [runtimeId]: (prev[runtimeId] ?? 0) + 1 }));
-      return;
-    }
-    if (ev.type === "tool_execution_start") {
-      setMessagesFor(runtimeId, (prev) => [
-        ...prev,
-        {
-          kind: "tool",
-          id: ev.toolCallId,
-          name: ev.toolName,
-          args: JSON.stringify(ev.args ?? {}),
-          done: false,
-          startedAt: Date.now(),
-        },
-      ]);
-      return;
-    }
-    if (ev.type === "tool_execution_end") {
-      setMessagesFor(runtimeId, (prev) =>
-        prev.map((item) =>
-          item.kind === "tool" && item.id === ev.toolCallId
-            ? {
-                ...item,
-                done: true,
-                endedAt: Date.now(),
-                ...(ev.isError ? { isError: true } : {}),
-                result: textOf(ev.result?.content as never),
-              }
-            : item,
-        ),
-      );
+    // 转写部分与主进程共用同一个归约（修改 4 · M1）：
+    // 以前这里另写了一份，覆盖范围不同（没有 system / 工具失败态更少），
+    // 于是"一直盯着"与"切走再回来"看到的会不一样。
+    if (
+      ev.type === "message_start" ||
+      ev.type === "message_update" ||
+      ev.type === "message_end" ||
+      ev.type === "tool_execution_start" ||
+      ev.type === "tool_execution_end"
+    ) {
+      setMessagesFor(runtimeId, (prev) => applyPiEvent(prev as ChatItem[], ev) as unknown as Msg[]);
     }
   }
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -480,7 +426,6 @@ export default function App() {
   const activeSlotInfo = board?.slots.find((item) => item.id === activeRuntimeId);
   const slotReady = activeRuntimeId === "default" ? piReady : Boolean(activeSlotInfo?.ready);
 
-  const [unreadByRuntime, setUnreadByRuntime] = useState<Record<string, number>>({});
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [appError, setAppError] = useState<AppError | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
@@ -774,7 +719,6 @@ export default function App() {
     async (id: string) => {
       activeRuntimeRef.current = id;
       setActiveRuntimeId(id);
-      setUnreadByRuntime((prev) => ({ ...prev, [id]: 0 }));
       try {
         const list = (await window.api.activateRuntime(id)) as RuntimeView[];
         if (list) applyRuntimeList(list);
@@ -834,11 +778,6 @@ export default function App() {
       try {
         await window.api.closeRuntime(id);
         setMessagesByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setUnreadByRuntime((prev) => {
           const next = { ...prev };
           delete next[id];
           return next;
@@ -1627,6 +1566,10 @@ export default function App() {
     if (result?.slotId) {
       // 复用已有的一整套加载（消息 / 模型 / 统计 / 会话列表），它按 runtimeId 取数
       await activateRuntime(result.slotId);
+      // 修改 4 · M1：主进程的转录中枢里如果有这段，就用它整段覆盖——
+      // 它包含后台期间发生的全部事件（工具卡片、流式文本、系统提示），
+      // 而 pi 的 get_messages 只给消息，展示态要重算一遍。
+      await applyHubTranscript(result.slotId, file);
     } else {
       await refreshSession();
     }
@@ -1634,6 +1577,23 @@ export default function App() {
     if (file in scrollRef.current) pendingScroll.current = { file, top: scrollRef.current[file] };
     await refreshSessions();
     setInput(draftsRef.current[file] ?? "");
+  }
+
+  /**
+   * 用转录中枢的快照覆盖某个槽的消息列表（修改 4 · M1）。
+   * `cold` = 中枢里还没有这段（重启后第一次打开），这时保留前面的 pi 拉取结果。
+   */
+  async function applyHubTranscript(slotId: string, file: string): Promise<void> {
+    try {
+      const shot = (await window.api.getTranscript(file)) as
+        | { items: ChatItem[]; cold: boolean }
+        | null;
+      if (shot && !shot.cold && shot.items.length > 0) {
+        setMessagesFor(slotId, shot.items as unknown as Msg[]);
+      }
+    } catch {
+      // 中枢不可用时用 pi 拉来的那份，不影响使用
+    }
   }
 
   function ensureTab(file: string) {

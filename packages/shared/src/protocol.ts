@@ -1482,6 +1482,8 @@ export interface PreloadApi {
   closeSession(file: string): Promise<SessionBoardView>;
   onSessionChanged(cb: (board: SessionBoardView) => void): () => void;
   onSessionOpened(cb: (payload: { file: string }) => void): () => void;
+  /** 修改 4 · M1：主进程的转写快照（切回会话时整段拿） */
+  getTranscript(file: string): Promise<{ key: string; revision: number; items: unknown[]; unread: number; cold: boolean }>;
   /** 会话内核因空闲被回收（变量已清空） */
   onKernelReaped(cb: (payload: { key: string; file: string | null }) => void): () => void;
 }

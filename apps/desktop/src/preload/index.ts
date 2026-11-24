@@ -227,6 +227,7 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("session:changed", listener);
     return () => ipcRenderer.removeListener("session:changed", listener);
   },
+  getTranscript: (file: string): Promise<unknown> => ipcRenderer.invoke("transcript:snapshot", file),
   onKernelReaped: (cb: (payload: unknown) => void): (() => void) => {
     const listener = (_event: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on("session:kernel-reaped", listener);

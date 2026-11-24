@@ -1,5 +1,9 @@
 import type { AgentMessage, ContentBlock } from "@oh-my-coding-pi/shared";
 
+// 修改 4 · M1：实时归约搬到了 shared，主进程与渲染端共用一份
+export { applyPiEvent, appendSystem, appendUserTurn } from "@oh-my-coding-pi/shared";
+export type { ChatItem, ChatImage } from "@oh-my-coding-pi/shared";
+
 /**
  * 从 pi 的会话消息重建聊天记录（修改 4）。
  *
