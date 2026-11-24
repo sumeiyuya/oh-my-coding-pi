@@ -61,7 +61,7 @@ import { PiSupervisor } from "./supervisor";
 import { SessionRuntime } from "./session-runtime";
 import { KernelManager, kernelKeyFor } from "./kernel-manager";
 import { RuntimeManager } from "./runtime-manager";
-import { SessionRegistry, sessionKey } from "./session-registry";
+import { SessionRegistry, crashOutcome, sessionKey } from "./session-registry";
 import { TranscriptHub } from "./transcript-hub";
 import { SlotPool } from "./slot-pool";
 import { RpcClient } from "./rpc-client";
@@ -324,7 +324,32 @@ function hubKeyForSlot(runtimeId: string): string {
   );
 }
 
-/** 这段会话此刻就显示在窗口里（用来决定要不要计未读） */
+/**
+ * 槽意外退出（修改 4 · M3）。
+ *
+ * 之前不管哪种退出，界面上都是"突然不说话了"：用户分不清是自己停的、
+ * 被空闲回收了，还是 pi 崩了。这里把三种分开：
+ *
+ *  - 主动停（回收/抢占/换工作区）→ 什么都不说，标签显示"已挂起"；
+ *  - 崩溃且有回合在飞 → 会话标 `interrupted`，转写里留一句"本轮被中断，可重发"；
+ *  - 崩溃但当时空闲 → 只留一句"已自动重启"。
+ *
+ * 不自动重发：重发是用户的决定，不是我们的。
+ */
+function markSlotCrash(runtimeId: string): void {
+  const runtime = runtimeManager.get(runtimeId);
+  if (!runtime || runtime.isStopping) return;
+  const file = runtime.sessionFile;
+  const key = hubKeyForFile(file);
+  const outcome = crashOutcome(runtime.lastExitWhileBusy);
+  if (file) {
+    sessionRegistry.setState(file, outcome.state);
+    transcriptHub.system(key, outcome.note);
+  }
+  send("session:changed", sessionBoard());
+}
+
+/** 这段会话此刻就显示在窗口里（用来决定要不要计未读） *//** 这段会话此刻就显示在窗口里（用来决定要不要计未读） */
 function isVisibleSession(file: string | null): boolean {
   if (!file || !currentSessionFile) return false;
   return sessionKey(file) === sessionKey(currentSessionFile);
@@ -333,8 +358,8 @@ function isVisibleSession(file: string | null): boolean {
 const slotPool = new SlotPool({
   registry: sessionRegistry,
   maxSlots: appSettings.maxRuntimes,
-  createSlot: ({ id, workspace, sessionFile }) =>
-    runtimeManager.create({
+  createSlot: ({ id, workspace, sessionFile }) => {
+    const runtime = runtimeManager.create({
       id,
       provider: supervisor.getProvider(),
       model: supervisor.getModel(),
@@ -344,10 +369,13 @@ const slotPool = new SlotPool({
       sessionFile,
       autoAttach: true,
       onExtensionUi: (ev) => {
-        const runtime = runtimeManager.get(id);
-        if (runtime) handleExtensionUi(ev as Parameters<typeof handleExtensionUi>[0], runtime);
+        handleExtensionUi(ev as Parameters<typeof handleExtensionUi>[0], runtime);
       },
-    }),
+    });
+    // 修改 4 · M3：后台槽崩溃也要有痕迹（默认槽由它自己的 exit 接线管）
+    runtime.supervisor.on("exit", () => markSlotCrash(id));
+    return runtime;
+  },
   disposeSlot: (slot) => {
     cancelPendingApprovals(slot.id);
     // 内核跟着会话走：关槽不动内核，交给空闲回收（M2）
@@ -1156,6 +1184,15 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
 
   defaultRuntime.stop();
   rpc.detach();
+  // 修改 4 · M3：离开时把这个工作区名下的槽收掉（会话保留，切回来还能打开）。
+  // 此前只停默认槽，后台槽还挂在旧目录上，文件/策略/内核全是指向旧工作区的。
+  // 旧工作区的排队请求也就没意义了，先丢掉（否则 closeSlot 会把它放进来）
+  slotPool.dropQueue();
+  for (const slot of slotPool.list()) {
+    if (slot.id === "default") continue;
+    if (sessionKey(slot.workspace) === sessionKey(resolved)) continue;
+    slotPool.closeSlot(slot.id);
+  }
   await new Promise((r) => setTimeout(r, 350));
 
   workspaceRoot = resolved;
@@ -1594,6 +1631,7 @@ function clearAbortTimer(): void {
  * 只有槽（进程）知道。
  */
 function sessionBoard(): SessionBoardView {
+  const queued = new Map(slotPool.queuePositions().map((item) => [sessionKey(item.file), item.position]));
   const sessions = sessionRegistry.list(workspaceRoot || undefined).map((record): SessionView => {
     const slot = record.slotId ? slotPool.get(record.slotId) : undefined;
     return {
@@ -1608,6 +1646,7 @@ function sessionBoard(): SessionBoardView {
       running: Boolean(slot?.isRunning),
       busy: Boolean(slot?.busy),
       active: record.slotId !== null && record.slotId === slotPool.activeSlotId,
+      ...(queued.has(record.key) ? { queued: queued.get(record.key) } : {}),
     };
   });
   return {
@@ -1689,6 +1728,7 @@ supervisor.on("exit", (info: { code: number | null; signal: NodeJS.Signals | nul
   grants?.clearSession();
   turnTrace.abort("pi-exit");
   eventPump.dispose();
+  markSlotCrash("default");
   if (!supervisor.isStopping && info.code !== 0) {
     reportError({
       code: "E_PI_EXIT",
@@ -3573,6 +3613,10 @@ ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpen
   pointKernelsAt(target);
   sessionRegistry.clearUnread(target);
   transcriptHub.clearUnread(hubKeyForFile(target));
+  // 打开就把"上一轮被中断"的标记收掉：用户已经看到了，红点不该一直挂着
+  if (sessionRegistry.get(target)?.state === "interrupted") {
+    sessionRegistry.setState(target, "idle");
+  }
   if (existsSync(target)) writeWorkspaceState({ lastSessionFile: target });
   return { ...outcome, board: sessionBoard() };
 });

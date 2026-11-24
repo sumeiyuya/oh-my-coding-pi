@@ -732,6 +732,8 @@ export interface SessionView {
   running: boolean;
   busy: boolean;
   active: boolean;
+  /** 修改 4 · M3：在等名额时的位次（1 = 下一个） */
+  queued?: number;
 }
 
 export interface SlotView {

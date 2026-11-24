@@ -185,3 +185,21 @@ export class SessionRegistry {
     return this.byKey.size;
   }
 }
+
+/**
+ * 崩溃之后该把会话标成什么、对用户说什么（修改 4 · M3）。
+ *
+ * 分开的理由：有回合在飞时被打断，和空闲时进程重启，对用户是两件事——
+ * 前者可能丢了一段正在生成的回答，后者只是"它重连了一下"。
+ */
+export function crashOutcome(wasBusy: boolean): { state: SessionState; note: string } {
+  return wasBusy
+    ? {
+        state: "interrupted",
+        note: "pi 进程异常退出，本轮的回复被中断了。可以直接重发这条消息。",
+      }
+    : {
+        state: "idle",
+        note: "pi 进程异常退出，已自动重启；这段会话的内容没有丢。",
+      };
+}

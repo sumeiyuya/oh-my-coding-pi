@@ -279,3 +279,34 @@ test("被钉住的槽（默认槽）只挂起不销毁", async () => {
   assert.equal(pinned.isRunning, false, "只是停了");
   assert.equal(registry.get(file(1))?.slotId, null);
 });
+
+test("排队位次：按入队顺序，重复请求不占两个位", async () => {
+  const { pool, created } = make({ max: 1 });
+  const a = await pool.open(file(1), WS);
+  const slotA = created.find((s) => s.id === a.slotId);
+  assert.ok(slotA);
+  slotA.busy = true;
+
+  await pool.open(file(2), WS, { visibleSlotId: pool.activeSlotId });
+  await pool.open(file(3), WS, { visibleSlotId: pool.activeSlotId });
+  await pool.open(file(2), WS, { visibleSlotId: pool.activeSlotId });
+
+  assert.deepEqual(pool.queuePositions(), [
+    { file: file(2), position: 1 },
+    { file: file(3), position: 2 },
+  ]);
+});
+
+test("换工作区时丢掉旧队列，不会把旧工作区的会话放进来", async () => {
+  const { pool, created } = make({ max: 1 });
+  const a = await pool.open(file(1), WS);
+  const slotA = created.find((s) => s.id === a.slotId);
+  assert.ok(slotA);
+  slotA.busy = true;
+  await pool.open(file(2), WS, { visibleSlotId: pool.activeSlotId });
+  assert.equal(pool.queueLength(), 1);
+
+  assert.deepEqual(pool.dropQueue(), [file(2)]);
+  assert.equal(pool.queueLength(), 0);
+  assert.deepEqual(pool.queuePositions(), []);
+});

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SessionRegistry, sessionKey } from "../src/main/session-registry.ts";
+import { SessionRegistry, crashOutcome, sessionKey } from "../src/main/session-registry.ts";
 
 /** 修改 4 · M0：会话键规范化 + 绑定关系。 */
 
@@ -61,4 +61,14 @@ test("未读与清空；解绑后状态是 suspended", () => {
   registry.unbind("slot-1");
   assert.equal(registry.get("D:/p/a.jsonl")?.slotId, null);
   assert.equal(registry.get("D:/p/a.jsonl")?.state, "suspended");
+});
+
+test("崩溃标注：有回合在飞 → interrupted，空闲 → idle，且两句话不一样", () => {
+  const busy = crashOutcome(true);
+  const idle = crashOutcome(false);
+  assert.equal(busy.state, "interrupted");
+  assert.equal(idle.state, "idle");
+  assert.match(busy.note, /中断/);
+  assert.match(idle.note, /自动重启/);
+  assert.notEqual(busy.note, idle.note);
 });

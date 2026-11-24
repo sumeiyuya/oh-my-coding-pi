@@ -2408,6 +2408,8 @@ export default function App() {
               const running = info?.running ?? false;
               const tabBusy = info?.busy ?? false;
               const unread = info?.unread ?? 0;
+              const crashed = info?.state === "interrupted";
+              const queued = info?.queued ?? 0;
               return (
                 <div
                   key={file}
@@ -2420,16 +2422,27 @@ export default function App() {
                     aria-selected={active}
                     title={[
                       file,
-                      tabBusy ? "运行中" : running ? "空闲" : "已挂起（切回会自动恢复）",
+                      queued
+                        ? `排队第 ${queued} 位（名额空出会自动打开）`
+                        : crashed
+                          ? "上一轮被中断（pi 进程异常退出），可直接重发"
+                          : tabBusy
+                            ? "运行中"
+                            : running
+                              ? "空闲"
+                              : "已挂起（切回会自动恢复）",
                     ].join(" · ")}
                     onClick={() => void loadSession(file)}
                   >
                     <span
                       className="tab-dot"
                       data-busy={tabBusy ? "1" : undefined}
-                      data-suspended={running ? undefined : "1"}
+                      data-suspended={!running && !queued ? "1" : undefined}
+                      data-error={crashed ? "1" : undefined}
+                      data-queued={queued ? "1" : undefined}
                     />
                     {label}
+                    {queued > 0 && <span className="tab-queued">排队 {queued}</span>}
                     {unread > 0 && <span className="tab-unread">{unread}</span>}
                   </button>
                   <button

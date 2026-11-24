@@ -51,6 +51,8 @@ export class SessionRuntime {
   private currentSessionDir: string | null = null;
   private activeAt = Date.now();
   private busyFlag = false;
+  /** 上一次退出时是不是正在跑一轮（崩溃标注用：清 busy 之前先记下来） */
+  private exitedBusy = false;
   /** 修改 4 · M0：就绪以一次成功的 get_state 为准，不是 rpc.attached（G5） */
   private readyFlag = false;
 
@@ -79,11 +81,16 @@ export class SessionRuntime {
         this.pump.push(ev as PiEvent);
       });
     }
-    // 进程一退，就绪状态必须作废——不管这条 runtime 由谁接线
+    // 进程一退，就绪与"在跑"都必须作废——不管这条 runtime 由谁接线。
+    // 不清 busyFlag 的话，崩溃之后这个槽会一直显示"运行中"，
+    // 于是它既不会被空闲回收，也不会被别的会话抢占（修改 4 · M3）。
     this.supervisor.on("exit", () => {
+      this.exitedBusy = this.busyFlag;
       this.readyFlag = false;
+      this.busyFlag = false;
     });
     this.supervisor.on("spawn", () => {
+      this.exitedBusy = false;
       this.readyFlag = false;
     });
     for (const [key, value] of Object.entries(opts.env ?? {})) this.setEnv(key, value);
@@ -97,6 +104,10 @@ export class SessionRuntime {
   get lastActiveAt(): number { return this.activeAt; }
   get busy(): boolean { return this.busyFlag; }
   get isRunning(): boolean { return this.supervisor.current !== null; }
+  /** 这次退出是不是"我们自己停的"（空闲回收、抢占、换工作区都算主动） */
+  get isStopping(): boolean { return this.supervisor.isStopping; }
+  /** 上一次退出时正在跑一轮吗（崩溃标注的依据） */
+  get lastExitWhileBusy(): boolean { return this.exitedBusy; }
   get ready(): boolean { return this.readyFlag; }
 
   /**

@@ -3982,3 +3982,13 @@ body.sash-dragging {
   font-size: 10.5px; color: var(--muted); white-space: nowrap;
 }
 .session-tab.suspended { opacity: .7; }
+
+/* 修改 4 · M3：中断（红点）与排队（灰徽标） */
+.session-tab .tab-dot[data-error="1"] { background: var(--danger-text); opacity: 1; }
+.session-tab .tab-dot[data-queued="1"] {
+  background: transparent; border: 1px dashed var(--muted); opacity: .9;
+}
+.session-tab .tab-queued {
+  margin-left: 4px; font-size: 9.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 99px; padding: 0 5px;
+}

@@ -364,6 +364,19 @@ export class SlotPool<T extends SlotRuntime = SlotRuntime> {
     return this.queue.length;
   }
 
+  /** 排队位次（给界面显示"排队第 N 位"）；按入队顺序 */
+  queuePositions(): Array<{ file: string; position: number }> {
+    return this.queue.map((item, index) => ({ file: item.file, position: index + 1 }));
+  }
+
+  /** 丢掉整条队列（换工作区时旧队列没意义了） */
+  dropQueue(): string[] {
+    const dropped = this.queue.map((item) => item.file);
+    this.queue.length = 0;
+    if (dropped.length > 0) this.onChanged();
+    return dropped;
+  }
+
   /** 有额度时把队首放进来（尽力而为：失败就留在队里） */
   drain(): void {
     while (this.queue.length > 0) {
