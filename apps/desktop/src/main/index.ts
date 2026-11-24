@@ -61,7 +61,7 @@ import { PiSupervisor } from "./supervisor";
 import { SessionRuntime } from "./session-runtime";
 import { KernelManager, kernelKeyFor } from "./kernel-manager";
 import { RuntimeManager } from "./runtime-manager";
-import { SessionRegistry } from "./session-registry";
+import { SessionRegistry, sessionKey } from "./session-registry";
 import { SlotPool } from "./slot-pool";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
@@ -87,7 +87,8 @@ import { createSkill, readSkill, scanSkills, setSkillEnabled } from "./skills";
 import { SecretStore } from "./secrets";
 import { describeImage, formatDescription } from "./vision";
 import { exportRoute, isValidPlanPath, loadRoute, planAbsPath, saveRoute } from "./route";
-import { planDigest, verifyPlanFile } from "./plan-approval";
+import { PlanGateBook, planDigest, verifyPlanFile, type PlanGateState } from "./plan-approval";
+import { applyCost, budgetStatusOf, shouldAlert } from "./budget-ledger";
 import {
   buildPiProviders,
   emptyRegistry,
@@ -150,7 +151,6 @@ const budget = { sessionLimit: 1, dailyLimit: 5, alertRatio: 0.8 };
 let dailyDate = "";
 let dailySpent = 0;
 let sessionCosts: Record<string, number> = {};
-let alertedSession = false;
 let abortTimer: NodeJS.Timeout | null = null;
 let selftestDone = false;
 let selftestTimer: NodeJS.Timeout | null = null;
@@ -161,8 +161,6 @@ let kernelManager: KernelManager | null = null;
 let runtimeExtensions: string[] = [];
 let pythonKernel: KernelService | null = null;
 let rKernel: KernelService | null = null;
-/** 这两个别名此刻指向哪个会话的内核（M2） */
-let kernelAliasKey: string | null = null;
 let kernelBroker: KernelBroker | null = null;
 let browserService: BrowserService | null = null;
 let grants: GrantStore | null = null;
@@ -216,14 +214,40 @@ const pendingApprovals = new Map<string, PendingApproval>();
 let secretStore: SecretStore | null = null;
 /** MCP 配置服务：lazy 创建（secretStore 与 workspaceRoot 就绪后） */
 let mcpService: McpService | null = null;
-/** 方案期：会话级；未批准时只放只读工具 */
-const planGate = {
-  enabled: false,
-  approved: false,
-  planPath: null as string | null,
-  /** 批准时的计划内容摘要（sha256）；任何非只读操作前用它复核 */
-  digest: null as string | null,
-};
+/**
+ * 方案期门（修改 4 · M2：按**会话**记）。
+ *
+ * 改之前是一个单对象：A 会话批准了方案，B 会话立刻也变成"已批准只读"，
+ * 反过来 B 一改方案内容，A 的批准也跟着失效。方案文件是工作区的，
+ * 但「批没批」是这段对话的状态。
+ */
+const planGates = new PlanGateBook();
+/** 还没有会话文件时（新建工作区）挂在工作区上 */
+const PLAN_WS_KEY = "__workspace__";
+
+function resetPlanGate(key: string): void {
+  planGates.revoke(key);
+}
+
+function planGateFor(key: string): PlanGateState {
+  return planGates.for(key);
+}
+
+/** 策略服务给了 runtimeId / sessionKey，换算成方案期的键 */
+function planKeyOf(ctx?: { runtimeId?: string; sessionKey?: string }): string {
+  if (ctx?.sessionKey) return `session:${sessionKey(ctx.sessionKey)}`;
+  if (ctx?.runtimeId) {
+    const file = runtimeManager.get(ctx.runtimeId)?.sessionFile;
+    if (file) return `session:${sessionKey(file)}`;
+  }
+  // 没有上下文（自测里的直接调用、旧客户端）：按"用户看着的那段"算
+  return visiblePlanKey();
+}
+
+/** 界面操作（plan:status / set / approve）作用在"此刻看着的那段会话"上 */
+function visiblePlanKey(): string {
+  return currentSessionFile ? `session:${sessionKey(currentSessionFile)}` : PLAN_WS_KEY;
+}
 /** 模型能力缓存：provider/model → 是否支持图片 */
 const visionCapability = new Map<string, boolean>();
 let tokenProbe: { startedAt: number; resolve: (ms: number) => void } | null = null;
@@ -234,12 +258,28 @@ function send(channel: string, payload: unknown): void {
   }
 }
 
-/** 回合时序：只记阶段与长度，不记正文；OMCP_PERF_TRACE=0 可关闭写盘。 */
-const turnTrace = new TurnTrace({
-  file: () => (workspaceRoot ? join(workspaceRoot, ".omcp", "logs", "perf.jsonl") : null),
-  enabled: process.env.OMCP_PERF_TRACE !== "0",
-});
-turnTrace.setPhaseSink((ev) => send("pi:turn", ev));
+/**
+ * 回合时序：只记阶段与长度，不记正文；OMCP_PERF_TRACE=0 可关闭写盘。
+ *
+ * 修改 4 · M2：一个槽一份。改之前是全局一个——两个会话同时跑时，
+ * 后一轮 `begin()` 直接返回 null（"已有回回合在跑"），于是后台会话
+ * 根本没有记录，前台那轮的阶段还会被对方的 tool 事件污染。
+ */
+const perfTraces = new Map<string, TurnTrace>();
+function traceOf(runtimeId = "default"): TurnTrace {
+  let trace = perfTraces.get(runtimeId);
+  if (!trace) {
+    trace = new TurnTrace({
+      file: () => (workspaceRoot ? join(workspaceRoot, ".omcp", "logs", "perf.jsonl") : null),
+      enabled: process.env.OMCP_PERF_TRACE !== "0",
+    });
+    trace.setPhaseSink((ev) => send("pi:turn", { ...ev, runtimeId }));
+    perfTraces.set(runtimeId, trace);
+  }
+  return trace;
+}
+/** 默认槽的这一份（兼容旧引用） */
+const turnTrace = traceOf("default");
 
 /**
  * 运行时管理器（修改 4 · M0 起只做实例登记）。
@@ -330,6 +370,29 @@ if (!SELFTEST) {
 /** P2a：所有 runtime 的事件统一出口；renderer 按 runtimeId 分流 */
 function emitRuntimeEvent(ev: PiEvent, runtimeId: string): void {
   turnTrace.countIpcSent();
+  // 标签上的状态点：会话忙/闲跟着事件走（默认槽也在这里，不另接一份）
+  if (ev.type === "agent_start" || ev.type === "agent_settled") {
+    if (markSessionFromEvent(runtimeId, ev.type === "agent_start")) {
+      send("session:changed", sessionBoard());
+    }
+  }
+  if (runtimeId !== "default") {
+    // 默认槽由它自己的事件接线处理；后台槽在这里记阶段与账
+    const trace = traceOf(runtimeId);
+    if (ev.type === "agent_start") trace.phase("started");
+    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+      trace.phase("first_token");
+    }
+    if (ev.type === "tool_execution_start") trace.phase("tool_start", { tool: ev.toolName });
+    if (ev.type === "tool_execution_end") {
+      trace.phase("tool_end", { tool: ev.toolName, ok: !ev.isError });
+    }
+    if (ev.type === "agent_settled") {
+      invalidateStats(runtimeId);
+      void updateBudget(runtimeId);
+      trace.settle();
+    }
+  }
   send("pi:event", { ...ev, runtimeId } as unknown as PiStreamItem);
 }
 
@@ -566,6 +629,21 @@ function notebookPath(): string {
 /* ------------------------------------------------------------------ */
 
 /** 注册表文件放应用数据目录，不进工作区、不进仓库 */
+/**
+ * 某个槽/会话此刻的有效权限档（修改 4 · M2）。
+ *
+ * 改之前 `applyPermissionMode()` 往策略服务里塞一个全局值：切到另一段会话时
+ * 那个值还是旧的，于是 A 的"完全访问"会影响 B。现在按会话现算。
+ */
+function permissionModeFor(ctx: { runtimeId?: string; sessionKey?: string }): PermissionMode {
+  const file =
+    ctx.sessionKey ?? (ctx.runtimeId ? runtimeManager.get(ctx.runtimeId)?.sessionFile ?? null : null);
+  if (!file || !workspaceRoot) return appSettings.permissionMode;
+  const key = sessionMetaKey(file);
+  const override = key ? loadSessionMeta(workspaceRoot).sessions[key]?.permissionMode : undefined;
+  return override ?? appSettings.permissionMode;
+}
+
 /** 当前会话单独设过的权限档；没有 = 跟随应用默认 */
 function sessionPermissionOverride(): PermissionMode | null {
   if (!workspaceRoot || !currentSessionFile) return null;
@@ -1046,9 +1124,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   defaultRuntime.setTrustProject(appSettings.trustProject);
   policyService?.reload();
   grants?.clearSession();
-  planGate.approved = false;
-  planGate.planPath = null;
-  planGate.digest = null;
+  planGates.clear();
   // 内核按会话记（M2）：这里只把可见会话的那对指到新工作区
   pointKernelsAt(currentSessionFile ?? null);
   scheduleKernelPrewarm();
@@ -1099,7 +1175,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   writeWorkspaces({ lastWorkspace: resolved, recent });
   send("workspace:changed", { root: resolved, recent } satisfies WorkspaceInfo);
 
-  setTimeout(() => void resetBudgetBaseline(), 1500);
+  setTimeout(() => void resetBudgetBaseline("default"), 1500);
   return { root: resolved, initialized: true, migratedSessions };
 }
 
@@ -1224,42 +1300,95 @@ function loadSettings(): void {
  * - 发送前的预算判断用 getStats(true) 强制取权威值，缓存不能放行超预算的请求；
  * - 收到 usage/entry_appended/agent_settled 或切会话时立刻失效。
  */
-let statsCache: { at: number; value: SessionStats } | null = null;
-/** 失效代数：飞行中的请求若早于最近一次失效，不允许被复用 */
-let statsGen = 0;
-let statsInFlight: { gen: number; p: Promise<SessionStats> } | null = null;
+/**
+ * 每个槽一份统计缓存（修改 4 · M2）。
+ *
+ * 改之前只有一个 `rpc`（默认槽）的缓存与单飞：于是**预算门量的是默认会话的钱**，
+ * 后台会话烧多少都不拦，而默认会话一旦超限会把所有会话一起拦住。
+ */
+interface SlotStatsCache {
+  at: number;
+  value: SessionStats;
+  gen: number;
+}
+const statsBySlot = new Map<
+  string,
+  { cache: SlotStatsCache | null; gen: number; inFlight: { gen: number; p: Promise<SessionStats> } | null }
+>();
 /** 自上次 prompt 以来实际发出的 get_session_stats 次数（验证 4→1） */
 let statsQueryCount = 0;
 
-function invalidateStats(): void {
-  statsCache = null;
-  statsGen += 1;
+function statsSlot(runtimeId: string) {
+  let slot = statsBySlot.get(runtimeId);
+  if (!slot) {
+    slot = { cache: null, gen: 0, inFlight: null };
+    statsBySlot.set(runtimeId, slot);
+  }
+  return slot;
 }
 
-async function getStats(force = false, timeoutMs = piReady ? 30_000 : 3_000): Promise<SessionStats> {
+/** 失效：给 id 就只失效那一个，不给就全失效 */
+function invalidateStats(runtimeId?: string): void {
+  if (runtimeId) {
+    const slot = statsSlot(runtimeId);
+    slot.cache = null;
+    slot.gen += 1;
+    return;
+  }
+  for (const slot of statsBySlot.values()) {
+    slot.cache = null;
+    slot.gen += 1;
+  }
+}
+
+function runtimeById(runtimeId: string): SessionRuntime | undefined {
+  return runtimeId === "default" ? defaultRuntime : runtimeManager.get(runtimeId);
+}
+
+/** 这一轮默认的统计超时；非默认槽给 10 秒，别让预算门干等 */
+function statsTimeout(runtimeId: string): number {
+  if (runtimeId !== "default") return 10_000;
+  return piReady ? 30_000 : 3_000;
+}
+
+async function getStatsFor(
+  runtimeId: string,
+  force = false,
+  timeoutMs = statsTimeout(runtimeId),
+): Promise<SessionStats> {
+  const runtime = runtimeById(runtimeId);
+  if (!runtime) throw new Error(`没有这个槽：${runtimeId}`);
+  const slot = statsSlot(runtimeId);
   const now = Date.now();
   if (!force) {
-    if (statsCache && now - statsCache.at < 250) return statsCache.value;
-    if (statsInFlight && statsInFlight.gen === statsGen) return statsInFlight.p;
+    if (slot.cache && slot.cache.gen === slot.gen && now - slot.cache.at < 250) {
+      return slot.cache.value;
+    }
+    if (slot.inFlight && slot.inFlight.gen === slot.gen) return slot.inFlight.p;
   }
-  const gen = statsGen;
+  const gen = slot.gen;
   statsQueryCount += 1;
   const run = (async () => {
-    const res = await rpc.request({ type: "get_session_stats" }, timeoutMs);
+    const res = await runtime.rpc.request({ type: "get_session_stats" }, timeoutMs);
     const value = res.data as SessionStats;
-    if (gen === statsGen) statsCache = { at: Date.now(), value };
+    if (gen === slot.gen) slot.cache = { at: Date.now(), value, gen };
     return value;
   })();
   if (force) return run; // 预算门不排队、不复用可能早于最新 usage 的飞行请求
-  statsInFlight = { gen, p: run };
+  slot.inFlight = { gen, p: run };
   void run
     .finally(() => {
-      if (statsInFlight?.gen === gen) statsInFlight = null;
+      if (slot.inFlight?.gen === gen) slot.inFlight = null;
     })
     .catch(() => {
       // 调用方各自处理错误；这里只负责清理飞行状态，避免未处理拒绝
     });
   return run;
+}
+
+/** 兼容旧的调用点：默认槽的统计 */
+function getStats(force = false, timeoutMs?: number): Promise<SessionStats> {
+  return getStatsFor("default", force, timeoutMs);
 }
 
 function reportError(error: AppError): void {
@@ -1280,52 +1409,51 @@ function reportError(error: AppError): void {
   }
 }
 
-function budgetStatus(cost: number): BudgetStatus {
-  const previous = currentSessionFile ? sessionCosts[currentSessionFile] ?? 0 : 0;
-  const projectedDaily = dailySpent + Math.max(0, cost - previous);
-  return {
-    sessionUsd: cost,
-    dailyUsd: projectedDaily,
-    sessionLimit: budget.sessionLimit,
-    dailyLimit: budget.dailyLimit,
-    alertRatio: budget.alertRatio,
-  };
+function ledgerState() {
+  return { dailyDate, dailySpent, sessionCosts };
 }
 
-async function refreshBudget(): Promise<BudgetStatus> {
+function budgetStatus(cost: number, sessionFile: string | null): BudgetStatus {
+  return budgetStatusOf({ cost, sessionFile, ledger: ledgerState(), limits: budget });
+}
+
+/** 已经就"接近上限"提醒过的会话（原来是全局一个 flag） */
+const alertedSessions = new Set<string>();
+
+async function refreshBudget(runtimeId = slotPool.activeSlotId ?? "default"): Promise<BudgetStatus> {
+  const file = runtimeById(runtimeId)?.sessionFile ?? null;
   try {
-    const stats = await getStats();
-    return budgetStatus(stats.cost ?? 0);
+    const stats = await getStatsFor(runtimeId);
+    return budgetStatus(stats.cost ?? 0, file);
   } catch {
-    return budgetStatus(0);
+    return budgetStatus(0, file);
   }
 }
 
-async function updateBudget(): Promise<void> {
+/**
+ * 记账：把某个槽这次的费用增量记到**它自己的会话**名下。
+ *
+ * 日账是账号级的（所有会话共用），所以 `dailySpent` 仍是一个数；
+ * 会话账按文件分，这也是 ADR-017 的口径。
+ */
+async function updateBudget(runtimeId: string): Promise<void> {
+  const runtime = runtimeById(runtimeId);
+  const sessionFile = runtime?.sessionFile ?? null;
   try {
-    const stats = await getStats();
+    const stats = await getStatsFor(runtimeId);
     const cost = stats.cost ?? 0;
-    const today = todayISO();
-    if (!dailyDate) dailyDate = today;
-    if (dailyDate !== today) {
-      dailyDate = today;
-      dailySpent = 0;
-    }
-    if (currentSessionFile) {
-      const previous = sessionCosts[currentSessionFile] ?? 0;
-      const delta = Math.max(0, cost - previous);
-      dailySpent += delta;
-      sessionCosts[currentSessionFile] = cost;
+    const applied = applyCost({ cost, sessionFile, ledger: ledgerState(), today: todayISO() });
+    dailyDate = applied.ledger.dailyDate;
+    dailySpent = applied.ledger.dailySpent;
+    sessionCosts = applied.ledger.sessionCosts;
+    if (sessionFile || applied.rollover) {
       writeState({ dailyDate, dailySpent, sessionCosts });
     }
 
-    const status = budgetStatus(cost);
-    if (
-      !alertedSession &&
-      (status.sessionUsd >= status.sessionLimit * status.alertRatio ||
-        status.dailyUsd >= status.dailyLimit * status.alertRatio)
-    ) {
-      alertedSession = true;
+    const status = budgetStatus(cost, sessionFile);
+    const alertKey = sessionFile ?? runtimeId;
+    if (!alertedSessions.has(alertKey) && shouldAlert(status, budget)) {
+      alertedSessions.add(alertKey);
       reportError({
         code: "E_BUDGET",
         severity: "warning",
@@ -1340,12 +1468,14 @@ async function updateBudget(): Promise<void> {
   }
 }
 
-async function resetBudgetBaseline(): Promise<void> {
-  alertedSession = false;
+async function resetBudgetBaseline(runtimeId = "default"): Promise<void> {
+  const runtime = runtimeById(runtimeId);
+  const sessionFile = runtime?.sessionFile ?? null;
+  if (sessionFile) alertedSessions.delete(sessionFile);
   try {
-    const stats = await getStats();
-    if (currentSessionFile) {
-      sessionCosts[currentSessionFile] = stats.cost ?? 0;
+    const stats = await getStatsFor(runtimeId);
+    if (sessionFile) {
+      sessionCosts[sessionFile] = stats.cost ?? 0;
       writeState({ sessionCosts });
     }
   } catch {
@@ -1372,10 +1502,17 @@ function promptResult(res: { success: boolean; error?: string }): PromptResult {
   return { ok: false, error };
 }
 
-async function checkBudget(): Promise<boolean> {
+/**
+ * 发话前的预算门（修改 4 · M2）：量的是**这个槽/这段会话**的钱。
+ *
+ * 日账仍是账号级的——一天烧超了，所有会话都该停，这是有意的。
+ */
+async function checkBudget(target: SessionRuntime | { id: string; sessionFile: string | null }): Promise<boolean> {
+  const runtimeId = "id" in target ? target.id : "default";
+  const sessionFile = target.sessionFile;
   try {
-    const stats = await getStats(true);
-    const status = budgetStatus(stats.cost ?? 0);
+    const stats = await getStatsFor(runtimeId, true);
+    const status = budgetStatus(stats.cost ?? 0, sessionFile);
     if (status.sessionUsd >= status.sessionLimit) {
       reportError({
         code: "E_BUDGET",
@@ -1454,7 +1591,6 @@ function pointKernelsAt(sessionFile: string | null): void {
   const pair = kernelManager.get(key, workspaceRoot);
   pythonKernel = pair.python;
   rKernel = pair.r;
-  kernelAliasKey = key;
 }
 
 /**
@@ -1473,11 +1609,16 @@ function bindDefaultSession(file: string | null): void {
 }
 
 /** 会话标记成忙碌/空闲（事件流里改，界面据此画状态点） */
-function markSessionFromEvent(runtimeId: string, busy: boolean): void {
+function markSessionFromEvent(runtimeId: string, busy: boolean): boolean {
   const slot = slotPool.get(runtimeId);
   const file = slot?.sessionFile;
-  if (!file) return;
-  sessionRegistry.setState(file, busy ? "busy" : "idle");
+  if (!file) return false;
+  const record = sessionRegistry.get(file);
+  if (!record) return false;
+  const next = busy ? "busy" : "idle";
+  if (record.state === next) return false;
+  sessionRegistry.setState(file, next);
+  return true;
 }
 
 async function syncCurrentSession(): Promise<void> {
@@ -1624,7 +1765,7 @@ rpc.on("event", (ev: PiEvent) => {
     invalidateStats();
     turnTrace.settle();
     void syncCurrentSession();
-    void updateBudget();
+    void updateBudget("default");
     const autoFinishModes = new Set(["", "tree", "fork", "clone", "export", "recover", "window"]);
     if (SELFTEST && autoFinishModes.has(SELFTEST_MODE) && !selftestDone) finishSelftest();
   }
@@ -1861,26 +2002,28 @@ ipcMain.handle(
     const list = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
     const behavior = opts?.streamingBehavior;
     // 只有没有进行中的回合时才开新记录；排队/追加不另起一条，避免把计时算到别人头上
-    const turnId = turnTrace.begin("prompt", {
+    const trace = traceOf(target.id);
+    const turnId = trace.begin("prompt", {
       textLen: text.length,
       images: list.length,
+      runtime: target.id,
       ...(behavior ? { behavior } : {}),
     });
     const own = turnId !== null;
     if (own) {
       // 上一次 prompt 之后一共扫了几次会话账本；接入缓存后应接近 1
-      turnTrace.note("statsQueriesSinceLastPrompt", statsQueryCount);
+      trace.note("statsQueriesSinceLastPrompt", statsQueryCount);
       statsQueryCount = 0;
     }
 
     const budgetStart = performance.now();
-    const budgetOk = await checkBudget();
-    if (own) turnTrace.note("budgetMs", performance.now() - budgetStart);
+    const budgetOk = await checkBudget(target);
+    if (own) trace.note("budgetMs", performance.now() - budgetStart);
     if (!budgetOk) {
-      if (own) turnTrace.fail("budget");
+      if (own) trace.fail("budget");
       return { ok: false, error: "预算已用完，先调整上限或等明天" };
     }
-    if (own) turnTrace.phase("preparing");
+    if (own) trace.phase("preparing");
 
     let res: PiResponse;
     const ackStart = performance.now();
@@ -1910,14 +2053,14 @@ ipcMain.handle(
         }
       }
     } catch (err) {
-      if (own) turnTrace.fail("rpc-error");
+      if (own) trace.fail("rpc-error");
       throw err;
     }
-    if (own) turnTrace.note("promptAckMs", performance.now() - ackStart);
+    if (own) trace.note("promptAckMs", performance.now() - ackStart);
     if (res.success) {
       if (target.id === "default") maybeAutoTitle(text);
     } else if (own) {
-      turnTrace.fail("rejected");
+      trace.fail("rejected");
     }
     return promptResult(res);
   },
@@ -1978,28 +2121,21 @@ function visionView(): VisionSettingsView {
 }
 
 function planStatus(): PlanGateStatus {
-  return {
-    enabled: planGate.enabled,
-    approved: planGate.approved,
-    planPath: planGate.planPath,
-    digest: planGate.digest,
-  };
+  return planGates.status(visiblePlanKey());
 }
 
 /**
  * 批准后的复核（P1-01）：计划文件被删/读不了/被改过，就撤销批准并退回只读。
  * 在每次非只读工具调用前由 PolicyService 调用；只读工具不触发（不影响看方案）。
  */
-function revalidatePlanGate(): { ok: boolean; reason?: string } {
-  if (!planGate.enabled || !planGate.approved) return { ok: true };
-  // 已批准却丢了路径/摘要：无法证明批准的是哪份内容，按失效处理（fail-closed）
-  const result =
-    planGate.planPath && planGate.digest
-      ? verifyPlanFile(planAbsPath(workspaceRoot ?? "", planGate.planPath), planGate.digest)
-      : { ok: false, reason: "批准状态缺少路径或内容摘要" };
+function revalidatePlanGate(key: string): { ok: boolean; reason?: string } {
+  const driftedPath = planGates.for(key).planPath;
+  const result = planGates.revalidate(
+    key,
+    verifyPlanFile,
+    (rel) => planAbsPath(workspaceRoot ?? "", rel),
+  );
   if (result.ok) return result;
-  const driftedPath = planGate.planPath;
-  planGate.approved = false;
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -2029,12 +2165,7 @@ ipcMain.handle("route:export", () => (workspaceRoot ? exportRoute(workspaceRoot)
 ipcMain.handle("plan:status", (): PlanGateStatus => planStatus());
 
 ipcMain.handle("plan:set", (_event, enabled: boolean): PlanGateStatus => {
-  planGate.enabled = Boolean(enabled);
-  if (!planGate.enabled) {
-    planGate.approved = false;
-    planGate.planPath = null;
-    planGate.digest = null;
-  }
+  planGates.setEnabled(visiblePlanKey(), Boolean(enabled));
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -2048,8 +2179,9 @@ ipcMain.handle("plan:set", (_event, enabled: boolean): PlanGateStatus => {
 
 ipcMain.handle("plan:approve", (_event, planPath: string): PlanGateStatus => {
   if (!workspaceRoot) return planStatus();
+  const gateKey = visiblePlanKey();
   if (!isValidPlanPath(workspaceRoot, planPath)) {
-    planGate.approved = false;
+    planGates.revoke(gateKey);
     return planStatus();
   }
   // 批准 = 批准“这份内容”：记下摘要，之后文件一改就失效
@@ -2060,12 +2192,10 @@ ipcMain.handle("plan:approve", (_event, planPath: string): PlanGateStatus => {
     digest = null;
   }
   if (!digest) {
-    planGate.approved = false;
+    planGates.revoke(gateKey);
     return planStatus();
   }
-  planGate.planPath = planPath;
-  planGate.digest = digest;
-  planGate.approved = true;
+  planGates.approve(gateKey, planPath, digest);
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -2179,7 +2309,7 @@ ipcMain.handle("pi:steer", async (_event, text: string, runtimeId?: string): Pro
     runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
   const notReady = await ensureSlotReady(target);
   if (notReady) return notReady;
-  if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
   return promptResult(await target.rpc.request({ type: "steer", message: text }));
 });
 
@@ -2188,7 +2318,7 @@ ipcMain.handle("pi:follow-up", async (_event, text: string, runtimeId?: string):
     runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
   const notReady = await ensureSlotReady(target);
   if (notReady) return notReady;
-  if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
   return promptResult(await target.rpc.request({ type: "follow_up", message: text }));
 });
 
@@ -2211,7 +2341,7 @@ ipcMain.handle("pi:abort", async (_event, runtimeId?: string) => {
     runtimeId && runtimeId !== "default"
       ? runtimeManager.require(runtimeId)
       : defaultRuntime;
-  turnTrace.abort("user");
+  traceOf(target.id).abort("user");
   // Optimistic: do not wait for the RPC abort response.
   target.rpc.send({ type: "abort" });
   clearAbortTimer();
@@ -2237,7 +2367,7 @@ ipcMain.handle("pi:new-session", async (_event, runtimeId?: string) => {
       bindDefaultSession(null);
       pointKernelsAt(null);
       writeWorkspaceState({ lastSessionFile: null });
-      void resetBudgetBaseline();
+      void resetBudgetBaseline(target.id);
     } else {
       const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
       const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
@@ -3206,12 +3336,12 @@ ipcMain.handle("pi:state", async () => {
   const state = res.data as SessionState;
   const file = normalizeSessionFile(state?.sessionFile);
   if (file) {
+    const switched = file !== currentSessionFile;
     state.sessionFile = file;
     currentSessionFile = file;
-    defaultRuntime.setSessionFile(file);
-    planGate.approved = false;
-    planGate.planPath = null;
-    planGate.digest = null;
+    // 走登记表，别绕过它——否则内核键与 ServiceHub 的会话会落后（M2）
+    bindDefaultSession(file);
+    if (switched) resetPlanGate(`session:${sessionKey(file)}`);
     if (existsSync(file)) writeWorkspaceState({ lastSessionFile: file });
   }
   return state;
@@ -3878,10 +4008,10 @@ ipcMain.handle("pi:switch-session", async (_event, file: string, runtimeId?: str
       pointKernelsAt(target);
       defaultRuntime.setSessionFile(target);
       writeWorkspaceState({ lastSessionFile: target });
-      void resetBudgetBaseline();
     } else {
       slotPool.bindSession(runtime.id, target);
     }
+    void resetBudgetBaseline(runtime.id);
     const key = sessionMetaKey(target);
     if (workspaceRoot && key && existsSync(join(sessionDir, key))) {
       patchSessionMeta(workspaceRoot, key, { lastOpenedAt: new Date().toISOString() });
@@ -5573,8 +5703,13 @@ app.whenReady().then(async () => {
     grants,
     audit: (entry) => auditLog?.write(entry),
     getSettingsPolicy: () => settingsPolicyPath,
-    getPlanGate: () => ({ enabled: planGate.enabled, approved: planGate.approved }),
-    revalidatePlan: () => revalidatePlanGate(),
+    // 修改 4 · M2：方案期与权限档都按会话取，A 批准了不代表 B 也批准
+    getPlanGate: (ctx) => {
+      const gate = planGateFor(planKeyOf(ctx));
+      return { enabled: gate.enabled, approved: gate.approved };
+    },
+    revalidatePlan: (ctx) => revalidatePlanGate(planKeyOf(ctx)),
+    modeFor: (ctx) => permissionModeFor(ctx),
     resolveRuntime: (token) => {
       const binding = runtimeManager.services.resolve(token);
       return binding
