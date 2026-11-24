@@ -764,6 +764,9 @@ function applyRuntimeServiceEnv(runtime: SessionRuntime): void {
     OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
     OMCP_ARTIFACTS_TOKEN: runtime.token,
     OMCP_PLUGINS: JSON.stringify(enabledFamilyKeys(appSettings.plugins)),
+    // 修改 4 · M4：子任务继承本槽的 provider/model（否则子进程用默认配置，可能指向被禁的模型）
+    OMCP_PROVIDER: runtime.supervisor.getProvider(),
+    OMCP_MODEL: runtime.supervisor.getModel(),
     // 修改 4 · M4：子任务并发闸 + 子 agent 名册位置
     OMCP_GATE_URL: subagentGateServer?.url ?? "",
     OMCP_GATE_TOKEN: subagentGateServer?.token ?? "",
@@ -5974,6 +5977,14 @@ app.whenReady().then(async () => {
   // 修改 4 · M4：子任务并发闸的入口（扩展进程来领名额）
   subagentGateServer = await startSubagentGateServer(subagentGate, {
     onError: (message) => console.error("[子任务闸]", message),
+    // 子进程要继承这个槽**此刻**的 provider/model（env 是建进程那一刻的快照，换过模型就旧了）
+    modelFor: (key) => {
+      const runtime = runtimeManager.get(key);
+      return {
+        provider: runtime?.supervisor.getProvider() || undefined,
+        model: runtime?.supervisor.getModel() || undefined,
+      };
+    },
   });
   browserService = new BrowserService({
     playwrightDir: app.isPackaged

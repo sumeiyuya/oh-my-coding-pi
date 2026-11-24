@@ -36,6 +36,9 @@ interface ToolResult {
 
 interface ExtensionAPI {
   registerTool(definition: Record<string, unknown>): void;
+  /** 下面两个是可选的：不同版本 pi 的暴露程度不同，有就用 */
+  getActiveTools?(): string[];
+  setActiveTools?(names: string[]): void;
 }
 
 const MAX_TASKS = 8;
@@ -140,11 +143,20 @@ function textOfContent(content: unknown): string {
     .join("");
 }
 
-function runChild(agent: AgentConfig, task: string, signal: AbortSignal): Promise<ChildOutcome> {
+function runChild(
+  agent: AgentConfig,
+  task: string,
+  signal: AbortSignal,
+  inherited: { provider?: string; model?: string } = {},
+): Promise<ChildOutcome> {
   const promptDir = mkdtempSync(join(tmpdir(), "omcp-subagent-"));
   const promptPath = join(promptDir, "system.md");
   const args = ["--mode", "json", "-p", "--no-session"];
-  if (agent.model) args.push("--model", agent.model);
+  // 继承父会话的 provider/model：子进程没有自己的默认值，不传就会落到 pi 的全局默认
+  const provider = (inherited.provider ?? process.env.OMCP_PROVIDER)?.trim();
+  const model = agent.model ?? (inherited.model ?? process.env.OMCP_MODEL)?.trim();
+  if (provider) args.push("--provider", provider);
+  if (model) args.push("--model", model);
   if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
   if (agent.systemPrompt.trim()) {
     writeFileSync(promptPath, agent.systemPrompt, "utf8");
@@ -261,7 +273,9 @@ function runChild(agent: AgentConfig, task: string, signal: AbortSignal): Promis
 /* 主进程的并发闸                                                      */
 /* ------------------------------------------------------------------ */
 
-async function leaseGate(key: string): Promise<{ ok: boolean; reason?: string; release: () => void }> {
+async function leaseGate(
+  key: string,
+): Promise<{ ok: boolean; reason?: string; release: () => void; provider?: string; model?: string }> {
   const url = process.env.OMCP_GATE_URL;
   const token = process.env.OMCP_GATE_TOKEN;
   if (!url || !token) {
@@ -274,6 +288,10 @@ async function leaseGate(key: string): Promise<{ ok: boolean; reason?: string; r
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ key }),
     });
+    const payload = (await response.json().catch(() => ({}))) as {
+      provider?: string;
+      model?: string;
+    };
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       return {
@@ -284,6 +302,8 @@ async function leaseGate(key: string): Promise<{ ok: boolean; reason?: string; r
     }
     return {
       ok: true,
+      ...(payload.provider ? { provider: payload.provider } : {}),
+      ...(payload.model ? { model: payload.model } : {}),
       release: () => {
         void fetch(`${url}/subagent/release`, {
           method: "POST",
@@ -322,16 +342,34 @@ function line(name: string, outcome: ChildOutcome): string {
   }`;
 }
 
+/** 兼容两种写法：JSON 数组（主进程实际下发的）与逗号串（人手调试时的） */
+export function readPluginFamilies(raw: string | undefined): string[] {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (Array.isArray(parsed)) return parsed.map((x) => String(x).trim()).filter(Boolean);
+    } catch {
+      // 掉到逗号切分
+    }
+  }
+  return text
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
 export default function subagentExt(api: ExtensionAPI): void {
-  const families = new Set(
-    String(process.env.OMCP_PLUGINS ?? "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean),
-  );
+  /**
+   * `OMCP_PLUGINS` 是**主进程下发的 JSON 数组**（`JSON.stringify(enabledFamilyKeys(...))`），
+   * 不是逗号串。按逗号切会得到 `['["subagent"]']`，于是这里永远 return，
+   * 工具一个都不注册——GUI 冒烟里"模型找不到工具"的真正原因就是这个。
+   */
+  const families = new Set(readPluginFamilies(process.env.OMCP_PLUGINS));
   if (!families.has("subagent")) return;
 
-  api.registerTool({
+  const registered = {
     name: "subagent",
     label: "子任务",
     description:
@@ -371,13 +409,22 @@ export default function subagentExt(api: ExtensionAPI): void {
       },
       additionalProperties: false,
     },
-    async execute(params: {
-      agent?: string;
-      task?: string;
-      tasks?: TaskInput[];
-      chain?: TaskInput[];
-      mode?: string;
-    }): Promise<ToolResult> {
+    /**
+     * pi 的签名是 `execute(toolCallId, params, signal, onUpdate, ctx)`——
+     * **第一个参数不是 params**。写成 `execute(params)` 会拿到一个字符串，
+     * `params.agent` 永远 undefined，于是 single 模式永远报"需要 agent 与 task"。
+     * GUI 冒烟里那条错误就是这么来的。
+     */
+    async execute(
+      _toolCallId: string,
+      params: {
+        agent?: string;
+        task?: string;
+        tasks?: TaskInput[];
+        chain?: TaskInput[];
+        mode?: string;
+      },
+    ): Promise<ToolResult> {
       const cwd = process.env.OMCP_CWD || process.cwd();
       const agents = discoverAgents(cwd, process.env.OMCP_AGENTS_DIR);
       const byName = new Map(agents.map((a) => [a.name, a]));
@@ -413,7 +460,7 @@ export default function subagentExt(api: ExtensionAPI): void {
           let previous = "";
           for (const [index, task] of tasks.entries()) {
             const text = task.task.split("{previous}").join(previous);
-            const outcome = await runChild(byName.get(task.agent)!, text, abort.signal);
+            const outcome = await runChild(byName.get(task.agent)!, text, abort.signal, gate);
             results.push(line(task.agent, outcome));
             if (!outcome.ok) {
               return {
@@ -433,7 +480,7 @@ export default function subagentExt(api: ExtensionAPI): void {
             const index = next++;
             if (index >= tasks.length) return;
             const task = tasks[index]!;
-            const outcome = await runChild(byName.get(task.agent)!, task.task, abort.signal);
+            const outcome = await runChild(byName.get(task.agent)!, task.task, abort.signal, gate);
             results[index] = line(task.agent, outcome);
           }
         };
@@ -445,7 +492,22 @@ export default function subagentExt(api: ExtensionAPI): void {
         gate.release();
       }
     },
-  });
+  };
+
+  api.registerTool(registered);
+  /**
+   * **必须显式激活**（GUI 冒烟抓到的）。
+   *
+   * pi 的文档说"registerTool 默认就激活"，但实测在 `--mode rpc` 这条路上并没有：
+   * 工具在册，模型的工具清单里却没有它，于是模型只能去 `tool_search` 搜，
+   * 搜到之后还要过权限门——一次子任务调用会先卡着一张审批卡。
+   */
+  try {
+    const active = api.getActiveTools?.() ?? [];
+    if (!active.includes("subagent")) api.setActiveTools?.([...new Set([...active, "subagent"])]);
+  } catch {
+    // 老版本没有这两个 API：那就只好靠默认激活
+  }
 }
 
 export { THINKING_LEVELS };

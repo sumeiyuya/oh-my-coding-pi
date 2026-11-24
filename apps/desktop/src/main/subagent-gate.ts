@@ -160,7 +160,11 @@ function readBody(req: IncomingMessage, limit = 64 * 1024): Promise<string> {
  */
 export function startSubagentGateServer(
   gate: SubagentGate,
-  opts: { onError?: (message: string) => void } = {},
+  opts: {
+    onError?: (message: string) => void;
+    /** 领号时顺手告诉扩展：这个槽现在的 provider/model（子进程要继承它） */
+    modelFor?: (key: string) => { provider?: string; model?: string };
+  } = {},
 ): Promise<SubagentGateServer> {
   const token = randomBytes(24).toString("hex");
   const server = createServer((req, res) => {
@@ -201,8 +205,9 @@ export function startSubagentGateServer(
           );
           return;
         }
+        const route = opts.modelFor?.(key) ?? {};
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true, ...gate.snapshot() }));
+        res.end(JSON.stringify({ ok: true, ...gate.snapshot(), ...route }));
         return;
       }
       if (path === "/subagent/release") {

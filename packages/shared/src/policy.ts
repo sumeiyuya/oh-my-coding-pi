@@ -15,7 +15,7 @@ export const DEFAULT_POLICY: PolicyConfig = {
   version: 1,
   mode: "ask",
   tools: {
-    allow: ["read", "grep", "find", "ls", "glob", "edit", "write", "bash", "run_code", "memory_list", "browser_status", "browser_snapshot", "browser_elements"],
+    allow: ["read", "grep", "find", "ls", "glob", "edit", "write", "bash", "run_code", "memory_list", "browser_status", "browser_snapshot", "browser_elements", "subagent"],
     deny: [],
   },
   paths: {

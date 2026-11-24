@@ -135,7 +135,7 @@ function memoryTools(plugin: PluginDef, families: Set<string>) {
         required: ["target", "content"],
         additionalProperties: false,
       },
-      async execute(params: {
+      async execute(_toolCallId: string, params: {
         target: "user" | "memory" | "key";
         content: string;
         reason?: string;
@@ -185,7 +185,7 @@ function memoryTools(plugin: PluginDef, families: Set<string>) {
         },
         additionalProperties: false,
       },
-      async execute(params: { target?: string; filter?: string; limit?: number }): Promise<ToolResult> {
+      async execute(_toolCallId: string, params: { target?: string; filter?: string; limit?: number }): Promise<ToolResult> {
         const limit = Math.max(1, Math.min(200, Math.floor(params.limit ?? 30)));
         const needle = (params.filter ?? "").trim().toLowerCase();
         const keep = (e: MemoryEntry) => {
@@ -233,7 +233,7 @@ function memoryTools(plugin: PluginDef, families: Set<string>) {
         required: ["name", "description", "body"],
         additionalProperties: false,
       },
-      async execute(params: { name: string; description: string; body: string }): Promise<ToolResult> {
+      async execute(_toolCallId: string, params: { name: string; description: string; body: string }): Promise<ToolResult> {
         const name = String(params.name ?? "").trim();
         if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
           throw new Error("技能名必须是 kebab-case（小写字母、数字、连字符）");

@@ -67,3 +67,18 @@ test("坏文件不影响其它条目", (t) => {
   const list = discoverAgents(dir);
   assert.deepEqual(list.map((a) => a.name), ["good"]);
 });
+
+/** OMCP_PLUGINS 是主进程下发的 JSON 数组；按逗号切会读不到，工具就不注册。 */
+import { readPluginFamilies } from "../src/index.ts";
+
+test("从 JSON 数组读族键（主进程实际下发的形状）", () => {
+  assert.deepEqual(readPluginFamilies('["subagent"]'), ["subagent"]);
+  assert.deepEqual(readPluginFamilies('["memory.propose","subagent"]'), ["memory.propose", "subagent"]);
+});
+
+test("也接受逗号串（人手调试）与空值", () => {
+  assert.deepEqual(readPluginFamilies("subagent"), ["subagent"]);
+  assert.deepEqual(readPluginFamilies("a, b"), ["a", "b"]);
+  assert.deepEqual(readPluginFamilies(""), []);
+  assert.deepEqual(readPluginFamilies(undefined), []);
+});

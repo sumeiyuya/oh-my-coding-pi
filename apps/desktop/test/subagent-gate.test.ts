@@ -69,3 +69,45 @@ test("dispose 把还在等的都拒掉", async () => {
   gate.dispose();
   await assert.rejects(() => pending, /已关闭/);
 });
+
+/* 真实的 HTTP 入口：扩展进程就是这么领名额的 */
+import { startSubagentGateServer } from "../src/main/subagent-gate.ts";
+
+test("闸口：领满之后第 N+1 个拿到 429，还号后能再领", async (t) => {
+  const gate = new SubagentGate({ capacity: 1 });
+  const server = await startSubagentGateServer(gate);
+  t.after(() => server.close());
+
+  const call = async (path: string, key: string, timeoutMs = 800) => {
+    const response = await fetch(`${server.url}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${server.token}` },
+      body: JSON.stringify({ key, timeoutMs }),
+    });
+    return { status: response.status, body: await response.text() };
+  };
+
+  const first = await call("/subagent/lease", "slot-1");
+  assert.equal(first.status, 200);
+  assert.match(first.body, /"overflow"/.test(first.body) ? /overflow/ : /"inUse":1/);
+
+  const second = await call("/subagent/lease", "slot-2");
+  assert.equal(second.status, 429, "第二个应当被挡住");
+  assert.match(second.body, /名额已满/);
+
+  await call("/subagent/release", "slot-1");
+  const third = await call("/subagent/lease", "slot-2");
+  assert.equal(third.status, 200);
+});
+
+test("闸口：没有 token 一律 401", async (t) => {
+  const gate = new SubagentGate({ capacity: 1 });
+  const server = await startSubagentGateServer(gate);
+  t.after(() => server.close());
+  const response = await fetch(`${server.url}/subagent/lease`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "x" }),
+  });
+  assert.equal(response.status, 401);
+});
