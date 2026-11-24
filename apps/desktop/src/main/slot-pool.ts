@@ -447,6 +447,9 @@ export class SlotPool<T extends SlotRuntime = SlotRuntime> {
     const slot = this.slots.get(slotId);
     if (!slot) return;
     if (file) {
+      // 外部传来的会话文件可能是 pi 刚建的（`pi:state` 第一次报上来）：
+      // 先登记再绑定，否则 registry.bind 会以"没有登记过"拒绝。
+      this.registry.upsert({ file, workspace: slot.workspace });
       this.bind(slot, file);
     } else {
       this.registry.unbind(slotId, "suspended");

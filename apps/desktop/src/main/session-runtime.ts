@@ -62,6 +62,16 @@ export class SessionRuntime {
     this.workspaceRoot = opts.workspaceRoot ?? "";
     this.currentSessionFile = opts.sessionFile ?? null;
     this.supervisor = new PiSupervisor(opts.provider ?? "", opts.model ?? "");
+    /**
+     * 修改 4 · M3（GUI 冒烟抓到的）：构造时就必须把 cwd 与 --session 交给 supervisor。
+     *
+     * 之前只在 `setWorkspace()` / `setSessionFile()` 里设，而"新建槽"走的正是
+     * 构造参数——于是后台会话的 pi 一直以 **Electron 的启动目录** 为 cwd 跑：
+     * `--session-dir` 是绝对路径，所以会话文件照旧落在工作区，问题被掩盖了；
+     * 但 agent 的相对路径工具（read/bash/grep）、AGENTS.md 全指向错的地方。
+     */
+    if (opts.workspaceRoot) this.supervisor.setCwd(opts.workspaceRoot);
+    if (opts.sessionFile) this.supervisor.setSessionFile(opts.sessionFile);
     this.rpc = new RpcClient();
     this.pump = new EventPump({
       emit: (ev) => {

@@ -82,3 +82,25 @@ test("事件泵：dispose 前把缓冲的文本冲出来", () => {
   assert.equal(runtime.busy, false);
   runtime.dispose();
 });
+
+test("构造参数里的 workspace 与 session 必须落到 supervisor（cwd 不能是启动目录）", () => {
+  const seen: string[] = [];
+  const runtime = new SessionRuntime({
+    id: "slot-x",
+    provider: "p",
+    model: "m",
+    emit: () => {},
+    pumpEnabled: false,
+    workspaceRoot: "D:/proj",
+    sessionFile: "D:/proj/.omcp/sessions/a.jsonl",
+  });
+  const sup = runtime.supervisor as unknown as {
+    cwd?: string;
+    sessionFile?: string;
+    setCwd: (v: string) => void;
+  };
+  seen.push(String(sup.cwd), String(sup.sessionFile));
+  assert.equal(sup.cwd, "D:/proj", "cwd 必须是工作区");
+  assert.equal(sup.sessionFile, "D:/proj/.omcp/sessions/a.jsonl");
+  runtime.dispose();
+});

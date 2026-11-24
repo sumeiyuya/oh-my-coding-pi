@@ -345,6 +345,8 @@ function markSlotCrash(runtimeId: string): void {
   if (file) {
     sessionRegistry.setState(file, outcome.state);
     transcriptHub.system(key, outcome.note);
+    // 中枢里有了还不够：正在看这段会话的人应当**马上**看到，而不是切走再回来
+    send("session:note", { file, text: outcome.note });
   }
   send("session:changed", sessionBoard());
 }
@@ -374,6 +376,14 @@ const slotPool = new SlotPool({
     });
     // 修改 4 · M3：后台槽崩溃也要有痕迹（默认槽由它自己的 exit 接线管）
     runtime.supervisor.on("exit", () => markSlotCrash(id));
+    // 崩溃后 supervisor 会退避重启；探到就绪就推一次，界面据此把手收回来。
+    // 不探的话 ready 永远是 false，输入框会一直显示"pi 正在启动"。
+    runtime.supervisor.on("spawn", () => {
+      void runtime
+        .waitReady(120_000)
+        .then(() => send("session:changed", sessionBoard()))
+        .catch(() => undefined);
+    });
     return runtime;
   },
   disposeSlot: (slot) => {
@@ -417,6 +427,7 @@ if (!SELFTEST) {
           "内核已因空闲关闭：变量已清空，再运行代码会重新启动内核。",
         );
       }
+      if (file) send("session:note", { file, text: "内核已因空闲关闭：变量已清空，再运行代码会重新启动内核。" });
       send("session:kernel-reaped", { key: item.key, file });
     }
   }, 60_000);
@@ -2380,7 +2391,7 @@ ipcMain.handle(
  */
 async function ensureSlotReady(
   target: SessionRuntime,
-  timeoutMs = 15_000,
+  timeoutMs = 60_000,
 ): Promise<PromptResult | null> {
   if (target.id === "default") {
     return piReady ? null : { ok: false, error: "pi 正在启动，请稍候再发送" };

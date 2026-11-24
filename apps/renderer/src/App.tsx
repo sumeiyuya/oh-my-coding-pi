@@ -351,6 +351,11 @@ export default function App() {
   /** Esc 取消时输入框卸载会触发 blur，用标记拦住那次误提交 */
   const renameCancelled = useRef(false);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
+  /** 事件回调里要读"此刻打开的是哪个会话"，state 在这里是过期的 */
+  const currentFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    currentFileRef.current = currentFile;
+  }, [currentFile]);
   const [openTabs, setOpenTabs] = useState<string[]>(readTabs);
   /** 草稿和滚动位置只存内存：关掉应用就没了，不假装持久化。 */
   const draftsRef = useRef<Record<string, string>>({});
@@ -690,10 +695,31 @@ export default function App() {
         if (alive) setBoard(next as SessionBoardView);
       })
       .catch(() => undefined);
-    const off = window.api.onSessionChanged((next) => setBoard(next as SessionBoardView));
+    // 修改 4 · M3：忙/闲以主进程的槽表为准。崩溃时 `agent_settled` 永远不会来，
+    // 渲染端自己攒的 busy 就会一直挂着（输入框变成"追加"，发不出话）。
+    const off = window.api.onSessionChanged((next) => {
+      const view = next as SessionBoardView;
+      setBoard(view);
+      setBusyByRuntime((prev) => {
+        const merged = { ...prev };
+        for (const slot of view.slots) merged[slot.id] = slot.busy;
+        return merged;
+      });
+    });
     const offOpen = window.api.onSessionOpened((payload) => {
       const file = (payload as { file?: string }).file;
       if (file) setNotice(`排队的会话已空出位置并打开：${file.split(/[\/]/).pop() ?? file}`);
+    });
+    // 修改 4 · M3：崩溃中断、内核回收这类系统提示，主进程会同时推进中枢与界面；
+    // 正在看着这段会话的人应当马上看到，不必切走再回来。
+    const offNote = window.api.onSessionNote((payload) => {
+      const { file, text } = payload as { file?: string; text?: string };
+      if (!file || !text) return;
+      if (currentFileRef.current && file !== currentFileRef.current) return;
+      setMessages((prev) => [
+        ...prev,
+        { kind: "system", id: `note-${Date.now()}`, text },
+      ]);
     });
     // 修改 4 · M2：内核按会话回收，关掉就没有变量了——这件事必须说出来
     const offReaped = window.api.onKernelReaped((payload) => {
@@ -706,6 +732,7 @@ export default function App() {
       off();
       offOpen();
       offReaped();
+      offNote();
     };
   }, []);
 
