@@ -133,6 +133,7 @@ type P1Api = Pick<
   | "closeSession"
   | "onSessionChanged"
   | "onSessionOpened"
+  | "onKernelReaped"
 >;
 
 declare global {

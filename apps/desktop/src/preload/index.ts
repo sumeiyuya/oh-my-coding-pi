@@ -227,6 +227,11 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("session:changed", listener);
     return () => ipcRenderer.removeListener("session:changed", listener);
   },
+  onKernelReaped: (cb: (payload: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown) => cb(payload);
+    ipcRenderer.on("session:kernel-reaped", listener);
+    return () => ipcRenderer.removeListener("session:kernel-reaped", listener);
+  },
   onSessionOpened: (cb: (payload: unknown) => void): (() => void) => {
     const listener = (_event: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on("session:opened", listener);

@@ -750,10 +750,17 @@ export default function App() {
       const file = (payload as { file?: string }).file;
       if (file) setNotice(`排队的会话已空出位置并打开：${file.split(/[\/]/).pop() ?? file}`);
     });
+    // 修改 4 · M2：内核按会话回收，关掉就没有变量了——这件事必须说出来
+    const offReaped = window.api.onKernelReaped((payload) => {
+      const file = (payload as { file?: string | null }).file;
+      const name = file ? file.split(/[\/]/).pop() : "后台会话";
+      setNotice(`「${name}」的内核空闲已关闭，变量已清空；下次运行代码会重新启动。`);
+    });
     return () => {
       alive = false;
       off();
       offOpen();
+      offReaped();
     };
   }, []);
 

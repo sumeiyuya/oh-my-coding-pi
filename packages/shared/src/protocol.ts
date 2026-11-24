@@ -1482,6 +1482,8 @@ export interface PreloadApi {
   closeSession(file: string): Promise<SessionBoardView>;
   onSessionChanged(cb: (board: SessionBoardView) => void): () => void;
   onSessionOpened(cb: (payload: { file: string }) => void): () => void;
+  /** 会话内核因空闲被回收（变量已清空） */
+  onKernelReaped(cb: (payload: { key: string; file: string | null }) => void): () => void;
 }
 
 export type IpcRequest =

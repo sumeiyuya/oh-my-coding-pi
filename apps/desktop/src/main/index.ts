@@ -59,7 +59,7 @@ import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX, UPLOAD_IMAGE_MAX_BYTES, UPLOAD
 import { isThinkingLevel } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
 import { SessionRuntime } from "./session-runtime";
-import { KernelManager } from "./kernel-manager";
+import { KernelManager, kernelKeyFor } from "./kernel-manager";
 import { RuntimeManager } from "./runtime-manager";
 import { SessionRegistry } from "./session-registry";
 import { SlotPool } from "./slot-pool";
@@ -161,6 +161,8 @@ let kernelManager: KernelManager | null = null;
 let runtimeExtensions: string[] = [];
 let pythonKernel: KernelService | null = null;
 let rKernel: KernelService | null = null;
+/** 这两个别名此刻指向哪个会话的内核（M2） */
+let kernelAliasKey: string | null = null;
 let kernelBroker: KernelBroker | null = null;
 let browserService: BrowserService | null = null;
 let grants: GrantStore | null = null;
@@ -284,7 +286,7 @@ const slotPool = new SlotPool({
     }),
   disposeSlot: (slot) => {
     cancelPendingApprovals(slot.id);
-    kernelManager?.dispose(slot.id);
+    // 内核跟着会话走：关槽不动内核，交给空闲回收（M2）
     runtimeAuditLogs.delete(slot.id);
     runtimeManager.forget(slot.id);
     slot.dispose();
@@ -294,6 +296,8 @@ const slotPool = new SlotPool({
   pinnedSlots: ["default"],
   onBind: (slotId, file) => {
     runtimeManager.updateSession(slotId, file);
+    // 绑定发生在 activeId 改之前，所以按"绑的是不是可见那段"判断，不按槽
+    if (file && file === currentSessionFile) pointKernelsAt(file);
   },
   onDequeued: (_slotId, file) => {
     send("session:opened", { file });
@@ -310,6 +314,15 @@ if (!SELFTEST) {
   const reaper = setInterval(() => {
     const stopped = slotPool.reapIdle(Math.max(1, appSettings.runtimeIdleMinutes) * 60_000);
     if (stopped.length) send("runtime:changed", runtimeManager.list());
+    // 内核按会话回收：关掉就不再有变量，必须说出来（M2）
+    const reapedKernels = kernelManager?.reapIdle(kernelIdleMs()) ?? [];
+    for (const item of reapedKernels) {
+      if (!item.wasRunning) continue;
+      send("session:kernel-reaped", {
+        key: item.key,
+        file: item.key.startsWith("session:") ? item.key.slice("session:".length) : null,
+      });
+    }
   }, 60_000);
   reaper.unref?.();
 }
@@ -1036,7 +1049,8 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   planGate.approved = false;
   planGate.planPath = null;
   planGate.digest = null;
-  kernelManager?.setWorkspace("default", resolved);
+  // 内核按会话记（M2）：这里只把可见会话的那对指到新工作区
+  pointKernelsAt(currentSessionFile ?? null);
   scheduleKernelPrewarm();
   sessionDir = newSessionDir;
   invalidateWorkspaceIndex();
@@ -1425,6 +1439,31 @@ function sessionBoard(): SessionBoardView {
     activeSlotId: slotPool.activeSlotId,
     maxSlots: slotPool.max,
   };
+}
+
+/**
+ * 把笔记本用的 `pythonKernel` / `rKernel` 指到**当前可见会话**的那一对（M2）。
+ *
+ * 这两个变量以前是全局单例（切会话就串台）。现在它们只是"别名的指针"：
+ * 真正的归属在 `kernelManager` 里按会话记，指针指错了只是界面显示错，
+ * 不会影响 run_code 走 broker 的那条路（那条按 token → 会话解析）。
+ */
+function pointKernelsAt(sessionFile: string | null): void {
+  if (!kernelManager) return;
+  const key = kernelKeyFor(sessionFile, slotPool?.activeSlotId ?? "default");
+  const pair = kernelManager.get(key, workspaceRoot);
+  pythonKernel = pair.python;
+  rKernel = pair.r;
+  kernelAliasKey = key;
+}
+
+/**
+ * 内核空闲多久算过期（M2）：默认 10 分钟，`OMCP_KERNEL_IDLE_MINUTES` 可调。
+ * 内核比 pi 进程贵（100–300 MB），但变量是会话的资产，所以给一个明确、可解释的期限。
+ */
+function kernelIdleMs(): number {
+  const minutes = Number(process.env.OMCP_KERNEL_IDLE_MINUTES ?? 10);
+  return Math.max(1, Number.isFinite(minutes) ? minutes : 10) * 60_000;
 }
 
 /** 默认槽换绑会话：supervisor 的 `--session`、ServiceHub、会话登记表三处一起改 */
@@ -2196,6 +2235,7 @@ ipcMain.handle("pi:new-session", async (_event, runtimeId?: string) => {
       currentSessionFile = null;
       applyPermissionMode();
       bindDefaultSession(null);
+      pointKernelsAt(null);
       writeWorkspaceState({ lastSessionFile: null });
       void resetBudgetBaseline();
     } else {
@@ -3348,6 +3388,7 @@ ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpen
   });
   currentSessionFile = target;
   applyPermissionMode();
+  pointKernelsAt(target);
   sessionRegistry.clearUnread(target);
   if (existsSync(target)) writeWorkspaceState({ lastSessionFile: target });
   return { ...outcome, board: sessionBoard() };
@@ -3409,6 +3450,8 @@ ipcMain.handle("runtime:stats", async (_event, id: string) => {
 
 ipcMain.handle("runtime:activate", async (_event, id: string) => {
   await slotPool.activate(String(id)).catch(() => undefined);
+  const bound = slotPool.get(String(id))?.sessionFile ?? null;
+  if (bound) pointKernelsAt(bound);
   return runtimeManager.list();
 });
 
@@ -3832,6 +3875,7 @@ ipcMain.handle("pi:switch-session", async (_event, file: string, runtimeId?: str
     if (runtime.id === "default") {
       currentSessionFile = target;
       applyPermissionMode();
+      pointKernelsAt(target);
       defaultRuntime.setSessionFile(target);
       writeWorkspaceState({ lastSessionFile: target });
       void resetBudgetBaseline();
@@ -5590,13 +5634,26 @@ app.whenReady().then(async () => {
   // 生成的 spec 放应用私有目录，不写用户的 %APPDATA%\jupyter
   const kernelSpecDir = join(app.getPath("userData"), "kernels");
   kernelManager = new KernelManager(sidecarPath, app.getPath("userData"), kernelSpecDir);
-  const defaultKernels = kernelManager.get("default");
-  pythonKernel = defaultKernels.python;
-  rKernel = defaultKernels.r;
-  pythonKernel.setPythonPath(appSettings.pythonPath);
-  rKernel.setRPath(appSettings.rPath);
+  kernelManager.setPythonPath(appSettings.pythonPath);
+  kernelManager.setRPath(appSettings.rPath);
+  pointKernelsAt(currentSessionFile ?? null);
+  /**
+   * legacy 全局 token 那一支用的"默认对"。
+   * 用取值器而不是快照：笔记本切会话时别名会换，broker 必须跟着换，
+   * 否则老 token 会把请求送到上一个会话的内核里（正是要修的那条串台）。
+   */
+  const aliasPair = {
+    get python(): KernelService {
+      if (!pythonKernel) throw new Error("内核管理器尚未就绪");
+      return pythonKernel;
+    },
+    get r(): KernelService {
+      if (!rKernel) throw new Error("内核管理器尚未就绪");
+      return rKernel;
+    },
+  };
   kernelBroker = new KernelBroker(
-    { python: pythonKernel, r: rKernel },
+    aliasPair,
     (data) => {
       saveFigure(data);
     },
@@ -5630,11 +5687,13 @@ app.whenReady().then(async () => {
         },
       });
     },
-    // P1b2b：runtime token → 该 runtime 的内核；legacy 全局 token 仍由 broker 兜底
+    // 修改 4 · M2：token → runtime → **会话** → 该会话的内核（换会话不再串台）
     (token) => {
       const binding = runtimeManager.services.resolve(token);
       if (!binding) return undefined;
-      const pair = kernelManager?.get(binding.runtimeId);
+      const key = kernelKeyFor(binding.session, binding.runtimeId);
+      // get() 自己会 touch lastUsedAt，空闲回收据此判断
+      const pair = kernelManager?.get(key, binding.workspace);
       return pair ? { runtimeId: binding.runtimeId, services: pair } : undefined;
     },
   );
@@ -5769,8 +5828,8 @@ app.on("before-quit", (event) => {
       }
     }
   }
-  pythonKernel?.shutdown();
-  rKernel?.shutdown();
+  // 内核按会话记（M2）：退出一律全关，别只关当前可见的那一对
+  kernelManager?.disposeAll();
   kernelBroker?.stop();
   setTimeout(() => app.quit(), 800);
   event.preventDefault();
