@@ -196,9 +196,16 @@ try {
 let s = await snapshot();
 if (s.sidebar.length === 0) {
   if (!(await waitIdleLocal())) record("等待空闲", "skip", "仍在运行，继续尝试新建");
+  const beforeCount = (await snapshot()).sidebar.length;
   await safeClick(".side-new");
   await page.waitForTimeout(600);
   await sendAndSettle("只回复两个字：收到");
+  // 新会话的文件是 pi 收到第一句之后才落盘的：等侧栏真的多出一条
+  await waitFor((st) => st.sidebar.length > beforeCount, {
+    timeout: 40_000,
+    interval: 500,
+    label: "第一个会话落盘",
+  }).catch(() => undefined);
 }
 // 标签是会话落盘、界面刷新之后才出现的，等它一下
 s = await waitFor((st) => st.tabs.length >= 1 && st.sidebar.length >= 1, {
@@ -219,9 +226,15 @@ const titleA = s.sidebar[0]?.title ?? "";
 /* ---------------------------------------------------------------- */
 let modelUsable = true;
 await waitIdleLocal();
+const sidebarBefore = (await snapshot()).sidebar.length;
 await safeClick(".side-new");
 await page.waitForTimeout(800);
 const second = await sendAndSettle("只回复两个字：第二");
+await waitFor((st) => st.sidebar.length > sidebarBefore, {
+  timeout: 40_000,
+  interval: 500,
+  label: "第二个会话落盘",
+}).catch(() => undefined);
 if (!second.ok) modelUsable = false;
 s = await waitFor((st) => st.tabs.length >= 2, { timeout: 40_000, interval: 500, label: "第二个标签" }).catch(
   () => snapshot(),
