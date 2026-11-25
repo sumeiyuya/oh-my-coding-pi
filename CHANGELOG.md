@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 0.7.0 — 2026-11-24
+
+修改 4「会话并发内核」全部落地（M0–M4）。上一版能把多个会话各跑一个 pi 进程，
+这一版把身份、转写、副作用与子任务补齐。
+
+### M0 会话身份与槽位准入
+
+- 新增 `session-registry`：会话文件 → 稳定记录（state/unread/slotId），Windows 大小写与斜杠归一，一槽同一时刻只绑一个会话。
+- 新增 `slot-pool`：六级准入（已绑 → 空闲槽 → 挂起槽复用 → 新建 → 停最久未用腾额度 → 排队），额度算「同时在跑的槽」，挂起不占；等审批的槽不可停。
+- 标签栏从「运行时」改成「会话」：标题、状态点、未读、排队位次；切标签不再因「忙」被禁止。
+- `SessionRuntime` 就绪以一次成功的 `get_state` 为判据（此前用 `rpc.attached`，进程在 ≠ 就绪）。
+
+### M1 转录中枢
+
+- 新增 `packages/shared/transcript.ts`：实时归约 `applyPiEvent` / `appendUserTurn` / `appendSystem`，主进程与渲染端共用一份（此前渲染端写了两份，前台与后台覆盖范围不同）。
+- 新增 `apps/desktop/src/main/transcript-hub.ts`：按会话维护 items + revision + unread；后台会话照样归约；条目有上限。
+- IPC `transcript:snapshot`；切回会话用快照整段覆盖；未读以主进程为准。
+
+### M2 副作用按会话
+
+- 内核键从 runtime 改成会话（修同一槽换会话时内核变量串台）；关标签不再销毁内核，改为 10 分钟空闲回收并明示「变量已清空」（`OMCP_KERNEL_IDLE_MINUTES`）。
+- 预算：统计缓存按槽分开，预算门量发起的那段会话；日账仍账号级、按增量累加。
+- 方案期：单对象 → `PlanGateBook`，A 批准不再给 B 放行，漂移只撤销那一段。
+- 权限档：`PolicyService.decide` 接受 `ctx.mode`，按 runtime → 会话现算。
+- 回合时序：一个槽一份。
+
+### M3 崩溃与换工作区
+
+- 崩溃标注：有回合在飞 → `interrupted` + 转写留「本轮被中断，可重发」；空闲崩溃 → 只留「已自动重启」；主动停不打扰。
+- 换工作区把这个工作区的后台槽全部收掉，旧队列丢弃。
+- 排队位次显示在标签上。
+- 崩溃后自动重启并恢复可用（渲染端忙/闲改以主进程槽表为准）。
+
+### M4 子任务通道
+
+- 新增 `packages/subagent-ext`：`subagent` 工具，single / parallel（≤8 任务、同时 ≤4）/ chain（`{previous}`），单任务墙钟 10 分钟、输出 50 KB 截断。
+- 子 agent 名册来自 `<工作区>/.omcp/agents/*.md` 与 `<userData>/agents/*.md`。
+- 新增 `apps/desktop/src/main/subagent-gate.ts`：**跨进程**并发闸（2 槽 × 4 子任务 = 8 个请求，不挡就整批 429）；领不到明确拒绝。
+- 子进程继承该槽此刻的 provider/model（由闸口下发）。
+- 族开关 `subagent`（默认关）；`DEFAULT_POLICY.tools.allow` 收录 `subagent`。
+
+### 修复（GUI 冒烟发现）
+
+- 后台槽的 pi 以 Electron 启动目录为 cwd（违反 ADR-035，`read`/`bash` 相对路径全错）。
+- `pi:state` 首次报上来的新会话没登记，`registry.bind` 抛错。
+- 崩溃提示只进中枢，可见会话要切走再回来才看得到。
+- 崩溃后渲染端 busy 不复位，输入框卡在「追加」。
+- 后台槽重启后不再探活，界面一直显示「pi 正在启动」。
+- `plugin-ext` 的 17 个工具 `execute(params)` 签名错误（第一个参数是 toolCallId）。
+- `OMCP_PLUGINS` 是 JSON 数组，扩展按逗号切分导致工具不注册。
+
+
 ## 0.6.11 — 2026-11-23
 
 ### 修改 3 · P3a：runtime 上限与空闲回收

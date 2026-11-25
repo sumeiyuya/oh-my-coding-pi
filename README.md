@@ -12,9 +12,9 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 
 ## 版本
 
-- 当前版本：**0.6.11**（2026-11-23）
-- 发布说明：[`docs/release-notes-0.6.11.md`](docs/release-notes-0.6.11.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
-- 安装包：[GitHub Release v0.6.11](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.11)
+- 当前版本：**0.7.0**（2026-11-24）
+- 发布说明：[`docs/release-notes-0.7.0.md`](docs/release-notes-0.6.11.md) · 变更日志：[`CHANGELOG.md`](CHANGELOG.md)
+- 安装包：[GitHub Release v0.7.0](https://github.com/sumeiyuya/oh-my-coding-pi/releases/tag/v0.6.11)
 - 平台：Windows 10/11 x64（按当前用户安装，不需要管理员）
 
 ## 能做什么
@@ -22,6 +22,8 @@ Windows 桌面科研分析工具：**pi** 负责模型、工具循环、会话�
 | 方面 | 能力 |
 |---|---|
 | 对话 | pi 工具循环、流式输出、工具调用分组折叠、运行中排队/立刻转向、会话树与 fork、技能、分析路线、方案期只读门 |
+| 并发 | **标签=会话、进程=可回收的槽**：切走不停、满员挂起最久未用、排队显示位次；转写与未读在主进程，刷新不丢 |
+| 子任务 | `subagent`：单发 / 并行（≤8、同时 ≤4）/ 串行链；跨进程并发闸，领不到名额明确拒绝 |
 | 上传 | 输入框 `＋`：上传文件 / 图片 / 数据；工作区内引用、工作区外复制到 `.omcp/uploads`；审计与进度 |
 | 内核 | Python / R 常驻内核、串行执行队列、变量面板、图片自动落 `figures/`、表格由分析代码写 `results/tables/` |
 | 笔记本 | cell 执行与输出、语言切换、只读模式下可配置是否允许执行 |
