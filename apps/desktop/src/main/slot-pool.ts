@@ -409,10 +409,22 @@ export class SlotPool<T extends SlotRuntime = SlotRuntime> {
       .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0];
   }
 
-  /** 可停的槽：运行中、空闲、非可见、不在等审批；最久未用先 */
+  /**
+   * 可停的槽：运行中、空闲、非可见、不在等审批；最久未用先。
+   *
+   * **启动中的不在此列**：它 `isRunning=true` 但 `busy=false`，正好会被挑中，
+   * 表现就是"刚打开就挂起，再点一次才起来"（0.7.1 · B4）。
+   */
   private stoppable(visibleSlotId: string | null): T | undefined {
     return [...this.slots.values()]
-      .filter((slot) => slot.isRunning && slot.id !== visibleSlotId && !slot.busy && !this.isBlocked(slot.id))
+      .filter(
+        (slot) =>
+          slot.isRunning &&
+          slot.id !== visibleSlotId &&
+          !slot.busy &&
+          !this.starting.has(slot.id) &&
+          !this.isBlocked(slot.id),
+      )
       .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0];
   }
 

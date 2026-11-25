@@ -12,10 +12,16 @@
  *   2) node scripts/smoke-sessions.mjs            # 默认连 127.0.0.1:9333
  *
  * 会真的向模型发几句话（每句都很短）。模型不可用时相应步骤标 SKIP，不当作失败。
+ *
+ * 0.7.1 起另含两项：
+ *   S7 换工作区 —— 直接调 workspace:open（绕开原生选择框），确认旧工作区的槽被收掉；
+ *   S8 子任务闸 —— 空闲时 inUse=0、跑一轮子任务期间 inUse≥1、结束后回到 0。
+ * 打包态冒烟仍需人工：装一次 → 开两个会话 → 切标签（脚本驱动不了安装包）。
  */
 import playwright from "../apps/desktop/node_modules/playwright-core/index.js";
 const { chromium } = playwright;
 import { execFileSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
 
 const CDP = process.env.OMCP_SMOKE_CDP ?? "http://127.0.0.1:9333";
 const MODEL_HINT = process.env.OMCP_SMOKE_MODEL ?? "deepseek-v4.1-flash";
@@ -32,6 +38,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const browser = await chromium.connectOverCDP(CDP);
 const page = browser.contexts()[0].pages()[0];
 await page.waitForLoadState("domcontentloaded");
+
+/** 等 pi 真的就绪：冷启动 40–90 秒都见过，固定 sleep 会误判成"模型不可用" */
+async function waitPiReady(timeoutMs = 150_000) {
+  const started = Date.now();
+  for (;;) {
+    const ready = await page.evaluate(() => window.api.isPiReady().catch(() => false));
+    if (ready === true) return true;
+    if (Date.now() - started > timeoutMs) return false;
+    await sleep(1000);
+  }
+}
+if (!(await waitPiReady())) {
+  console.log("pi 在 150 秒内没有就绪，后续步骤会大量 SKIP");
+}
 
 async function snapshot() {
   return page.evaluate(() => {
@@ -70,6 +90,28 @@ async function waitFor(predicate, { timeout = 90_000, interval = 500, label = ""
       throw new Error(`等待超时：${label}\n最后一次状态：${JSON.stringify(s.tabs)} | ${s.count}`);
     }
     await sleep(interval);
+  }
+}
+
+/** 等到当前没有会话在跑（点击"新建"这类按钮在 busy 时是 disabled 的） */
+async function waitIdleLocal(timeoutMs = 180_000) {
+  const started = Date.now();
+  for (;;) {
+    const busy = await page.evaluate(() =>
+      window.api.getSessionBoard().then((b) => b.sessions.some((x) => x.busy)),
+    );
+    if (!busy) return true;
+    if (Date.now() - started > timeoutMs) return false;
+    await sleep(1000);
+  }
+}
+
+async function safeClick(selector, timeout = 10_000) {
+  try {
+    await page.click(selector, { timeout });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -153,7 +195,8 @@ try {
 /* ---------------------------------------------------------------- */
 let s = await snapshot();
 if (s.sidebar.length === 0) {
-  await page.click(".side-new");
+  if (!(await waitIdleLocal())) record("等待空闲", "skip", "仍在运行，继续尝试新建");
+  await safeClick(".side-new");
   await page.waitForTimeout(600);
   await sendAndSettle("只回复两个字：收到");
 }
@@ -175,7 +218,8 @@ const titleA = s.sidebar[0]?.title ?? "";
 /* S2 第二个会话：默认槽换绑，第一个变挂起，再打开第一个要有新槽       */
 /* ---------------------------------------------------------------- */
 let modelUsable = true;
-await page.click(".side-new");
+await waitIdleLocal();
+await safeClick(".side-new");
 await page.waitForTimeout(800);
 const second = await sendAndSettle("只回复两个字：第二");
 if (!second.ok) modelUsable = false;
@@ -219,21 +263,35 @@ if (openedA) {
 await page.screenshot({ path: ".dawn/smoke-02-two-slots.png" });
 
 /* ---------------------------------------------------------------- */
-/* S3 未读：在 A 发一句，立刻切到 B；A 收尾后应出现徽标                 */
+/* S3 未读：在 A 发一句，切到 B（切换要等落地），A 收尾后应出现徽标      */
 /* ---------------------------------------------------------------- */
 if (s.tabs.length >= 2) {
   const active = s.tabs.find((t) => t.active)?.label;
   const other = s.tabs.find((t) => !t.active)?.label;
   if (active && other) {
-    await send("数到 10，每行一个数字，不要用任何工具");
-    await page.waitForTimeout(600);
+    await send("数到 40，每行一个数字，不要用任何工具");
+    // 切走这一步会新建槽并等 pi 就绪（可能几十秒），必须等它真的落地，
+    // 否则 A 的那一轮还在"可见"期间就结束了，永远不会计未读。
     await page.evaluate((label) => {
       const tab = [...document.querySelectorAll(".session-tab")].find(
         (t) => (t.querySelector(".tab-label")?.textContent ?? "").trim().startsWith(label),
       );
       tab?.querySelector(".tab-label")?.click();
     }, other);
-    await waitFor(() => true, { timeout: 1000 }).catch(() => {});
+    const switched = await page
+      .waitForFunction(
+        (label) => {
+          const tab = [...document.querySelectorAll(".session-tab")].find(
+            (t) => (t.querySelector(".tab-label")?.textContent ?? "").trim().startsWith(label),
+          );
+          return Boolean(tab?.classList.contains("active"));
+        },
+        other,
+        { timeout: 90_000 },
+      )
+      .then(() => true)
+      .catch(() => false);
+
     const settled = await waitFor(
       (st) => {
         const a = st.tabs.find((t) => t.label.startsWith(active));
@@ -241,10 +299,14 @@ if (s.tabs.length >= 2) {
       },
       { timeout: 120_000, label: "A 收尾" },
     ).catch(() => null);
-    if (settled) {
+
+    if (!switched) {
+      record("S3 后台会话的未读徽标", "skip", "切标签没在 90 秒内落地（新建槽等 pi 就绪）");
+    } else if (!settled) {
+      record("S3 后台会话的未读徽标", "skip", "A 没有在时限内收尾");
+    } else {
       const badge = settled.tabs.find((t) => t.label.startsWith(active))?.unread ?? 0;
       record("S3 后台会话的未读徽标", badge > 0 ? "pass" : "fail", `未读=${badge}`);
-      // 切回去应当清零
       await page.evaluate((label) => {
         const tab = [...document.querySelectorAll(".session-tab")].find(
           (t) => (t.querySelector(".tab-label")?.textContent ?? "").trim().startsWith(label),
@@ -255,8 +317,6 @@ if (s.tabs.length >= 2) {
       const after = await snapshot();
       const left = after.tabs.find((t) => t.label.startsWith(active))?.unread ?? 0;
       record("S3b 切回后未读清零", left === 0 ? "pass" : "fail", `未读=${left}`);
-    } else {
-      record("S3 后台会话的未读徽标", "skip", "A 没有在时限内收尾");
     }
   }
 } else {
@@ -365,6 +425,80 @@ record(
 );
 
 /* ---------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------- */
+/* S7 换工作区：旧工作区的槽要被收掉                                  */
+/* ---------------------------------------------------------------- */
+try {
+  const before = await snapshot();
+  const beforeRunning = Number((before.count.match(/(\d+)\s*运行/) ?? [])[1] ?? 0);
+  const other = "D:/tmp/omcp-smoke-other";
+  // 主进程要求目标目录已存在（不是 pick 那条路）
+  mkdirSync(other, { recursive: true });
+  const originalRoot = await page.evaluate(async () => {
+    const ws = await window.api.getWorkspace();
+    return ws?.root ?? "";
+  });
+  const switched = await page.evaluate(async (root) => {
+    try {
+      const r = await window.api.openWorkspace(root);
+      return { ok: true, root: r?.root ?? root };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }, other);
+  if (!switched.ok) {
+    record("S7 换工作区", "fail", switched.error ?? "openWorkspace 失败");
+  } else {
+    await page.waitForTimeout(4000);
+    const after = await snapshot();
+    const afterRunning = Number((after.count.match(/(\d+)\s*运行/) ?? [])[1] ?? 0);
+    record(
+      "S7 换工作区后旧槽被收掉",
+      afterRunning <= 1 && afterRunning <= beforeRunning ? "pass" : "fail",
+      `${beforeRunning} 运行 → ${afterRunning} 运行（新工作区 ${switched.root}）`,
+    );
+    // 切回来，后面的 S8 还要用原来的工作区与名册
+    if (originalRoot) {
+      await page.evaluate((root) => window.api.openWorkspace(root), originalRoot);
+      await page.waitForTimeout(4000);
+    }
+  }
+} catch (error) {
+  record("S7 换工作区", "skip", String(error).slice(0, 120));
+}
+
+/* ---------------------------------------------------------------- */
+/* S8 子任务并发闸：空闲 0，跑起来 ≥1，结束回 0                       */
+/* ---------------------------------------------------------------- */
+try {
+  const idle = await page.evaluate(() => window.api.getSubagentGate());
+  const idleOk = idle && idle.inUse === 0 && idle.capacity > 0;
+  record(
+    "S8a 子任务闸空闲时占位为 0",
+    idleOk ? "pass" : "fail",
+    `capacity=${idle?.capacity} inUse=${idle?.inUse}`,
+  );
+
+  // 让它跑一次子任务（需要 subagent 族已开、名册里有 echo）
+  await send("用 subagent 调 echo，任务：闸测试。只调用一次。");
+  let sawLease = false;
+  for (let i = 0; i < 60; i += 1) {
+    await page.waitForTimeout(1000);
+    const state = await page.evaluate(() => window.api.getSubagentGate());
+    if (state.inUse > 0) sawLease = true;
+    const bd = await page.evaluate(() => window.api.getSessionBoard());
+    if (!bd.sessions.some((x) => x.busy) && i > 3) break;
+  }
+  const end = await page.evaluate(() => window.api.getSubagentGate());
+  record(
+    "S8b 子任务占号与归还",
+    sawLease && end.inUse === 0 ? "pass" : sawLease ? "fail" : "skip",
+    `期间见到占号=${sawLease}；结束时 inUse=${end.inUse}`,
+  );
+} catch (error) {
+  record("S8 子任务闸", "skip", String(error).slice(0, 120));
+}
 
 const failed = results.filter((r) => r.status === "fail").length;
 const skipped = results.filter((r) => r.status === "skip").length;

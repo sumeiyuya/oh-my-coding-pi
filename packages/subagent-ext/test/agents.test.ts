@@ -82,3 +82,26 @@ test("也接受逗号串（人手调试）与空值", () => {
   assert.deepEqual(readPluginFamilies(""), []);
   assert.deepEqual(readPluginFamilies(undefined), []);
 });
+
+/** 0.7.1 · B1：子任务不是绕过审批的后门。 */
+import { planTools } from "../src/index.ts";
+
+test("只读档：名册写了 bash/write 也被裁掉，并记下来", () => {
+  const plan = planTools(["read", "bash", "write"], "ask-risky");
+  assert.deepEqual(plan.tools, ["read"]);
+  assert.deepEqual(plan.dropped, ["bash", "write"]);
+});
+
+test("只读档：名册没写工具时也要显式收紧（不能沿用 pi 默认全套）", () => {
+  const plan = planTools(undefined, "deny-risky");
+  assert.deepEqual(plan.tools, ["read", "grep", "find", "ls", "glob"]);
+  assert.deepEqual(plan.dropped, []);
+});
+
+test("完全访问档：名册要什么给什么；没写就不传（pi 默认）", () => {
+  assert.deepEqual(planTools(["read", "bash", "write"], "allow-all"), {
+    tools: ["read", "bash", "write"],
+    dropped: [],
+  });
+  assert.deepEqual(planTools(undefined, "allow-all"), { tools: undefined, dropped: [] });
+});

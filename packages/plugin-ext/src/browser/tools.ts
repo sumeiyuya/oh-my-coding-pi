@@ -29,7 +29,13 @@ const SHOT_DIR = ".omcp/screenshots";
 
 export function browserTools(families: Set<string>): Array<Record<string, unknown>> {
   const tools: Array<Record<string, unknown>> = [];
-  const run = (name: string) => async (p: Record<string, unknown> = {}) => text(await callBroker(name, p));
+  /**
+   * pi 的工具签名是 `execute(toolCallId, params, …)`——**第一个参数不是 params**。
+   * 这里用闭包生成 execute，所以要把 toolCallId 显式接住，否则 broker 收到的是
+   * 一串 `call_xxx`，参数全丢（0.7.0 修过另外 17 个工具的同款错误，漏了这一族）。
+   */
+  const run = (name: string) =>
+    async (_toolCallId: string, p: Record<string, unknown> = {}) => text(await callBroker(name, p));
 
   if (families.has("browser.navigate")) {
     tools.push(

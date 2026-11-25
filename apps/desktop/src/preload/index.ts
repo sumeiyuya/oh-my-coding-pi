@@ -228,6 +228,7 @@ contextBridge.exposeInMainWorld("api", {
     return () => ipcRenderer.removeListener("session:changed", listener);
   },
   getTranscript: (file: string): Promise<unknown> => ipcRenderer.invoke("transcript:snapshot", file),
+  getSubagentGate: (): Promise<unknown> => ipcRenderer.invoke("subagent:gate-state"),
   onSessionNote: (cb: (payload: unknown) => void): (() => void) => {
     const listener = (_event: unknown, payload: unknown) => cb(payload);
     ipcRenderer.on("session:note", listener);

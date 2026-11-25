@@ -136,6 +136,7 @@ type P1Api = Pick<
   | "onKernelReaped"
   | "onSessionNote"
   | "getTranscript"
+  | "getSubagentGate"
 >;
 
 declare global {

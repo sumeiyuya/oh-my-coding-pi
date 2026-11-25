@@ -310,3 +310,46 @@ test("换工作区时丢掉旧队列，不会把旧工作区的会话放进来",
   assert.equal(pool.queueLength(), 0);
   assert.deepEqual(pool.queuePositions(), []);
 });
+
+test("启动中的槽不会被抢占（B4）", async () => {
+  const registry = new SessionRegistry();
+  const clock = { at: 1_000 };
+  const created: FakeSlot[] = [];
+  let releaseFirst: (() => void) | null = null;
+  const pool = new SlotPool({
+    registry,
+    maxSlots: 2,
+    now: () => clock.at,
+    createSlot: ({ id, workspace, sessionFile }) => {
+      const slot = new FakeSlot(id, workspace, sessionFile, clock.at);
+      // 第一个槽卡在"启动中"
+      if (created.length === 0) {
+        slot.start = () => {
+          slot.isRunning = true;
+        };
+        slot.waitReady = () =>
+          new Promise<void>((resolve) => {
+            releaseFirst = () => {
+              slot.ready = true;
+              resolve();
+            };
+          });
+      }
+      created.push(slot);
+      return slot;
+    },
+  });
+
+  const opening = pool.open(file(1), WS); // 卡在 waitReady
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(pool.list()[0]?.state, "starting");
+
+  clock.at += 1_000;
+  await pool.open(file(2), WS, { visibleSlotId: pool.activeSlotId });
+  const third = await pool.open(file(3), WS, { visibleSlotId: pool.activeSlotId });
+
+  assert.equal(third.kind, "queued", "两个槽都不该被抢：一个在启动、一个是可见的");
+  releaseFirst?.();
+  await opening;
+  assert.equal(pool.list().filter((s) => s.running).length, 2);
+});

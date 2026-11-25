@@ -646,11 +646,25 @@ export default function App() {
     await refreshTree();
   }, [refreshState, refreshStats, refreshTree, discardPendingText]);
 
-  function runtimeLabel(id?: string): string | undefined {
-    if (!id) return undefined;
-    if (id === "default") return "默认";
-    const index = runtimes.findIndex((item) => item.id === id);
-    return index >= 0 ? `后台 ${index}` : "后台";
+  /**
+   * 审批卡上的「来源」：0.7.1 · B3。
+   *
+   * M0 把运行时标签条删掉之后，"后台 N" 就没有对应物了——用户看不出这张审批卡
+   * 属于哪段对话。改成「工作区 / 会话标题」，与侧栏一致。
+   */
+  function approvalSourceLabel(slotId?: string): string | undefined {
+    if (!slotId) return undefined;
+    const slot = board?.slots.find((item) => item.id === slotId);
+    const file = slot?.sessionFile ?? null;
+    const session = file ? sessionViewFor(file) : undefined;
+    const title = session?.title ?? (file ? tabLabel(file) : undefined);
+    const workspaceName = (slot?.workspace ?? "")
+      .split(/[\/]/)
+      .filter(Boolean)
+      .pop();
+    if (title && workspaceName) return `${workspaceName} / ${title}`;
+    if (title) return title;
+    return slotId === "default" ? "默认会话" : "后台会话";
   }
 
   function applyRuntimeList(list: RuntimeView[]): void {
@@ -659,9 +673,9 @@ export default function App() {
       if (item.id === "default") continue;
       const before = previous.find((x) => x.id === item.id);
       if (before?.running && !item.running) {
-        setNotice("后台 runtime 已挂起（空闲回收）；切回标签会自动恢复。");
+        setNotice("会话已挂起（空闲回收）；切回会自动恢复。");
       } else if (before && !before.running && item.running) {
-        setNotice("后台 runtime 已恢复。");
+        setNotice("会话已恢复。");
       }
     }
     runtimesRef.current = list;
@@ -787,55 +801,6 @@ export default function App() {
       }
     },
     [messagesByRuntime],
-  );
-
-  const createRuntime = useCallback(async () => {
-    try {
-      const view = (await window.api.createRuntime({})) as RuntimeView | null;
-      await refreshRuntimes();
-      if (view) await activateRuntime(view.id);
-    } catch (error) {
-      setNotice(`创建后台运行时失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [activateRuntime, refreshRuntimes]);
-
-  const closeRuntime = useCallback(
-    async (id: string) => {
-      if (id === "default") return;
-      try {
-        await window.api.closeRuntime(id);
-        setMessagesByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setBusyByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setInputByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setAttachmentsByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setQueueByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        await refreshRuntimes();
-        if (activeRuntimeRef.current === id) await activateRuntime("default");
-      } catch (error) {
-        setNotice(`关闭后台运行时失败：${error instanceof Error ? error.message : String(error)}`);
-      }
-    },
-    [activateRuntime, refreshRuntimes],
   );
 
   useEffect(() => {
@@ -2968,7 +2933,7 @@ export default function App() {
         <ApprovalModal
           request={approval}
           onRespond={respondApproval}
-          runtimeLabel={runtimeLabel(approval.runtimeId)}
+          runtimeLabel={approvalSourceLabel(approval.runtimeId)}
         />
       )}
 

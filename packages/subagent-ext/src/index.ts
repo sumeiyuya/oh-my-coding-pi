@@ -113,6 +113,43 @@ export function discoverAgents(cwd: string, agentsDir?: string): AgentConfig[] {
   return [...byName.values()];
 }
 
+/**
+ * 子任务能拿哪些工具（0.7.1 · B1）。
+ *
+ * 子进程里**没有审批通道**：主进程的 permission-ext 是按 `--extension` 挂上去的，
+ * 子进程不带它，pi 的内置工具就是"裸的"。所以「给不给写类工具」只能静态决定：
+ *
+ *  - 父会话是 `allow-all` → 名册要什么给什么（它本来就不逐次审批）；
+ *  - 其余档位 → 只给只读工具；名册里写了 bash/write 的，裁掉并如实告诉模型。
+ *
+ * 这不是"少给点功能"，是**子任务不能成为绕过审批的后门**。
+ */
+const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "glob"] as const;
+const READ_ONLY = new Set<string>(READ_ONLY_TOOLS);
+
+export interface ToolPlan {
+  /** 传给 pi 的 `--tools`；undefined = 不传（pi 默认全套） */
+  tools: string[] | undefined;
+  /** 被裁掉的（要写进结果里，别让模型以为能用） */
+  dropped: string[];
+}
+
+export function planTools(
+  requested: string[] | undefined,
+  parentMode: string | undefined,
+): ToolPlan {
+  const wants = (requested ?? []).map((t) => t.trim()).filter(Boolean);
+  const allowsWrite = parentMode === "allow-all";
+  if (allowsWrite) {
+    // 允许写：名册要什么给什么；没写就不传（沿用 pi 默认）
+    return { tools: wants.length > 0 ? wants : undefined, dropped: [] };
+  }
+  // 只读档：名册没写工具时也要显式收紧（不传 = pi 默认全套，含 bash/write）
+  const tools = (wants.length > 0 ? wants : [...READ_ONLY_TOOLS]).filter((t) => READ_ONLY.has(t));
+  const dropped = wants.filter((t) => !READ_ONLY.has(t));
+  return { tools: tools.length > 0 ? tools : [...READ_ONLY_TOOLS], dropped };
+}
+
 /* ------------------------------------------------------------------ */
 /* 子进程                                                              */
 /* ------------------------------------------------------------------ */
@@ -147,7 +184,7 @@ function runChild(
   agent: AgentConfig,
   task: string,
   signal: AbortSignal,
-  inherited: { provider?: string; model?: string } = {},
+  inherited: { provider?: string; model?: string; mode?: string } = {},
 ): Promise<ChildOutcome> {
   const promptDir = mkdtempSync(join(tmpdir(), "omcp-subagent-"));
   const promptPath = join(promptDir, "system.md");
@@ -157,7 +194,8 @@ function runChild(
   const model = agent.model ?? (inherited.model ?? process.env.OMCP_MODEL)?.trim();
   if (provider) args.push("--provider", provider);
   if (model) args.push("--model", model);
-  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  const plan = planTools(agent.tools, inherited.mode);
+  if (plan.tools && plan.tools.length > 0) args.push("--tools", plan.tools.join(","));
   if (agent.systemPrompt.trim()) {
     writeFileSync(promptPath, agent.systemPrompt, "utf8");
     args.push("--append-system-prompt", promptPath);
@@ -275,7 +313,14 @@ function runChild(
 
 async function leaseGate(
   key: string,
-): Promise<{ ok: boolean; reason?: string; release: () => void; provider?: string; model?: string }> {
+) : Promise<{
+  ok: boolean;
+  reason?: string;
+  release: () => void;
+  provider?: string;
+  model?: string;
+  mode?: string;
+}> {
   const url = process.env.OMCP_GATE_URL;
   const token = process.env.OMCP_GATE_TOKEN;
   if (!url || !token) {
@@ -291,6 +336,7 @@ async function leaseGate(
     const payload = (await response.json().catch(() => ({}))) as {
       provider?: string;
       model?: string;
+      mode?: string;
     };
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
@@ -304,6 +350,7 @@ async function leaseGate(
       ok: true,
       ...(payload.provider ? { provider: payload.provider } : {}),
       ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.mode ? { mode: payload.mode } : {}),
       release: () => {
         void fetch(`${url}/subagent/release`, {
           method: "POST",
@@ -331,7 +378,7 @@ interface TaskInput {
   task: string;
 }
 
-function line(name: string, outcome: ChildOutcome): string {
+function line(name: string, outcome: ChildOutcome, dropped: string[] = []): string {
   const head = outcome.ok ? "✓" : "✗";
   const usage = outcome.usage.turns
     ? `（${outcome.usage.turns} 轮 · $${outcome.usage.cost.toFixed(4)}）`
@@ -461,7 +508,7 @@ export default function subagentExt(api: ExtensionAPI): void {
           for (const [index, task] of tasks.entries()) {
             const text = task.task.split("{previous}").join(previous);
             const outcome = await runChild(byName.get(task.agent)!, text, abort.signal, gate);
-            results.push(line(task.agent, outcome));
+            results.push(line(task.agent, outcome, planTools(byName.get(task.agent)!.tools, gate.mode).dropped));
             if (!outcome.ok) {
               return {
                 content: [{ type: "text", text: results.join("\n\n") }],
@@ -481,7 +528,11 @@ export default function subagentExt(api: ExtensionAPI): void {
             if (index >= tasks.length) return;
             const task = tasks[index]!;
             const outcome = await runChild(byName.get(task.agent)!, task.task, abort.signal, gate);
-            results[index] = line(task.agent, outcome);
+            results[index] = line(
+              task.agent,
+              outcome,
+              planTools(byName.get(task.agent)!.tools, gate.mode).dropped,
+            );
           }
         };
         await Promise.all(

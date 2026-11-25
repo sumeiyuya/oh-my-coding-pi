@@ -162,8 +162,8 @@ export function startSubagentGateServer(
   gate: SubagentGate,
   opts: {
     onError?: (message: string) => void;
-    /** 领号时顺手告诉扩展：这个槽现在的 provider/model（子进程要继承它） */
-    modelFor?: (key: string) => { provider?: string; model?: string };
+    /** 领号时顺手告诉扩展：这个槽此刻的 provider/model 与权限档（子进程要继承它们） */
+    modelFor?: (key: string) => { provider?: string; model?: string; mode?: string };
   } = {},
 ): Promise<SubagentGateServer> {
   const token = randomBytes(24).toString("hex");

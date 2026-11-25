@@ -3665,6 +3665,9 @@ ipcMain.handle("transcript:snapshot", (_event, file: string) => {
   return transcriptHub.snapshot(hubKeyForFile(target));
 });
 
+/** 子任务并发闸的状态（只读；冒烟与诊断用） */
+ipcMain.handle("subagent:gate-state", () => subagentGate.snapshot());
+
 /** 关闭一个会话的槽：进程停掉、会话保留（可以再打开） */
 ipcMain.handle("session:close", (_event, file: string): SessionBoardView => {
   const slot = slotPool.slotOfSession(file);
@@ -5983,6 +5986,8 @@ app.whenReady().then(async () => {
       return {
         provider: runtime?.supervisor.getProvider() || undefined,
         model: runtime?.supervisor.getModel() || undefined,
+        // 权限档也一起给：子任务没有审批通道，能拿哪些工具由它决定（0.7.1 · B1）
+        mode: permissionModeFor({ runtimeId: key }),
       };
     },
   });

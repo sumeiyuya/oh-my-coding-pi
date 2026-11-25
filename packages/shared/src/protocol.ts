@@ -1484,6 +1484,8 @@ export interface PreloadApi {
   closeSession(file: string): Promise<SessionBoardView>;
   onSessionChanged(cb: (board: SessionBoardView) => void): () => void;
   onSessionOpened(cb: (payload: { file: string }) => void): () => void;
+  /** 子任务并发闸的状态（只读，诊断用） */
+  getSubagentGate(): Promise<{ capacity: number; inUse: number; waiting: number; holders: string[] }>;
   /** 修改 4 · M1：主进程的转写快照（切回会话时整段拿） */
   getTranscript(file: string): Promise<{ key: string; revision: number; items: unknown[]; unread: number; cold: boolean }>;
   /** 系统提示（崩溃中断、内核回收）：直接进当前可见会话的转写 */
