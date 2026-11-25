@@ -3960,3 +3960,35 @@ body.sash-dragging {
   font-size: 10.5px; color: var(--muted);
   white-space: nowrap; padding-left: 2px;
 }
+
+/* ── 修改 4 · M0：标签 = 会话（状态点 / 未读 / 运行计数）── */
+.session-tab .tab-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); opacity: .45; flex: 0 0 auto;
+  margin-right: 5px;
+}
+.session-tab .tab-dot[data-busy="1"] { background: var(--accent); opacity: 1; }
+.session-tab .tab-dot[data-suspended="1"] {
+  background: transparent; border: 1px solid var(--muted); opacity: .9;
+}
+.session-tab .tab-unread {
+  margin-left: 4px; min-width: 14px; height: 14px; padding: 0 4px;
+  border-radius: 99px; background: var(--accent); color: #fff;
+  font-size: 9.5px; line-height: 14px; text-align: center;
+}
+.session-tab .tab-label { display: inline-flex; align-items: center; }
+.session-count {
+  margin-left: auto; padding: 0 4px 0 10px; align-self: center;
+  font-size: 10.5px; color: var(--muted); white-space: nowrap;
+}
+.session-tab.suspended { opacity: .7; }
+
+/* 修改 4 · M3：中断（红点）与排队（灰徽标） */
+.session-tab .tab-dot[data-error="1"] { background: var(--danger-text); opacity: 1; }
+.session-tab .tab-dot[data-queued="1"] {
+  background: transparent; border: 1px dashed var(--muted); opacity: .9;
+}
+.session-tab .tab-queued {
+  margin-left: 4px; font-size: 9.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 99px; padding: 0 5px;
+}

@@ -36,6 +36,27 @@ export interface PluginDef {
   families: PluginFamilyDef[];
 }
 
+const SUBAGENT_PLUGIN: PluginDef = {
+  id: "subagent",
+  name: "子任务",
+  key: "plugin.subagent",
+  defaultOn: false,
+  families: [
+    {
+      key: "subagent",
+      name: "子任务",
+      tools: [
+        {
+          name: "subagent",
+          label: "子任务",
+          description:
+            "Delegate a task to a specialized subagent (its own pi process, isolated context). Modes: single / parallel (max 8 tasks, 4 at a time) / chain with {previous}. Global concurrency is capped in the app so parallel sessions cannot flood the provider.",
+        },
+      ],
+    },
+  ],
+};
+
 const MEMORY_PLUGIN: PluginDef = {
   id: "memory",
   name: "记忆",
@@ -177,7 +198,7 @@ const BROWSER_PLUGIN: PluginDef = {
 };
 
 /** 分期刊出的插件都登记在这里；Office 与浏览器等决策门结论（ADR-044）。 */
-export const PLUGINS: PluginDef[] = [MEMORY_PLUGIN, OFFICE_PLUGIN, BROWSER_PLUGIN];
+export const PLUGINS: PluginDef[] = [MEMORY_PLUGIN, OFFICE_PLUGIN, BROWSER_PLUGIN, SUBAGENT_PLUGIN];
 
 export type PluginFlags = Record<string, string>;
 

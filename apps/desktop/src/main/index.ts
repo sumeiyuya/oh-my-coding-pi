@@ -46,6 +46,9 @@ import type {
   ThinkingLevel,
   SessionStats,
   SessionSummary,
+  SessionBoardView,
+  SessionOpenView,
+  SessionView,
   SessionSwitchResult,
   SessionTreeResult,
   WorkspaceInfo,
@@ -56,8 +59,12 @@ import { APPROVAL_OPTIONS, APPROVAL_TITLE_PREFIX, UPLOAD_IMAGE_MAX_BYTES, UPLOAD
 import { isThinkingLevel } from "@oh-my-coding-pi/shared";
 import { PiSupervisor } from "./supervisor";
 import { SessionRuntime } from "./session-runtime";
-import { KernelManager } from "./kernel-manager";
+import { KernelManager, kernelKeyFor } from "./kernel-manager";
 import { RuntimeManager } from "./runtime-manager";
+import { SessionRegistry, crashOutcome, sessionKey } from "./session-registry";
+import { TranscriptHub } from "./transcript-hub";
+import { SlotPool } from "./slot-pool";
+import { SubagentGate, startSubagentGateServer } from "./subagent-gate";
 import { RpcClient } from "./rpc-client";
 import { TurnTrace } from "./turn-trace";
 import { EventPump } from "./event-pump";
@@ -82,7 +89,8 @@ import { createSkill, readSkill, scanSkills, setSkillEnabled } from "./skills";
 import { SecretStore } from "./secrets";
 import { describeImage, formatDescription } from "./vision";
 import { exportRoute, isValidPlanPath, loadRoute, planAbsPath, saveRoute } from "./route";
-import { planDigest, verifyPlanFile } from "./plan-approval";
+import { PlanGateBook, planDigest, verifyPlanFile, type PlanGateState } from "./plan-approval";
+import { applyCost, budgetStatusOf, shouldAlert } from "./budget-ledger";
 import {
   buildPiProviders,
   emptyRegistry,
@@ -145,7 +153,6 @@ const budget = { sessionLimit: 1, dailyLimit: 5, alertRatio: 0.8 };
 let dailyDate = "";
 let dailySpent = 0;
 let sessionCosts: Record<string, number> = {};
-let alertedSession = false;
 let abortTimer: NodeJS.Timeout | null = null;
 let selftestDone = false;
 let selftestTimer: NodeJS.Timeout | null = null;
@@ -209,14 +216,40 @@ const pendingApprovals = new Map<string, PendingApproval>();
 let secretStore: SecretStore | null = null;
 /** MCP 配置服务：lazy 创建（secretStore 与 workspaceRoot 就绪后） */
 let mcpService: McpService | null = null;
-/** 方案期：会话级；未批准时只放只读工具 */
-const planGate = {
-  enabled: false,
-  approved: false,
-  planPath: null as string | null,
-  /** 批准时的计划内容摘要（sha256）；任何非只读操作前用它复核 */
-  digest: null as string | null,
-};
+/**
+ * 方案期门（修改 4 · M2：按**会话**记）。
+ *
+ * 改之前是一个单对象：A 会话批准了方案，B 会话立刻也变成"已批准只读"，
+ * 反过来 B 一改方案内容，A 的批准也跟着失效。方案文件是工作区的，
+ * 但「批没批」是这段对话的状态。
+ */
+const planGates = new PlanGateBook();
+/** 还没有会话文件时（新建工作区）挂在工作区上 */
+const PLAN_WS_KEY = "__workspace__";
+
+function resetPlanGate(key: string): void {
+  planGates.revoke(key);
+}
+
+function planGateFor(key: string): PlanGateState {
+  return planGates.for(key);
+}
+
+/** 策略服务给了 runtimeId / sessionKey，换算成方案期的键 */
+function planKeyOf(ctx?: { runtimeId?: string; sessionKey?: string }): string {
+  if (ctx?.sessionKey) return `session:${sessionKey(ctx.sessionKey)}`;
+  if (ctx?.runtimeId) {
+    const file = runtimeManager.get(ctx.runtimeId)?.sessionFile;
+    if (file) return `session:${sessionKey(file)}`;
+  }
+  // 没有上下文（自测里的直接调用、旧客户端）：按"用户看着的那段"算
+  return visiblePlanKey();
+}
+
+/** 界面操作（plan:status / set / approve）作用在"此刻看着的那段会话"上 */
+function visiblePlanKey(): string {
+  return currentSessionFile ? `session:${sessionKey(currentSessionFile)}` : PLAN_WS_KEY;
+}
 /** 模型能力缓存：provider/model → 是否支持图片 */
 const visionCapability = new Map<string, boolean>();
 let tokenProbe: { startedAt: number; resolve: (ms: number) => void } | null = null;
@@ -227,24 +260,36 @@ function send(channel: string, payload: unknown): void {
   }
 }
 
-/** 回合时序：只记阶段与长度，不记正文；OMCP_PERF_TRACE=0 可关闭写盘。 */
-const turnTrace = new TurnTrace({
-  file: () => (workspaceRoot ? join(workspaceRoot, ".omcp", "logs", "perf.jsonl") : null),
-  enabled: process.env.OMCP_PERF_TRACE !== "0",
-});
-turnTrace.setPhaseSink((ev) => send("pi:turn", ev));
-
-/** 运行时管理器（P1a：默认 runtime 仍唯一激活；P2 再加标签） */
-const runtimeManager = new RuntimeManager({ maxRuntimes: appSettings.maxRuntimes });
-if (!SELFTEST) {
-  const reaper = setInterval(() => {
-    const stopped = runtimeManager.reapIdle(
-      Math.max(1, appSettings.runtimeIdleMinutes) * 60_000,
-    );
-    if (stopped.length) send("runtime:changed", runtimeManager.list());
-  }, 60_000);
-  reaper.unref?.();
+/**
+ * 回合时序：只记阶段与长度，不记正文；OMCP_PERF_TRACE=0 可关闭写盘。
+ *
+ * 修改 4 · M2：一个槽一份。改之前是全局一个——两个会话同时跑时，
+ * 后一轮 `begin()` 直接返回 null（"已有回回合在跑"），于是后台会话
+ * 根本没有记录，前台那轮的阶段还会被对方的 tool 事件污染。
+ */
+const perfTraces = new Map<string, TurnTrace>();
+function traceOf(runtimeId = "default"): TurnTrace {
+  let trace = perfTraces.get(runtimeId);
+  if (!trace) {
+    trace = new TurnTrace({
+      file: () => (workspaceRoot ? join(workspaceRoot, ".omcp", "logs", "perf.jsonl") : null),
+      enabled: process.env.OMCP_PERF_TRACE !== "0",
+    });
+    trace.setPhaseSink((ev) => send("pi:turn", { ...ev, runtimeId }));
+    perfTraces.set(runtimeId, trace);
+  }
+  return trace;
 }
+/** 默认槽的这一份（兼容旧引用） */
+const turnTrace = traceOf("default");
+
+/**
+ * 运行时管理器（修改 4 · M0 起只做实例登记）。
+ * 会话身份与准入由 `sessionRegistry` / `slotPool` 负责——
+ * `runtimeManager` 留着是因为它同时管着 ServiceHub 的 token 路由。
+ */
+const runtimeManager = new RuntimeManager({ maxRuntimes: appSettings.maxRuntimes });
+const sessionRegistry = new SessionRegistry();
 const defaultRuntime = runtimeManager.create({
   id: "default",
   provider: process.env.PI_PROVIDER || "",
@@ -257,9 +302,187 @@ const rpc = defaultRuntime.rpc;
 /** 合并逐 token 的 text/thinking 增量；OMCP_EVENT_PUMP=0 时退化为逐条转发。 */
 const eventPump = defaultRuntime.pump;
 
+/**
+ * 槽池（会话 → pi 进程的准入）。
+ *
+ * 默认 runtime 作为第一个槽被领养：它仍然叫 `default`，所有老 IPC 继续用它，
+ * 但它现在也会被准入规则停掉/复用——这正是「切走不停、满员挂起最久未用」的基础。
+ */
+/**
+ * 转录中枢（修改 4 · M1）：会话的转写由主进程按会话记，切走不停、刷新不丢。
+ * 键与会话登记表一致：`session:<规范化路径>`，还没有会话文件时按槽兜底。
+ */
+/**
+ * 子任务并发闸（修改 4 · M4）：名额是**全局**的，因为限流的是 provider。
+ * 2 个槽 × 每槽 4 个子任务 = 8 个请求同时在飞，不挡就会整批 429。
+ */
+const subagentGate = new SubagentGate({
+  capacity: Math.max(1, Math.min(16, Number(process.env.OMCP_SUBAGENT_CONCURRENCY ?? 4) || 4)),
+});
+let subagentGateServer: { url: string; token: string; close(): void } | null = null;
+
+const transcriptHub = new TranscriptHub();
+
+function hubKeyForFile(file: string | null | undefined): string {
+  return file ? `session:${sessionKey(file)}` : "session:none";
+}
+
+function hubKeyForSlot(runtimeId: string): string {
+  return hubKeyForFile(slotPool.get(runtimeId)?.sessionFile ?? null).replace(
+    "session:none",
+    `runtime:${runtimeId}`,
+  );
+}
+
+/**
+ * 槽意外退出（修改 4 · M3）。
+ *
+ * 之前不管哪种退出，界面上都是"突然不说话了"：用户分不清是自己停的、
+ * 被空闲回收了，还是 pi 崩了。这里把三种分开：
+ *
+ *  - 主动停（回收/抢占/换工作区）→ 什么都不说，标签显示"已挂起"；
+ *  - 崩溃且有回合在飞 → 会话标 `interrupted`，转写里留一句"本轮被中断，可重发"；
+ *  - 崩溃但当时空闲 → 只留一句"已自动重启"。
+ *
+ * 不自动重发：重发是用户的决定，不是我们的。
+ */
+function markSlotCrash(runtimeId: string): void {
+  const runtime = runtimeManager.get(runtimeId);
+  if (!runtime || runtime.isStopping) return;
+  const file = runtime.sessionFile;
+  const key = hubKeyForFile(file);
+  const outcome = crashOutcome(runtime.lastExitWhileBusy);
+  if (file) {
+    sessionRegistry.setState(file, outcome.state);
+    transcriptHub.system(key, outcome.note);
+    // 中枢里有了还不够：正在看这段会话的人应当**马上**看到，而不是切走再回来
+    send("session:note", { file, text: outcome.note });
+  }
+  send("session:changed", sessionBoard());
+}
+
+/** 这段会话此刻就显示在窗口里（用来决定要不要计未读） *//** 这段会话此刻就显示在窗口里（用来决定要不要计未读） */
+function isVisibleSession(file: string | null): boolean {
+  if (!file || !currentSessionFile) return false;
+  return sessionKey(file) === sessionKey(currentSessionFile);
+}
+
+const slotPool = new SlotPool({
+  registry: sessionRegistry,
+  maxSlots: appSettings.maxRuntimes,
+  createSlot: ({ id, workspace, sessionFile }) => {
+    const runtime = runtimeManager.create({
+      id,
+      provider: supervisor.getProvider(),
+      model: supervisor.getModel(),
+      emit: emitRuntimeEvent,
+      pumpEnabled: process.env.OMCP_EVENT_PUMP !== "0",
+      workspaceRoot: workspace,
+      sessionFile,
+      autoAttach: true,
+      onExtensionUi: (ev) => {
+        handleExtensionUi(ev as Parameters<typeof handleExtensionUi>[0], runtime);
+      },
+    });
+    // 修改 4 · M3：后台槽崩溃也要有痕迹（默认槽由它自己的 exit 接线管）
+    runtime.supervisor.on("exit", () => markSlotCrash(id));
+    // 崩溃后 supervisor 会退避重启；探到就绪就推一次，界面据此把手收回来。
+    // 不探的话 ready 永远是 false，输入框会一直显示"pi 正在启动"。
+    runtime.supervisor.on("spawn", () => {
+      void runtime
+        .waitReady(120_000)
+        .then(() => send("session:changed", sessionBoard()))
+        .catch(() => undefined);
+    });
+    return runtime;
+  },
+  disposeSlot: (slot) => {
+    cancelPendingApprovals(slot.id);
+    // 这个槽的子进程可能没来得及还名额；不留孤儿占用
+    subagentGate.releaseAll(slot.id);
+    // 内核跟着会话走：关槽不动内核，交给空闲回收（M2）
+    runtimeAuditLogs.delete(slot.id);
+    runtimeManager.forget(slot.id);
+    slot.dispose();
+  },
+  isBlocked: (slotId) => [...pendingApprovals.values()].some((pending) => pending.runtimeId === slotId),
+  // 默认槽被 index.ts 直接持有（supervisor / rpc / eventPump），只能挂起不能销毁
+  pinnedSlots: ["default"],
+  onBind: (slotId, file) => {
+    runtimeManager.updateSession(slotId, file);
+    // 绑定发生在 activeId 改之前，所以按"绑的是不是可见那段"判断，不按槽
+    if (file && file === currentSessionFile) pointKernelsAt(file);
+  },
+  onDequeued: (_slotId, file) => {
+    send("session:opened", { file });
+  },
+  onChanged: () => {
+    runtimeManager.setActive(slotPool.activeSlotId);
+    send("session:changed", sessionBoard());
+    send("runtime:changed", runtimeManager.list());
+  },
+});
+slotPool.adopt(defaultRuntime);
+
+if (!SELFTEST) {
+  const reaper = setInterval(() => {
+    const stopped = slotPool.reapIdle(Math.max(1, appSettings.runtimeIdleMinutes) * 60_000);
+    if (stopped.length) send("runtime:changed", runtimeManager.list());
+    // 内核按会话回收：关掉就不再有变量，必须说出来（M2）
+    const reapedKernels = kernelManager?.reapIdle(kernelIdleMs()) ?? [];
+    for (const item of reapedKernels) {
+      if (!item.wasRunning) continue;
+      const file = item.key.startsWith("session:") ? item.key.slice("session:".length) : null;
+      if (file) {
+        transcriptHub.system(
+          hubKeyForFile(file),
+          "内核已因空闲关闭：变量已清空，再运行代码会重新启动内核。",
+        );
+      }
+      if (file) send("session:note", { file, text: "内核已因空闲关闭：变量已清空，再运行代码会重新启动内核。" });
+      send("session:kernel-reaped", { key: item.key, file });
+    }
+  }, 60_000);
+  reaper.unref?.();
+}
+
 /** P2a：所有 runtime 的事件统一出口；renderer 按 runtimeId 分流 */
 function emitRuntimeEvent(ev: PiEvent, runtimeId: string): void {
   turnTrace.countIpcSent();
+  // 修改 4 · M1：转写归约在主进程做一份，后台会话照样记（切走不停的基础）
+  const hubKey = hubKeyForSlot(runtimeId);
+  const slotFile = slotPool.get(runtimeId)?.sessionFile ?? null;
+  const before = transcriptHub.summary(hubKey).unread;
+  transcriptHub.ingest(hubKey, ev);
+  if (isVisibleSession(slotFile)) {
+    transcriptHub.clearUnread(hubKey);
+  } else if (transcriptHub.summary(hubKey).unread !== before) {
+    // 后台会话多了一轮：把未读数推到界面（只给标量，不搬条目）
+    send("session:changed", sessionBoard());
+  }
+  // 标签上的状态点：会话忙/闲跟着事件走（默认槽也在这里，不另接一份）
+  if (ev.type === "agent_start" || ev.type === "agent_settled") {
+    if (markSessionFromEvent(runtimeId, ev.type === "agent_start")) {
+      send("session:changed", sessionBoard());
+    }
+  }
+  if (runtimeId !== "default") {
+    // 默认槽由它自己的事件接线处理；后台槽在这里记阶段与账
+    const trace = traceOf(runtimeId);
+    if (ev.type === "agent_start") trace.phase("started");
+    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+      trace.phase("first_token");
+    }
+    if (ev.type === "tool_execution_start") trace.phase("tool_start", { tool: ev.toolName });
+    if (ev.type === "tool_execution_end") {
+      trace.phase("tool_end", { tool: ev.toolName, ok: !ev.isError });
+    }
+    if (ev.type === "agent_settled") {
+      invalidateStats(runtimeId);
+      void updateBudget(runtimeId);
+      trace.settle();
+    }
+  }
   send("pi:event", { ...ev, runtimeId } as unknown as PiStreamItem);
 }
 
@@ -496,6 +719,21 @@ function notebookPath(): string {
 /* ------------------------------------------------------------------ */
 
 /** 注册表文件放应用数据目录，不进工作区、不进仓库 */
+/**
+ * 某个槽/会话此刻的有效权限档（修改 4 · M2）。
+ *
+ * 改之前 `applyPermissionMode()` 往策略服务里塞一个全局值：切到另一段会话时
+ * 那个值还是旧的，于是 A 的"完全访问"会影响 B。现在按会话现算。
+ */
+function permissionModeFor(ctx: { runtimeId?: string; sessionKey?: string }): PermissionMode {
+  const file =
+    ctx.sessionKey ?? (ctx.runtimeId ? runtimeManager.get(ctx.runtimeId)?.sessionFile ?? null : null);
+  if (!file || !workspaceRoot) return appSettings.permissionMode;
+  const key = sessionMetaKey(file);
+  const override = key ? loadSessionMeta(workspaceRoot).sessions[key]?.permissionMode : undefined;
+  return override ?? appSettings.permissionMode;
+}
+
 /** 当前会话单独设过的权限档；没有 = 跟随应用默认 */
 function sessionPermissionOverride(): PermissionMode | null {
   if (!workspaceRoot || !currentSessionFile) return null;
@@ -526,6 +764,16 @@ function applyRuntimeServiceEnv(runtime: SessionRuntime): void {
     OMCP_ARTIFACTS_URL: artifactService?.url ?? "",
     OMCP_ARTIFACTS_TOKEN: runtime.token,
     OMCP_PLUGINS: JSON.stringify(enabledFamilyKeys(appSettings.plugins)),
+    // 修改 4 · M4：子任务继承本槽的 provider/model（否则子进程用默认配置，可能指向被禁的模型）
+    OMCP_PROVIDER: runtime.supervisor.getProvider(),
+    OMCP_MODEL: runtime.supervisor.getModel(),
+    // 修改 4 · M4：子任务并发闸 + 子 agent 名册位置
+    OMCP_GATE_URL: subagentGateServer?.url ?? "",
+    OMCP_GATE_TOKEN: subagentGateServer?.token ?? "",
+    ...(() => {
+      const dir = join(app.getPath("userData"), "agents");
+      return { OMCP_AGENTS_DIR: dir };
+    })(),
     OMCP_MEMORY_DIR: memoryDirPath(),
     ...(browserService
       ? { OMCP_BROWSER_URL: browserService.url, OMCP_BROWSER_TOKEN: browserService.token }
@@ -969,6 +1217,15 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
 
   defaultRuntime.stop();
   rpc.detach();
+  // 修改 4 · M3：离开时把这个工作区名下的槽收掉（会话保留，切回来还能打开）。
+  // 此前只停默认槽，后台槽还挂在旧目录上，文件/策略/内核全是指向旧工作区的。
+  // 旧工作区的排队请求也就没意义了，先丢掉（否则 closeSlot 会把它放进来）
+  slotPool.dropQueue();
+  for (const slot of slotPool.list()) {
+    if (slot.id === "default") continue;
+    if (sessionKey(slot.workspace) === sessionKey(resolved)) continue;
+    slotPool.closeSlot(slot.id);
+  }
   await new Promise((r) => setTimeout(r, 350));
 
   workspaceRoot = resolved;
@@ -976,10 +1233,9 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   defaultRuntime.setTrustProject(appSettings.trustProject);
   policyService?.reload();
   grants?.clearSession();
-  planGate.approved = false;
-  planGate.planPath = null;
-  planGate.digest = null;
-  kernelManager?.setWorkspace("default", resolved);
+  planGates.clear();
+  // 内核按会话记（M2）：这里只把可见会话的那对指到新工作区
+  pointKernelsAt(currentSessionFile ?? null);
   scheduleKernelPrewarm();
   sessionDir = newSessionDir;
   invalidateWorkspaceIndex();
@@ -1012,7 +1268,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const wsState = readWorkspaceState();
   const last = wsState.lastSessionFile ?? null;
   currentSessionFile = last && existsSync(last) ? last : null;
-  runtimeManager.updateSession("default", currentSessionFile);
+  bindDefaultSession(currentSessionFile);
   // 每次打开工作区/启动都重建一次 models.json：
   // pi 自己也会写这个文件（远端目录缓存），不重建就可能某天发现我们的条目没了。
   applyRegistryEnv();
@@ -1028,7 +1284,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   writeWorkspaces({ lastWorkspace: resolved, recent });
   send("workspace:changed", { root: resolved, recent } satisfies WorkspaceInfo);
 
-  setTimeout(() => void resetBudgetBaseline(), 1500);
+  setTimeout(() => void resetBudgetBaseline("default"), 1500);
   return { root: resolved, initialized: true, migratedSessions };
 }
 
@@ -1153,42 +1409,95 @@ function loadSettings(): void {
  * - 发送前的预算判断用 getStats(true) 强制取权威值，缓存不能放行超预算的请求；
  * - 收到 usage/entry_appended/agent_settled 或切会话时立刻失效。
  */
-let statsCache: { at: number; value: SessionStats } | null = null;
-/** 失效代数：飞行中的请求若早于最近一次失效，不允许被复用 */
-let statsGen = 0;
-let statsInFlight: { gen: number; p: Promise<SessionStats> } | null = null;
+/**
+ * 每个槽一份统计缓存（修改 4 · M2）。
+ *
+ * 改之前只有一个 `rpc`（默认槽）的缓存与单飞：于是**预算门量的是默认会话的钱**，
+ * 后台会话烧多少都不拦，而默认会话一旦超限会把所有会话一起拦住。
+ */
+interface SlotStatsCache {
+  at: number;
+  value: SessionStats;
+  gen: number;
+}
+const statsBySlot = new Map<
+  string,
+  { cache: SlotStatsCache | null; gen: number; inFlight: { gen: number; p: Promise<SessionStats> } | null }
+>();
 /** 自上次 prompt 以来实际发出的 get_session_stats 次数（验证 4→1） */
 let statsQueryCount = 0;
 
-function invalidateStats(): void {
-  statsCache = null;
-  statsGen += 1;
+function statsSlot(runtimeId: string) {
+  let slot = statsBySlot.get(runtimeId);
+  if (!slot) {
+    slot = { cache: null, gen: 0, inFlight: null };
+    statsBySlot.set(runtimeId, slot);
+  }
+  return slot;
 }
 
-async function getStats(force = false, timeoutMs = piReady ? 30_000 : 3_000): Promise<SessionStats> {
+/** 失效：给 id 就只失效那一个，不给就全失效 */
+function invalidateStats(runtimeId?: string): void {
+  if (runtimeId) {
+    const slot = statsSlot(runtimeId);
+    slot.cache = null;
+    slot.gen += 1;
+    return;
+  }
+  for (const slot of statsBySlot.values()) {
+    slot.cache = null;
+    slot.gen += 1;
+  }
+}
+
+function runtimeById(runtimeId: string): SessionRuntime | undefined {
+  return runtimeId === "default" ? defaultRuntime : runtimeManager.get(runtimeId);
+}
+
+/** 这一轮默认的统计超时；非默认槽给 10 秒，别让预算门干等 */
+function statsTimeout(runtimeId: string): number {
+  if (runtimeId !== "default") return 10_000;
+  return piReady ? 30_000 : 3_000;
+}
+
+async function getStatsFor(
+  runtimeId: string,
+  force = false,
+  timeoutMs = statsTimeout(runtimeId),
+): Promise<SessionStats> {
+  const runtime = runtimeById(runtimeId);
+  if (!runtime) throw new Error(`没有这个槽：${runtimeId}`);
+  const slot = statsSlot(runtimeId);
   const now = Date.now();
   if (!force) {
-    if (statsCache && now - statsCache.at < 250) return statsCache.value;
-    if (statsInFlight && statsInFlight.gen === statsGen) return statsInFlight.p;
+    if (slot.cache && slot.cache.gen === slot.gen && now - slot.cache.at < 250) {
+      return slot.cache.value;
+    }
+    if (slot.inFlight && slot.inFlight.gen === slot.gen) return slot.inFlight.p;
   }
-  const gen = statsGen;
+  const gen = slot.gen;
   statsQueryCount += 1;
   const run = (async () => {
-    const res = await rpc.request({ type: "get_session_stats" }, timeoutMs);
+    const res = await runtime.rpc.request({ type: "get_session_stats" }, timeoutMs);
     const value = res.data as SessionStats;
-    if (gen === statsGen) statsCache = { at: Date.now(), value };
+    if (gen === slot.gen) slot.cache = { at: Date.now(), value, gen };
     return value;
   })();
   if (force) return run; // 预算门不排队、不复用可能早于最新 usage 的飞行请求
-  statsInFlight = { gen, p: run };
+  slot.inFlight = { gen, p: run };
   void run
     .finally(() => {
-      if (statsInFlight?.gen === gen) statsInFlight = null;
+      if (slot.inFlight?.gen === gen) slot.inFlight = null;
     })
     .catch(() => {
       // 调用方各自处理错误；这里只负责清理飞行状态，避免未处理拒绝
     });
   return run;
+}
+
+/** 兼容旧的调用点：默认槽的统计 */
+function getStats(force = false, timeoutMs?: number): Promise<SessionStats> {
+  return getStatsFor("default", force, timeoutMs);
 }
 
 function reportError(error: AppError): void {
@@ -1209,52 +1518,51 @@ function reportError(error: AppError): void {
   }
 }
 
-function budgetStatus(cost: number): BudgetStatus {
-  const previous = currentSessionFile ? sessionCosts[currentSessionFile] ?? 0 : 0;
-  const projectedDaily = dailySpent + Math.max(0, cost - previous);
-  return {
-    sessionUsd: cost,
-    dailyUsd: projectedDaily,
-    sessionLimit: budget.sessionLimit,
-    dailyLimit: budget.dailyLimit,
-    alertRatio: budget.alertRatio,
-  };
+function ledgerState() {
+  return { dailyDate, dailySpent, sessionCosts };
 }
 
-async function refreshBudget(): Promise<BudgetStatus> {
+function budgetStatus(cost: number, sessionFile: string | null): BudgetStatus {
+  return budgetStatusOf({ cost, sessionFile, ledger: ledgerState(), limits: budget });
+}
+
+/** 已经就"接近上限"提醒过的会话（原来是全局一个 flag） */
+const alertedSessions = new Set<string>();
+
+async function refreshBudget(runtimeId = slotPool.activeSlotId ?? "default"): Promise<BudgetStatus> {
+  const file = runtimeById(runtimeId)?.sessionFile ?? null;
   try {
-    const stats = await getStats();
-    return budgetStatus(stats.cost ?? 0);
+    const stats = await getStatsFor(runtimeId);
+    return budgetStatus(stats.cost ?? 0, file);
   } catch {
-    return budgetStatus(0);
+    return budgetStatus(0, file);
   }
 }
 
-async function updateBudget(): Promise<void> {
+/**
+ * 记账：把某个槽这次的费用增量记到**它自己的会话**名下。
+ *
+ * 日账是账号级的（所有会话共用），所以 `dailySpent` 仍是一个数；
+ * 会话账按文件分，这也是 ADR-017 的口径。
+ */
+async function updateBudget(runtimeId: string): Promise<void> {
+  const runtime = runtimeById(runtimeId);
+  const sessionFile = runtime?.sessionFile ?? null;
   try {
-    const stats = await getStats();
+    const stats = await getStatsFor(runtimeId);
     const cost = stats.cost ?? 0;
-    const today = todayISO();
-    if (!dailyDate) dailyDate = today;
-    if (dailyDate !== today) {
-      dailyDate = today;
-      dailySpent = 0;
-    }
-    if (currentSessionFile) {
-      const previous = sessionCosts[currentSessionFile] ?? 0;
-      const delta = Math.max(0, cost - previous);
-      dailySpent += delta;
-      sessionCosts[currentSessionFile] = cost;
+    const applied = applyCost({ cost, sessionFile, ledger: ledgerState(), today: todayISO() });
+    dailyDate = applied.ledger.dailyDate;
+    dailySpent = applied.ledger.dailySpent;
+    sessionCosts = applied.ledger.sessionCosts;
+    if (sessionFile || applied.rollover) {
       writeState({ dailyDate, dailySpent, sessionCosts });
     }
 
-    const status = budgetStatus(cost);
-    if (
-      !alertedSession &&
-      (status.sessionUsd >= status.sessionLimit * status.alertRatio ||
-        status.dailyUsd >= status.dailyLimit * status.alertRatio)
-    ) {
-      alertedSession = true;
+    const status = budgetStatus(cost, sessionFile);
+    const alertKey = sessionFile ?? runtimeId;
+    if (!alertedSessions.has(alertKey) && shouldAlert(status, budget)) {
+      alertedSessions.add(alertKey);
       reportError({
         code: "E_BUDGET",
         severity: "warning",
@@ -1269,12 +1577,14 @@ async function updateBudget(): Promise<void> {
   }
 }
 
-async function resetBudgetBaseline(): Promise<void> {
-  alertedSession = false;
+async function resetBudgetBaseline(runtimeId = "default"): Promise<void> {
+  const runtime = runtimeById(runtimeId);
+  const sessionFile = runtime?.sessionFile ?? null;
+  if (sessionFile) alertedSessions.delete(sessionFile);
   try {
-    const stats = await getStats();
-    if (currentSessionFile) {
-      sessionCosts[currentSessionFile] = stats.cost ?? 0;
+    const stats = await getStatsFor(runtimeId);
+    if (sessionFile) {
+      sessionCosts[sessionFile] = stats.cost ?? 0;
       writeState({ sessionCosts });
     }
   } catch {
@@ -1301,10 +1611,17 @@ function promptResult(res: { success: boolean; error?: string }): PromptResult {
   return { ok: false, error };
 }
 
-async function checkBudget(): Promise<boolean> {
+/**
+ * 发话前的预算门（修改 4 · M2）：量的是**这个槽/这段会话**的钱。
+ *
+ * 日账仍是账号级的——一天烧超了，所有会话都该停，这是有意的。
+ */
+async function checkBudget(target: SessionRuntime | { id: string; sessionFile: string | null }): Promise<boolean> {
+  const runtimeId = "id" in target ? target.id : "default";
+  const sessionFile = target.sessionFile;
   try {
-    const stats = await getStats(true);
-    const status = budgetStatus(stats.cost ?? 0);
+    const stats = await getStatsFor(runtimeId, true);
+    const status = budgetStatus(stats.cost ?? 0, sessionFile);
     if (status.sessionUsd >= status.sessionLimit) {
       reportError({
         code: "E_BUDGET",
@@ -1340,6 +1657,82 @@ function clearAbortTimer(): void {
   }
 }
 
+/**
+ * 修改 4 · M0：界面要的那张表（会话 + 槽）。
+ *
+ * 会话是身份，槽是进程；`active` 按槽算——因为"哪一段在屏幕上"这件事
+ * 只有槽（进程）知道。
+ */
+function sessionBoard(): SessionBoardView {
+  const queued = new Map(slotPool.queuePositions().map((item) => [sessionKey(item.file), item.position]));
+  const sessions = sessionRegistry.list(workspaceRoot || undefined).map((record): SessionView => {
+    const slot = record.slotId ? slotPool.get(record.slotId) : undefined;
+    return {
+      key: record.key,
+      file: record.file,
+      workspace: record.workspace,
+      ...(record.title ? { title: record.title } : {}),
+      state: record.state,
+      // 未读以转录中枢为准（渲染端刷新后仍准）
+      unread: transcriptHub.summary(hubKeyForFile(record.file)).unread,
+      slotId: record.slotId,
+      running: Boolean(slot?.isRunning),
+      busy: Boolean(slot?.busy),
+      active: record.slotId !== null && record.slotId === slotPool.activeSlotId,
+      ...(queued.has(record.key) ? { queued: queued.get(record.key) } : {}),
+    };
+  });
+  return {
+    sessions,
+    slots: slotPool.list(),
+    activeSlotId: slotPool.activeSlotId,
+    maxSlots: slotPool.max,
+  };
+}
+
+/**
+ * 把笔记本用的 `pythonKernel` / `rKernel` 指到**当前可见会话**的那一对（M2）。
+ *
+ * 这两个变量以前是全局单例（切会话就串台）。现在它们只是"别名的指针"：
+ * 真正的归属在 `kernelManager` 里按会话记，指针指错了只是界面显示错，
+ * 不会影响 run_code 走 broker 的那条路（那条按 token → 会话解析）。
+ */
+function pointKernelsAt(sessionFile: string | null): void {
+  if (!kernelManager) return;
+  const key = kernelKeyFor(sessionFile, slotPool?.activeSlotId ?? "default");
+  const pair = kernelManager.get(key, workspaceRoot);
+  pythonKernel = pair.python;
+  rKernel = pair.r;
+}
+
+/**
+ * 内核空闲多久算过期（M2）：默认 10 分钟，`OMCP_KERNEL_IDLE_MINUTES` 可调。
+ * 内核比 pi 进程贵（100–300 MB），但变量是会话的资产，所以给一个明确、可解释的期限。
+ */
+function kernelIdleMs(): number {
+  const minutes = Number(process.env.OMCP_KERNEL_IDLE_MINUTES ?? 10);
+  return Math.max(1, Number.isFinite(minutes) ? minutes : 10) * 60_000;
+}
+
+/** 默认槽换绑会话：supervisor 的 `--session`、ServiceHub、会话登记表三处一起改 */
+function bindDefaultSession(file: string | null): void {
+  runtimeManager.updateSession("default", file);
+  slotPool.bindSession("default", file);
+}
+
+/** 会话标记成忙碌/空闲（事件流里改，界面据此画状态点） */
+function markSessionFromEvent(runtimeId: string, busy: boolean): boolean {
+  const slot = slotPool.get(runtimeId);
+  const file = slot?.sessionFile;
+  if (!file) return false;
+  const record = sessionRegistry.get(file);
+  if (!record) return false;
+  const next = busy ? "busy" : "idle";
+  if (record.state === next) return false;
+  sessionRegistry.setState(file, next);
+  return true;
+}
+
 async function syncCurrentSession(): Promise<void> {
   try {
     const res = await rpc.request({ type: "get_state" });
@@ -1347,7 +1740,7 @@ async function syncCurrentSession(): Promise<void> {
     const file = normalizeSessionFile(state?.sessionFile);
     if (file) {
       currentSessionFile = file;
-      runtimeManager.updateSession("default", file);
+      bindDefaultSession(file);
       if (existsSync(file)) writeWorkspaceState({ lastSessionFile: file });
     }
   } catch {
@@ -1364,10 +1757,11 @@ supervisor.on("exit", (info: { code: number | null; signal: NodeJS.Signals | nul
   setPiReady(false);
   stopPiProbe();
   rpc.detach();
-  cancelPendingApprovals();
+  cancelPendingApprovals("default");
   grants?.clearSession();
   turnTrace.abort("pi-exit");
   eventPump.dispose();
+  markSlotCrash("default");
   if (!supervisor.isStopping && info.code !== 0) {
     reportError({
       code: "E_PI_EXIT",
@@ -1409,7 +1803,11 @@ supervisor.on("error", (err: Error) => {
   send("bridge:status", "error" satisfies BridgeStatus);
 });
 
-rpc.on("response", () => setPiReady(true));
+rpc.on("response", () => {
+  // 默认槽也走同一份就绪判定：槽表据此给界面画状态点
+  defaultRuntime.markReady();
+  setPiReady(true);
+});
 
 rpc.on("event", (ev: PiEvent) => {
   turnTrace.countIpc();
@@ -1480,7 +1878,7 @@ rpc.on("event", (ev: PiEvent) => {
     invalidateStats();
     turnTrace.settle();
     void syncCurrentSession();
-    void updateBudget();
+    void updateBudget("default");
     const autoFinishModes = new Set(["", "tree", "fork", "clone", "export", "recover", "window"]);
     if (SELFTEST && autoFinishModes.has(SELFTEST_MODE) && !selftestDone) finishSelftest();
   }
@@ -1709,33 +2107,46 @@ ipcMain.handle(
       runtimeId && runtimeId !== "default"
         ? runtimeManager.require(runtimeId)
         : defaultRuntime;
-    if (target.id === "default" ? !piReady : !target.rpc.attached) {
+    const notReady = await ensureSlotReady(target, 20_000);
+    if (notReady) {
       console.log("[pi] prompt blocked: not ready");
-      return { ok: false, error: "pi 正在启动，请稍候再发送" };
+      return notReady;
     }
     const list = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
     const behavior = opts?.streamingBehavior;
+    // 用户这句话进转写：事件流里没有"用户消息"，主进程收下 prompt 时补一条
+    transcriptHub.userTurn(
+      hubKeyForSlot(target.id),
+      text,
+      list.map((img, index) => ({
+        id: `${Date.now().toString(36)}-${index}`,
+        data: img.data,
+        mimeType: img.mimeType,
+      })),
+    );
     // 只有没有进行中的回合时才开新记录；排队/追加不另起一条，避免把计时算到别人头上
-    const turnId = turnTrace.begin("prompt", {
+    const trace = traceOf(target.id);
+    const turnId = trace.begin("prompt", {
       textLen: text.length,
       images: list.length,
+      runtime: target.id,
       ...(behavior ? { behavior } : {}),
     });
     const own = turnId !== null;
     if (own) {
       // 上一次 prompt 之后一共扫了几次会话账本；接入缓存后应接近 1
-      turnTrace.note("statsQueriesSinceLastPrompt", statsQueryCount);
+      trace.note("statsQueriesSinceLastPrompt", statsQueryCount);
       statsQueryCount = 0;
     }
 
     const budgetStart = performance.now();
-    const budgetOk = await checkBudget();
-    if (own) turnTrace.note("budgetMs", performance.now() - budgetStart);
+    const budgetOk = await checkBudget(target);
+    if (own) trace.note("budgetMs", performance.now() - budgetStart);
     if (!budgetOk) {
-      if (own) turnTrace.fail("budget");
+      if (own) trace.fail("budget");
       return { ok: false, error: "预算已用完，先调整上限或等明天" };
     }
-    if (own) turnTrace.phase("preparing");
+    if (own) trace.phase("preparing");
 
     let res: PiResponse;
     const ackStart = performance.now();
@@ -1765,14 +2176,14 @@ ipcMain.handle(
         }
       }
     } catch (err) {
-      if (own) turnTrace.fail("rpc-error");
+      if (own) trace.fail("rpc-error");
       throw err;
     }
-    if (own) turnTrace.note("promptAckMs", performance.now() - ackStart);
+    if (own) trace.note("promptAckMs", performance.now() - ackStart);
     if (res.success) {
       if (target.id === "default") maybeAutoTitle(text);
     } else if (own) {
-      turnTrace.fail("rejected");
+      trace.fail("rejected");
     }
     return promptResult(res);
   },
@@ -1833,28 +2244,21 @@ function visionView(): VisionSettingsView {
 }
 
 function planStatus(): PlanGateStatus {
-  return {
-    enabled: planGate.enabled,
-    approved: planGate.approved,
-    planPath: planGate.planPath,
-    digest: planGate.digest,
-  };
+  return planGates.status(visiblePlanKey());
 }
 
 /**
  * 批准后的复核（P1-01）：计划文件被删/读不了/被改过，就撤销批准并退回只读。
  * 在每次非只读工具调用前由 PolicyService 调用；只读工具不触发（不影响看方案）。
  */
-function revalidatePlanGate(): { ok: boolean; reason?: string } {
-  if (!planGate.enabled || !planGate.approved) return { ok: true };
-  // 已批准却丢了路径/摘要：无法证明批准的是哪份内容，按失效处理（fail-closed）
-  const result =
-    planGate.planPath && planGate.digest
-      ? verifyPlanFile(planAbsPath(workspaceRoot ?? "", planGate.planPath), planGate.digest)
-      : { ok: false, reason: "批准状态缺少路径或内容摘要" };
+function revalidatePlanGate(key: string): { ok: boolean; reason?: string } {
+  const driftedPath = planGates.for(key).planPath;
+  const result = planGates.revalidate(
+    key,
+    verifyPlanFile,
+    (rel) => planAbsPath(workspaceRoot ?? "", rel),
+  );
   if (result.ok) return result;
-  const driftedPath = planGate.planPath;
-  planGate.approved = false;
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -1884,12 +2288,7 @@ ipcMain.handle("route:export", () => (workspaceRoot ? exportRoute(workspaceRoot)
 ipcMain.handle("plan:status", (): PlanGateStatus => planStatus());
 
 ipcMain.handle("plan:set", (_event, enabled: boolean): PlanGateStatus => {
-  planGate.enabled = Boolean(enabled);
-  if (!planGate.enabled) {
-    planGate.approved = false;
-    planGate.planPath = null;
-    planGate.digest = null;
-  }
+  planGates.setEnabled(visiblePlanKey(), Boolean(enabled));
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -1903,8 +2302,9 @@ ipcMain.handle("plan:set", (_event, enabled: boolean): PlanGateStatus => {
 
 ipcMain.handle("plan:approve", (_event, planPath: string): PlanGateStatus => {
   if (!workspaceRoot) return planStatus();
+  const gateKey = visiblePlanKey();
   if (!isValidPlanPath(workspaceRoot, planPath)) {
-    planGate.approved = false;
+    planGates.revoke(gateKey);
     return planStatus();
   }
   // 批准 = 批准“这份内容”：记下摘要，之后文件一改就失效
@@ -1915,12 +2315,10 @@ ipcMain.handle("plan:approve", (_event, planPath: string): PlanGateStatus => {
     digest = null;
   }
   if (!digest) {
-    planGate.approved = false;
+    planGates.revoke(gateKey);
     return planStatus();
   }
-  planGate.planPath = planPath;
-  planGate.digest = digest;
-  planGate.approved = true;
+  planGates.approve(gateKey, planPath, digest);
   auditLog?.write({
     ts: new Date().toISOString(),
     toolName: "plan",
@@ -2007,23 +2405,45 @@ ipcMain.handle(
     })(),
 );
 
+/**
+ * 修改 4 · M0：发话前先确认这个**槽**能接活。
+ *
+ * 默认槽沿用 `piReady`（启动探测在那边）；其余槽用 `waitReady` 等一小会儿——
+ * 切回挂起的会话时进程正在 resume，第一句不该直接失败（G5）。
+ */
+async function ensureSlotReady(
+  target: SessionRuntime,
+  timeoutMs = 60_000,
+): Promise<PromptResult | null> {
+  if (target.id === "default") {
+    return piReady ? null : { ok: false, error: "pi 正在启动，请稍候再发送" };
+  }
+  if (target.ready) return null;
+  try {
+    await target.waitReady(timeoutMs);
+    return null;
+  } catch {
+    return { ok: false, error: "这个会话的 pi 还没起好，稍等一下再发" };
+  }
+}
+
 ipcMain.handle("pi:steer", async (_event, text: string, runtimeId?: string): Promise<PromptResult> => {
   const target =
     runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
-  if (target.id === "default" ? !piReady : !target.rpc.attached) {
-    return { ok: false, error: "pi 正在启动，请稍候再发送" };
-  }
-  if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  const notReady = await ensureSlotReady(target);
+  if (notReady) return notReady;
+  if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  transcriptHub.userTurn(hubKeyForSlot(target.id), text);
   return promptResult(await target.rpc.request({ type: "steer", message: text }));
 });
 
 ipcMain.handle("pi:follow-up", async (_event, text: string, runtimeId?: string): Promise<PromptResult> => {
   const target =
     runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
-  if (target.id === "default" ? !piReady : !target.rpc.attached) {
-    return { ok: false, error: "pi 正在启动，请稍候再发送" };
-  }
-  if (!(await checkBudget())) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  const notReady = await ensureSlotReady(target);
+  if (notReady) return notReady;
+  if (!(await checkBudget(target))) return { ok: false, error: "预算已用完，先调整上限或等明天" };
+  transcriptHub.userTurn(hubKeyForSlot(target.id), text);
   return promptResult(await target.rpc.request({ type: "follow_up", message: text }));
 });
 
@@ -2046,7 +2466,7 @@ ipcMain.handle("pi:abort", async (_event, runtimeId?: string) => {
     runtimeId && runtimeId !== "default"
       ? runtimeManager.require(runtimeId)
       : defaultRuntime;
-  turnTrace.abort("user");
+  traceOf(target.id).abort("user");
   // Optimistic: do not wait for the RPC abort response.
   target.rpc.send({ type: "abort" });
   clearAbortTimer();
@@ -2069,13 +2489,14 @@ ipcMain.handle("pi:new-session", async (_event, runtimeId?: string) => {
       invalidateWorkspaceIndex();
       currentSessionFile = null;
       applyPermissionMode();
-      runtimeManager.updateSession("default", null);
+      bindDefaultSession(null);
+      pointKernelsAt(null);
       writeWorkspaceState({ lastSessionFile: null });
-      void resetBudgetBaseline();
+      void resetBudgetBaseline(target.id);
     } else {
       const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
       const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
-      runtimeManager.updateSession(target.id, file);
+      slotPool.bindSession(target.id, file);
     }
     // 新会话沿用“设为默认”的推理档（旧会话各自保留自己的记录）
     await target.rpc
@@ -2629,7 +3050,7 @@ ipcMain.handle("pi:fork", async (_event, entryId: string, runtimeId?: string) =>
   } else {
     const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
     const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
-    runtimeManager.updateSession(target.id, file);
+    slotPool.bindSession(target.id, file);
   }
   const sessionFile = target.id === "default" ? currentSessionFile : target.sessionFile;
   const persisted = !!(sessionFile && existsSync(sessionFile));
@@ -2647,7 +3068,7 @@ ipcMain.handle("pi:clone", async (_event, runtimeId?: string) => {
   } else {
     const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
     const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
-    runtimeManager.updateSession(target.id, file);
+    slotPool.bindSession(target.id, file);
   }
   return data;
 });
@@ -3040,12 +3461,12 @@ ipcMain.handle("pi:state", async () => {
   const state = res.data as SessionState;
   const file = normalizeSessionFile(state?.sessionFile);
   if (file) {
+    const switched = file !== currentSessionFile;
     state.sessionFile = file;
     currentSessionFile = file;
-    defaultRuntime.setSessionFile(file);
-    planGate.approved = false;
-    planGate.planPath = null;
-    planGate.digest = null;
+    // 走登记表，别绕过它——否则内核键与 ServiceHub 的会话会落后（M2）
+    bindDefaultSession(file);
+    if (switched) resetPlanGate(`session:${sessionKey(file)}`);
     if (existsSync(file)) writeWorkspaceState({ lastSessionFile: file });
   }
   return state;
@@ -3203,42 +3624,71 @@ ipcMain.handle("mcp:login", async (_event, name: string) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* P2a：runtime 管理（UI 标签在 P2b 接）                                  */
+/* 修改 4 · M0：会话是界面身份，槽是执行身份                              */
 /* ------------------------------------------------------------------ */
+
+ipcMain.handle("session:board", () => sessionBoard());
+
+/**
+ * 打开一个会话：找槽 / 绑定 / 必要时挂起最久未用的那个 / 否则排队。
+ *
+ * 这是「切走不停」的入口——切标签不再走 `switch_session`（那会中断在飞的回合），
+ * 而是把目标会话放到它自己的槽上。
+ */
+ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpenView> => {
+  if (!workspaceRoot) throw new Error("请先打开一个工作区");
+  const target = normalizeSessionFile(file) ?? file;
+  const outcome = await slotPool.open(target, workspaceRoot, {
+    visibleSlotId: slotPool.activeSlotId,
+  });
+  currentSessionFile = target;
+  applyPermissionMode();
+  pointKernelsAt(target);
+  sessionRegistry.clearUnread(target);
+  transcriptHub.clearUnread(hubKeyForFile(target));
+  // 打开就把"上一轮被中断"的标记收掉：用户已经看到了，红点不该一直挂着
+  if (sessionRegistry.get(target)?.state === "interrupted") {
+    sessionRegistry.setState(target, "idle");
+  }
+  if (existsSync(target)) writeWorkspaceState({ lastSessionFile: target });
+  return { ...outcome, board: sessionBoard() };
+});
+
+/**
+ * 转写快照（修改 4 · M1）。
+ *
+ * 界面切到一个会话时先问这里：有就整段拿，`cold` 说明中枢里还没有
+ * （重启后第一次），由界面用 `get_messages` 重建后再 `seed` 回来。
+ */
+ipcMain.handle("transcript:snapshot", (_event, file: string) => {
+  const target = normalizeSessionFile(file) ?? file;
+  return transcriptHub.snapshot(hubKeyForFile(target));
+});
+
+/** 关闭一个会话的槽：进程停掉、会话保留（可以再打开） */
+ipcMain.handle("session:close", (_event, file: string): SessionBoardView => {
+  const slot = slotPool.slotOfSession(file);
+  if (slot) slotPool.closeSlot(slot.id);
+  return sessionBoard();
+});
+
+/* 旧的 runtime:* 入口（保留给诊断面板与兼容调用） */
 
 ipcMain.handle("runtime:list", () => runtimeManager.list());
 
 ipcMain.handle(
   "runtime:create",
-  (
-    _event,
-    input?: { workspaceRoot?: string; sessionFile?: string | null },
-  ) => {
+  (_event, input?: { workspaceRoot?: string; sessionFile?: string | null }) => {
     const root = input?.workspaceRoot?.trim() || workspaceRoot;
     if (!root) throw new Error("请先打开一个工作区，再创建 runtime");
-    const id = `runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    let created: SessionRuntime | null = null;
-    created = runtimeManager.create({
-      id,
-      provider: supervisor.getProvider(),
-      model: supervisor.getModel(),
-      emit: emitRuntimeEvent,
-      pumpEnabled: process.env.OMCP_EVENT_PUMP !== "0",
-      workspaceRoot: root,
-      sessionFile: input?.sessionFile ?? null,
-      autoAttach: true,
-      onExtensionUi: (ev) => {
-        if (created && ev.type === "extension_ui_request") handleExtensionUi(ev, created);
-      },
-    });
-    const runtime = created;
-    if (sessionDir) runtime.setSessionDir(sessionDir);
-    runtime.setTrustProject(appSettings.trustProject);
-    runtime.setExtensions(runtimeExtensions);
-    runtime.setThinkingLevel(appSettings.thinkingLevel);
-    applyRuntimeServiceEnv(runtime);
-    runtime.start();
-    return runtimeManager.list().find((item) => item.id === id) ?? null;
+    const created = slotPool.spawnFree(root, { visibleSlotId: slotPool.activeSlotId });
+    if (sessionDir) created.setSessionDir(sessionDir);
+    created.setTrustProject(appSettings.trustProject);
+    created.setExtensions(runtimeExtensions);
+    created.setThinkingLevel(appSettings.thinkingLevel);
+    applyRuntimeServiceEnv(created);
+    created.start();
+    return runtimeManager.list().find((item) => item.id === created.id) ?? null;
   },
 );
 
@@ -3269,18 +3719,17 @@ ipcMain.handle("runtime:stats", async (_event, id: string) => {
   return (res.data as SessionStats | undefined) ?? null;
 });
 
-ipcMain.handle("runtime:activate", (_event, id: string) => {
-  runtimeManager.activate(String(id));
+ipcMain.handle("runtime:activate", async (_event, id: string) => {
+  await slotPool.activate(String(id)).catch(() => undefined);
+  const bound = slotPool.get(String(id))?.sessionFile ?? null;
+  if (bound) pointKernelsAt(bound);
   return runtimeManager.list();
 });
 
 ipcMain.handle("runtime:close", (_event, id: string) => {
   const target = String(id);
   if (target === "default") throw new Error("默认 runtime 不能关闭");
-  cancelPendingApprovals(target);
-  kernelManager?.dispose(target);
-  runtimeAuditLogs.delete(target);
-  runtimeManager.close(target);
+  slotPool.closeSlot(target);
   return runtimeManager.list();
 });
 
@@ -3476,6 +3925,7 @@ ipcMain.handle(
     if (typeof patch.maxRuntimes === "number" && Number.isFinite(patch.maxRuntimes)) {
       appSettings.maxRuntimes = Math.max(1, Math.min(4, Math.floor(patch.maxRuntimes)));
       runtimeManager.setMaxRuntimes(appSettings.maxRuntimes);
+      slotPool.setMaxSlots(appSettings.maxRuntimes);
     }
     if (
       typeof patch.runtimeIdleMinutes === "number" &&
@@ -3696,12 +4146,13 @@ ipcMain.handle("pi:switch-session", async (_event, file: string, runtimeId?: str
     if (runtime.id === "default") {
       currentSessionFile = target;
       applyPermissionMode();
+      pointKernelsAt(target);
       defaultRuntime.setSessionFile(target);
       writeWorkspaceState({ lastSessionFile: target });
-      void resetBudgetBaseline();
     } else {
-      runtimeManager.updateSession(runtime.id, target);
+      slotPool.bindSession(runtime.id, target);
     }
+    void resetBudgetBaseline(runtime.id);
     const key = sessionMetaKey(target);
     if (workspaceRoot && key && existsSync(join(sessionDir, key))) {
       patchSessionMeta(workspaceRoot, key, { lastOpenedAt: new Date().toISOString() });
@@ -5374,6 +5825,7 @@ app.whenReady().then(async () => {
   loadSettings();
   // 设置文件里的上限在 RuntimeManager 创建之后才读入，启动时要同步一次
   runtimeManager.setMaxRuntimes(appSettings.maxRuntimes);
+  slotPool.setMaxSlots(appSettings.maxRuntimes);
 
   grants = new GrantStore(join(app.getPath("userData"), "grants.json"));
   secretStore = new SecretStore(join(app.getPath("userData"), "secrets.json"));
@@ -5392,8 +5844,13 @@ app.whenReady().then(async () => {
     grants,
     audit: (entry) => auditLog?.write(entry),
     getSettingsPolicy: () => settingsPolicyPath,
-    getPlanGate: () => ({ enabled: planGate.enabled, approved: planGate.approved }),
-    revalidatePlan: () => revalidatePlanGate(),
+    // 修改 4 · M2：方案期与权限档都按会话取，A 批准了不代表 B 也批准
+    getPlanGate: (ctx) => {
+      const gate = planGateFor(planKeyOf(ctx));
+      return { enabled: gate.enabled, approved: gate.approved };
+    },
+    revalidatePlan: (ctx) => revalidatePlanGate(planKeyOf(ctx)),
+    modeFor: (ctx) => permissionModeFor(ctx),
     resolveRuntime: (token) => {
       const binding = runtimeManager.services.resolve(token);
       return binding
@@ -5453,13 +5910,26 @@ app.whenReady().then(async () => {
   // 生成的 spec 放应用私有目录，不写用户的 %APPDATA%\jupyter
   const kernelSpecDir = join(app.getPath("userData"), "kernels");
   kernelManager = new KernelManager(sidecarPath, app.getPath("userData"), kernelSpecDir);
-  const defaultKernels = kernelManager.get("default");
-  pythonKernel = defaultKernels.python;
-  rKernel = defaultKernels.r;
-  pythonKernel.setPythonPath(appSettings.pythonPath);
-  rKernel.setRPath(appSettings.rPath);
+  kernelManager.setPythonPath(appSettings.pythonPath);
+  kernelManager.setRPath(appSettings.rPath);
+  pointKernelsAt(currentSessionFile ?? null);
+  /**
+   * legacy 全局 token 那一支用的"默认对"。
+   * 用取值器而不是快照：笔记本切会话时别名会换，broker 必须跟着换，
+   * 否则老 token 会把请求送到上一个会话的内核里（正是要修的那条串台）。
+   */
+  const aliasPair = {
+    get python(): KernelService {
+      if (!pythonKernel) throw new Error("内核管理器尚未就绪");
+      return pythonKernel;
+    },
+    get r(): KernelService {
+      if (!rKernel) throw new Error("内核管理器尚未就绪");
+      return rKernel;
+    },
+  };
   kernelBroker = new KernelBroker(
-    { python: pythonKernel, r: rKernel },
+    aliasPair,
     (data) => {
       saveFigure(data);
     },
@@ -5493,15 +5963,29 @@ app.whenReady().then(async () => {
         },
       });
     },
-    // P1b2b：runtime token → 该 runtime 的内核；legacy 全局 token 仍由 broker 兜底
+    // 修改 4 · M2：token → runtime → **会话** → 该会话的内核（换会话不再串台）
     (token) => {
       const binding = runtimeManager.services.resolve(token);
       if (!binding) return undefined;
-      const pair = kernelManager?.get(binding.runtimeId);
+      const key = kernelKeyFor(binding.session, binding.runtimeId);
+      // get() 自己会 touch lastUsedAt，空闲回收据此判断
+      const pair = kernelManager?.get(key, binding.workspace);
       return pair ? { runtimeId: binding.runtimeId, services: pair } : undefined;
     },
   );
   await kernelBroker.start();
+  // 修改 4 · M4：子任务并发闸的入口（扩展进程来领名额）
+  subagentGateServer = await startSubagentGateServer(subagentGate, {
+    onError: (message) => console.error("[子任务闸]", message),
+    // 子进程要继承这个槽**此刻**的 provider/model（env 是建进程那一刻的快照，换过模型就旧了）
+    modelFor: (key) => {
+      const runtime = runtimeManager.get(key);
+      return {
+        provider: runtime?.supervisor.getProvider() || undefined,
+        model: runtime?.supervisor.getModel() || undefined,
+      };
+    },
+  });
   browserService = new BrowserService({
     playwrightDir: app.isPackaged
       ? join(process.resourcesPath, "plugin-ext", "payload", "node_modules", "playwright-core")
@@ -5536,6 +6020,13 @@ app.whenReady().then(async () => {
       ? join(process.resourcesPath, "plugin-ext", "index.mjs")
       : resolve(app.getAppPath(), "../../packages/plugin-ext/src/index.ts"));
 
+  // 修改 4 · M4：子任务扩展（族开关 subagent，默认关）
+  const subagentExtPath =
+    process.env.OMCP_SUBAGENT_EXT ||
+    (app.isPackaged
+      ? join(process.resourcesPath, "subagent-ext", "src", "index.ts")
+      : resolve(app.getAppPath(), "../../packages/subagent-ext/src/index.ts"));
+
   applyRuntimeServiceEnv(defaultRuntime);
   // playwright-core 在 payload/node_modules（electron-builder 跳过根部 node_modules）
   defaultRuntime.setEnv(
@@ -5547,7 +6038,7 @@ app.whenReady().then(async () => {
   if (appSettings.piConfigDir) {
     defaultRuntime.setEnv("PI_CODING_AGENT_DIR", appSettings.piConfigDir);
   }
-  runtimeExtensions = [extensionPath, permissionExtPath, pluginExtPath];
+  runtimeExtensions = [extensionPath, permissionExtPath, pluginExtPath, subagentExtPath];
   defaultRuntime.setExtensions(runtimeExtensions);
 
   const ws = readWorkspaces();
@@ -5632,9 +6123,11 @@ app.on("before-quit", (event) => {
       }
     }
   }
-  pythonKernel?.shutdown();
-  rKernel?.shutdown();
+  // 内核按会话记（M2）：退出一律全关，别只关当前可见的那一对
+  kernelManager?.disposeAll();
   kernelBroker?.stop();
+  subagentGate.dispose();
+  subagentGateServer?.close();
   setTimeout(() => app.quit(), 800);
   event.preventDefault();
 });

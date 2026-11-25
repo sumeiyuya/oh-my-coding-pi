@@ -286,6 +286,15 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
+  packages/subagent-ext:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.6
+        version: 26.6.6
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
 packages:
 
   '@babel/code-frame@7.29.7':

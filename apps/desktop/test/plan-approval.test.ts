@@ -91,3 +91,64 @@ test("verifyPlanFile：没有摘要 → 失效（fail-closed）", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * 修改 4 · M2：方案期按会话记。
+ * A 批准了方案，B 仍然是只读——这条以前是错的（单对象 planGate）。
+ */
+import { PlanGateBook } from "../src/main/plan-approval.ts";
+
+test("方案期按会话独立：A 批准不影响 B", () => {
+  const book = new PlanGateBook();
+  book.setEnabled("session:a", true);
+  book.setEnabled("session:b", true);
+  book.approve("session:a", "plans/x.md", "digest-a");
+
+  assert.equal(book.status("session:a").approved, true);
+  assert.equal(book.status("session:b").approved, false, "B 不该因为 A 批准而放行");
+  assert.equal(book.status("session:b").enabled, true);
+});
+
+test("关掉方案期会清掉批准；再打开也不是已批准", () => {
+  const book = new PlanGateBook();
+  book.setEnabled("session:a", true);
+  book.approve("session:a", "plans/x.md", "d");
+  book.setEnabled("session:a", false);
+  assert.deepEqual(book.status("session:a"), {
+    enabled: false,
+    approved: false,
+    planPath: null,
+    digest: null,
+  });
+  book.setEnabled("session:a", true);
+  assert.equal(book.status("session:a").approved, false);
+});
+
+test("内容漂移只撤销那一个会话的批准", () => {
+  const book = new PlanGateBook();
+  book.setEnabled("session:a", true);
+  book.setEnabled("session:b", true);
+  book.approve("session:a", "plans/x.md", "digest-a");
+  book.approve("session:b", "plans/x.md", "digest-b");
+
+  const result = book.revalidate("session:a", () => ({ ok: false, reason: "改过" }), (rel) => rel);
+  assert.equal(result.ok, false);
+  assert.equal(book.status("session:a").approved, false);
+  assert.equal(book.status("session:b").approved, true, "B 的批准不该被 A 的漂移带走");
+});
+
+test("没批准时 revalidate 直接放行（不读盘）", () => {
+  const book = new PlanGateBook();
+  book.setEnabled("session:a", true);
+  let touched = false;
+  const result = book.revalidate(
+    "session:a",
+    () => {
+      touched = true;
+      return { ok: true };
+    },
+    (rel) => rel,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(touched, false);
+});

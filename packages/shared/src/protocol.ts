@@ -711,6 +711,56 @@ export interface RuntimeView {
   busy: boolean;
 }
 
+/**
+ * 修改 4 · M0：会话是界面上的身份，槽是背后的 pi 进程。
+ *
+ * 这两张表一起给界面用：会话标签显示「哪段对话 + 它的进程在不在跑」，
+ * 槽表只在诊断面板出现。`state` 与槽无关——挂起（suspended）是"保留但不占资源"，
+ * interrupted 是"进程崩了，这一轮被打断"，两者不能混。
+ */
+export type SessionRunState = "closed" | "suspended" | "idle" | "busy" | "interrupted";
+
+export interface SessionView {
+  /** 规范化后的绝对路径（主键） */
+  key: string;
+  file: string;
+  workspace: string;
+  title?: string;
+  state: SessionRunState;
+  unread: number;
+  slotId: string | null;
+  running: boolean;
+  busy: boolean;
+  active: boolean;
+  /** 修改 4 · M3：在等名额时的位次（1 = 下一个） */
+  queued?: number;
+}
+
+export interface SlotView {
+  id: string;
+  workspace: string;
+  sessionFile: string | null;
+  state: "free" | "starting" | "idle" | "busy" | "suspended";
+  running: boolean;
+  ready: boolean;
+  busy: boolean;
+  active: boolean;
+}
+
+export interface SessionBoardView {
+  sessions: SessionView[];
+  slots: SlotView[];
+  activeSlotId: string | null;
+  maxSlots: number;
+}
+
+export interface SessionOpenView {
+  kind: "activated" | "bound" | "resumed" | "created" | "preempted" | "queued";
+  slotId?: string;
+  position?: number;
+  board: SessionBoardView;
+}
+
 export interface McpLoginResult {
   ok: boolean;
   /** 授权页地址：浏览器没自动打开时给用户点 */
@@ -1428,6 +1478,18 @@ export interface PreloadApi {
   }): Promise<RuntimeView | null>;
   activateRuntime(id: string): Promise<RuntimeView[]>;
   closeRuntime(id: string): Promise<RuntimeView[]>;
+  /** 修改 4 · M0：会话级入口（标签 = 会话） */
+  getSessionBoard(): Promise<SessionBoardView>;
+  openSession(file: string): Promise<SessionOpenView>;
+  closeSession(file: string): Promise<SessionBoardView>;
+  onSessionChanged(cb: (board: SessionBoardView) => void): () => void;
+  onSessionOpened(cb: (payload: { file: string }) => void): () => void;
+  /** 修改 4 · M1：主进程的转写快照（切回会话时整段拿） */
+  getTranscript(file: string): Promise<{ key: string; revision: number; items: unknown[]; unread: number; cold: boolean }>;
+  /** 系统提示（崩溃中断、内核回收）：直接进当前可见会话的转写 */
+  onSessionNote(cb: (payload: { file: string; text: string }) => void): () => void;
+  /** 会话内核因空闲被回收（变量已清空） */
+  onKernelReaped(cb: (payload: { key: string; file: string | null }) => void): () => void;
 }
 
 export type IpcRequest =

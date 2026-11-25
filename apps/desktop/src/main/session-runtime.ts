@@ -51,6 +51,10 @@ export class SessionRuntime {
   private currentSessionDir: string | null = null;
   private activeAt = Date.now();
   private busyFlag = false;
+  /** 上一次退出时是不是正在跑一轮（崩溃标注用：清 busy 之前先记下来） */
+  private exitedBusy = false;
+  /** 修改 4 · M0：就绪以一次成功的 get_state 为准，不是 rpc.attached（G5） */
+  private readyFlag = false;
 
   constructor(opts: SessionRuntimeOptions) {
     this.id = opts.id;
@@ -58,6 +62,16 @@ export class SessionRuntime {
     this.workspaceRoot = opts.workspaceRoot ?? "";
     this.currentSessionFile = opts.sessionFile ?? null;
     this.supervisor = new PiSupervisor(opts.provider ?? "", opts.model ?? "");
+    /**
+     * 修改 4 · M3（GUI 冒烟抓到的）：构造时就必须把 cwd 与 --session 交给 supervisor。
+     *
+     * 之前只在 `setWorkspace()` / `setSessionFile()` 里设，而"新建槽"走的正是
+     * 构造参数——于是后台会话的 pi 一直以 **Electron 的启动目录** 为 cwd 跑：
+     * `--session-dir` 是绝对路径，所以会话文件照旧落在工作区，问题被掩盖了；
+     * 但 agent 的相对路径工具（read/bash/grep）、AGENTS.md 全指向错的地方。
+     */
+    if (opts.workspaceRoot) this.supervisor.setCwd(opts.workspaceRoot);
+    if (opts.sessionFile) this.supervisor.setSessionFile(opts.sessionFile);
     this.rpc = new RpcClient();
     this.pump = new EventPump({
       emit: (ev) => {
@@ -77,6 +91,18 @@ export class SessionRuntime {
         this.pump.push(ev as PiEvent);
       });
     }
+    // 进程一退，就绪与"在跑"都必须作废——不管这条 runtime 由谁接线。
+    // 不清 busyFlag 的话，崩溃之后这个槽会一直显示"运行中"，
+    // 于是它既不会被空闲回收，也不会被别的会话抢占（修改 4 · M3）。
+    this.supervisor.on("exit", () => {
+      this.exitedBusy = this.busyFlag;
+      this.readyFlag = false;
+      this.busyFlag = false;
+    });
+    this.supervisor.on("spawn", () => {
+      this.exitedBusy = false;
+      this.readyFlag = false;
+    });
     for (const [key, value] of Object.entries(opts.env ?? {})) this.setEnv(key, value);
   }
 
@@ -88,8 +114,46 @@ export class SessionRuntime {
   get lastActiveAt(): number { return this.activeAt; }
   get busy(): boolean { return this.busyFlag; }
   get isRunning(): boolean { return this.supervisor.current !== null; }
+  /** 这次退出是不是"我们自己停的"（空闲回收、抢占、换工作区都算主动） */
+  get isStopping(): boolean { return this.supervisor.isStopping; }
+  /** 上一次退出时正在跑一轮吗（崩溃标注的依据） */
+  get lastExitWhileBusy(): boolean { return this.exitedBusy; }
+  get ready(): boolean { return this.readyFlag; }
+
+  /**
+   * 等 pi 真的能接活。
+   *
+   * 进程在 ≠ 就绪：扩展加载 / 首次编译期间 RPC 会几十秒不理人，
+   * 这时发 prompt 会被拒（老代码只判断 `rpc.attached`，所以挂起的会话
+   * 切回来第一句经常失败）。判据是一次成功的 `get_state`。
+   */
+  async waitReady(timeoutMs = 45_000): Promise<void> {
+    if (this.readyFlag) return;
+    const deadline = Date.now() + timeoutMs;
+    let delay = 120;
+    for (;;) {
+      if (this.readyFlag) return;
+      if (this.rpc.attached) {
+        try {
+          await this.rpc.request({ type: "get_state" }, 1500);
+          this.readyFlag = true;
+          return;
+        } catch {
+          // 还没起来；继续等
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`pi 在 ${Math.round(timeoutMs / 1000)} 秒内没有就绪`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(Math.round(delay * 1.5), 800);
+    }
+  }
 
   markActive(): void { this.activeAt = Date.now(); }
+
+  /** 外部探活成功（默认槽由 index.ts 的探测接线）时标记就绪 */
+  markReady(): void { this.readyFlag = true; }
 
   private touch(ev: PiEvent): void {
     this.activeAt = Date.now();
@@ -166,10 +230,12 @@ export class SessionRuntime {
   }
 
   start(): void {
+    this.readyFlag = false;
     this.supervisor.start();
   }
 
   stop(): void {
+    this.readyFlag = false;
     this.supervisor.stop();
   }
 

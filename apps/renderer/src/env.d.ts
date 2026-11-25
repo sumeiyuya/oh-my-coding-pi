@@ -128,6 +128,14 @@ type P1Api = Pick<
   | "createRuntime"
   | "activateRuntime"
   | "closeRuntime"
+  | "getSessionBoard"
+  | "openSession"
+  | "closeSession"
+  | "onSessionChanged"
+  | "onSessionOpened"
+  | "onKernelReaped"
+  | "onSessionNote"
+  | "getTranscript"
 >;
 
 declare global {

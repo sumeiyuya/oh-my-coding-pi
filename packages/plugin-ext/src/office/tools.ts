@@ -37,7 +37,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; sheet?: string; range_start?: string; range_end?: string; max_rows?: number }) {
+        async execute(_toolCallId: string, p: { file_path: string; sheet?: string; range_start?: string; range_end?: string; max_rows?: number }) {
           return text(await xlsxRead(p));
         },
       },
@@ -59,7 +59,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path", "data"],
           additionalProperties: false,
         },
-        async execute(p: Record<string, unknown>) {
+        async execute(_toolCallId: string, p: Record<string, unknown>) {
           return text(await xlsxWrite(p as never));
         },
       },
@@ -83,7 +83,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path", "operations"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; operations: Array<Record<string, unknown>>; output_path?: string }) {
+        async execute(_toolCallId: string, p: { file_path: string; operations: Array<Record<string, unknown>>; output_path?: string }) {
           return text(await xlsxEdit(p));
         },
       },
@@ -101,7 +101,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; timeout?: number }) {
+        async execute(_toolCallId: string, p: { file_path: string; timeout?: number }) {
           return text(await xlsxRecalc(p));
         },
       },
@@ -118,7 +118,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string }) {
+        async execute(_toolCallId: string, p: { file_path: string }) {
           return text(await xlsxAudit(p));
         },
       },
@@ -148,7 +148,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["destination_path", "content"],
           additionalProperties: false,
         },
-        async execute(p: Record<string, unknown>) {
+        async execute(_toolCallId: string, p: Record<string, unknown>) {
           return text(await pdfCreate(p as never));
         },
       },
@@ -166,7 +166,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; start_page?: number; end_page?: number }) {
+        async execute(_toolCallId: string, p: { file_path: string; start_page?: number; end_page?: number }) {
           return text(await pdfRead(p));
         },
       },
@@ -183,7 +183,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["files", "output_path"],
           additionalProperties: false,
         },
-        async execute(p: { files: string[]; output_path: string }) {
+        async execute(_toolCallId: string, p: { files: string[]; output_path: string }) {
           return text(await pdfMerge(p));
         },
       },
@@ -201,7 +201,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path", "output_dir"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; output_dir: string; pages?: string }) {
+        async execute(_toolCallId: string, p: { file_path: string; output_dir: string; pages?: string }) {
           return text(await pdfSplit(p));
         },
       },
@@ -230,7 +230,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["destination_path", "slides"],
           additionalProperties: false,
         },
-        async execute(p: Record<string, unknown>) {
+        async execute(_toolCallId: string, p: Record<string, unknown>) {
           return text(await pptxCreate(p as never));
         },
       },
@@ -247,7 +247,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; include?: string }) {
+        async execute(_toolCallId: string, p: { file_path: string; include?: string }) {
           return text(await pptxRead(p));
         },
       },
@@ -270,7 +270,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path", "operations"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string; operations: Array<{ find: string; replace?: string; slide?: number }>; output_path?: string }) {
+        async execute(_toolCallId: string, p: { file_path: string; operations: Array<{ find: string; replace?: string; slide?: number }>; output_path?: string }) {
           return text(await pptxEdit(p));
         },
       },
@@ -298,7 +298,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["destination_path", "content"],
           additionalProperties: false,
         },
-        async execute(p: { destination_path: string; title?: string; content: unknown }) {
+        async execute(_toolCallId: string, p: { destination_path: string; title?: string; content: unknown }) {
           return text(await docxCreate(p as never));
         },
       },
@@ -312,7 +312,7 @@ export function officeTools(families: Set<string>): Array<Record<string, unknown
           required: ["file_path"],
           additionalProperties: false,
         },
-        async execute(p: { file_path: string }) {
+        async execute(_toolCallId: string, p: { file_path: string }) {
           return text(await docxRead(p));
         },
       },

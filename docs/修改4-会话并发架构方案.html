@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修改 4 · 会话并发架构（可视化方案）</title>
+<style>
+  :root{
+    --ink:#141b2d; --body:#2a3445; --muted:#66748a; --line:#dce3ee;
+    --bg:#f5f7fb; --card:#ffffff; --soft:#eef2f8;
+    --indigo:#4338ca; --indigo-soft:#e9e8fd;
+    --teal:#0f766e; --teal-soft:#e3f2f0;
+    --red:#b91c1c; --red-soft:#fdeaea;
+    --amber:#b45309; --amber-soft:#fdf1e3;
+    --green:#15803d; --green-soft:#e7f5ec;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--body);font:15px/1.7 "Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  code,.mono{font-family:"Cascadia Mono",Consolas,monospace}
+  .topbar{position:sticky;top:0;z-index:50;background:rgba(245,247,251,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}
+  .topbar-inner{max-width:1160px;margin:0 auto;padding:10px 28px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .brand{font-weight:700;color:var(--ink)}
+  .brand span{color:var(--indigo)}
+  .nav{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
+  .nav a{color:var(--muted);text-decoration:none}
+  .nav a:hover{color:var(--indigo)}
+  .pill{margin-left:auto;font-size:12px;color:var(--muted);border:1px solid var(--line);background:#fff;border-radius:99px;padding:3px 12px}
+  main{max-width:1160px;margin:0 auto;padding:34px 28px 80px}
+
+  .cover{background:linear-gradient(135deg,#111a2e 0%,#252a5c 55%,#4338ca 140%);color:#eef1ff;border-radius:18px;padding:40px 42px;position:relative;overflow:hidden}
+  .cover:after{content:"";position:absolute;right:-80px;top:-90px;width:320px;height:320px;border:1px solid rgba(255,255,255,.15);border-radius:50%;box-shadow:0 0 0 48px rgba(255,255,255,.05),0 0 0 96px rgba(255,255,255,.03)}
+  .cover .kicker{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:#b9b6ff;font-weight:700}
+  .cover h1{margin:10px 0 8px;font-size:32px;line-height:1.3}
+  .cover p{margin:0;color:#c3c8df;max-width:840px}
+  .facts{display:flex;gap:30px;margin-top:26px;flex-wrap:wrap;position:relative;z-index:1}
+  .facts .fact{display:flex;align-items:baseline;gap:8px}
+  .facts b{display:block;font-size:22px;color:#fff}
+  .facts span{font-size:12px;color:#a9afc9}
+
+  section{margin-top:34px}
+  h2{font-size:20px;color:var(--ink);margin:0 0 14px;padding-left:12px;border-left:4px solid var(--indigo)}
+  h2 .no{color:var(--indigo);font-size:13px;letter-spacing:.12em;margin-right:8px;font-weight:700}
+  h3{font-size:15px;color:var(--ink);margin:22px 0 8px}
+  .lead{color:var(--muted);margin:-4px 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px 10px;margin-top:14px}
+  .figure .cap{font-size:12.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:10px;margin-top:6px}
+  .figure .cap b{color:var(--ink)}
+  .figure svg{display:block;width:100%;height:auto}
+
+  table{width:100%;border-collapse:collapse;background:var(--card);font-size:13.5px}
+  .tablewrap{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{background:var(--soft);color:var(--ink);font-size:12.5px;font-weight:700}
+  tr:last-child td{border-bottom:none}
+  td code{background:var(--soft);padding:1px 5px;border-radius:5px;font-size:12.5px;color:#123}
+
+  pre{background:#101526;color:#dfe5f2;border-radius:12px;padding:16px 18px;overflow:auto;font-size:12.6px;line-height:1.62;margin:10px 0}
+  pre .c{color:#7f8aa3}
+  pre .k{color:#a5b4fc}
+  pre .s{color:#f0c987}
+
+  .chip{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:99px;border:1px solid transparent;font-weight:700}
+  .chip.indigo{background:var(--indigo-soft);color:var(--indigo);border-color:#c9c6f8}
+  .chip.teal{background:var(--teal-soft);color:var(--teal);border-color:#bfe0da}
+  .chip.red{background:var(--red-soft);color:var(--red);border-color:#f3c2c2}
+  .chip.amber{background:var(--amber-soft);color:var(--amber);border-color:#f0d5ae}
+  .chip.green{background:var(--green-soft);color:var(--green);border-color:#bfe3cb}
+  .chip.gray{background:var(--soft);color:var(--muted);border-color:var(--line)}
+
+  .callout{border-left:4px solid var(--indigo);background:var(--indigo-soft);border-radius:0 12px 12px 0;padding:14px 18px;margin:14px 0;color:#26245e}
+  .callout.warn{border-color:var(--amber);background:var(--amber-soft);color:#5b3a11}
+  .callout.bad{border-color:var(--red);background:var(--red-soft);color:#5a1414}
+  .callout.good{border-color:var(--green);background:var(--green-soft);color:#14532d}
+
+  ul.check{list-style:none;padding:0;margin:8px 0 0}
+  ul.check li{padding:7px 0 7px 30px;position:relative;border-bottom:1px dashed var(--line);font-size:14px}
+  ul.check li:last-child{border-bottom:none}
+  ul.check li:before{content:"";position:absolute;left:2px;top:11px;width:15px;height:15px;border:2px solid #9db3bd;border-radius:4px}
+
+  .footer{max-width:1160px;margin:0 auto;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding:16px 28px 40px}
+
+  @media print{
+    *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}
+    .topbar{display:none} body{background:#fff} main{max-width:none;padding:0}
+    .cover{border-radius:0}
+    section{margin-top:22px}
+    h2,h3,.lead,.figure .cap{break-after:avoid}
+    .figure,.card{break-inside:avoid}
+    /* 长表格允许跨页，表头每页重复 */
+    .tablewrap{break-inside:auto}
+    thead{display:table-header-group}
+    tr,pre,ul.check li{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">修改 4 <span>·</span> 会话并发架构</div>
+    <nav class="nav">
+      <a href="#gap">缺口</a>
+      <a href="#map">DAWN 对照</a>
+      <a href="#id">身份模型</a>
+      <a href="#arch">目标架构</a>
+      <a href="#seq">并发时序</a>
+      <a href="#admit">准入</a>
+      <a href="#state">状态机</a>
+      <a href="#iso">隔离矩阵</a>
+      <a href="#plan">路线</a>
+    </nav>
+    <div class="pill">方案 · 未改代码</div>
+  </div>
+</div>
+
+<main>
+
+  <header class="cover">
+    <div class="kicker">Architecture Plan · Concurrent Sessions</div>
+    <h1>让多个会话<br>真正同时干活、切走不停</h1>
+    <p>修改 3 解决了「多个 pi 进程能并存」。剩下的四件事是结构问题：标签认错了身份（认进程不认会话）、
+       转录只活在渲染进程内存里、满员就报错、预算与方案期还是全局一份。DAWN 的答案正好是这四件 + 一条并发原语。</p>
+    <div class="facts">
+      <div class="fact"><b>4 个</b><span>身份：会话 / 工作区 / 槽 / 标签</span></div>
+      <div class="fact"><b>2 槽</b><span>默认并发，可配 1–4</span></div>
+      <div class="fact"><b>revision</b><span>事件按序、缺口可重同步</span></div>
+      <div class="fact"><b>8–13 人日</b><span>分 M0–M3</span></div>
+    </div>
+  </header>
+
+  <!-- 01 缺口 -->
+  <section id="gap">
+    <h2><span class="no">01</span>现状：能并存，但不能算并发</h2>
+    <p class="lead">已经有的（0.6.11）：多 runtime 容器、事件按 runtimeId 分流、审批/审计/内核按 token 路由、标签与未读。
+       缺的是下面十处——每处都有代码位置，不是猜测。</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th style="width:44px">#</th><th style="width:210px">缺口</th><th>代码证据</th><th style="width:250px">后果</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><b>G1</b></td><td>标签身份是<b>进程</b>不是会话</td><td><code>App.tsx:2341</code> 标签文本是「默认 / 后台 N」</td><td>看不出这格是哪段对话；同一进程换会话，标签不变</td></tr>
+          <tr><td><b>G2</b></td><td>没有转录中枢</td><td><code>App.tsx:743-757</code> 切过去时 <code>runtime:messages</code> 重拉，失败后 900ms 再试一次</td><td>工具卡片分组/折叠、审批卡、未读在重拉后丢失；重拉期间界面空白</td></tr>
+          <tr><td><b>G3</b></td><td>预算门只看默认会话</td><td><code>index.ts:1304</code> → <code>getStats()</code> → 全局 <code>rpc</code></td><td>后台会话烧钱不被拦；默认会话超限会拦住所有会话</td></tr>
+          <tr><td><b>G4</b></td><td>方案期是单对象</td><td><code>index.ts:213</code> <code>const planGate</code>；<code>plan:set/approve</code> 无 session 参数</td><td>A 批准了方案，B 也变成「已批准只读」</td></tr>
+          <tr><td><b>G5</b></td><td>非默认 runtime 无就绪判定</td><td><code>index.ts:2013</code> 用 <code>rpc.attached</code>；而它只代表进程在（<code>rpc-client.ts:24</code>）</td><td>切回挂起会话后第一句可能被 pi 拒（扩展还在加载）</td></tr>
+          <tr><td><b>G6</b></td><td>满员直接失败</td><td><code>runtime-manager.ts:37-40</code> 抛「活跃 runtime 已达上限」</td><td>第 3 个会话根本打不开，没有「挂起最久未用」</td></tr>
+          <tr><td><b>G7</b></td><td>换工作区只处理 default</td><td><code>index.ts:967-987</code>：只 <code>defaultRuntime.stop()</code>、只改 <code>kernelManager.setWorkspace("default")</code></td><td>后台 runtime 仍指旧工作区，文件/策略/内核路径全旧</td></tr>
+          <tr><td><b>G8</b></td><td><b>内核跟着进程不跟会话</b></td><td><code>kernel-manager.ts:34</code> <code>get(runtimeId)</code>；<code>pi:switch-session</code> 只改 sessionFile</td><td>同一进程切会话，<b>上一个会话的内核变量带过去</b></td></tr>
+          <tr><td><b>G9</b></td><td>崩溃无中断标注</td><td><code>supervisor.ts:236-249</code> 自动退避重启</td><td>在飞回合丢了，界面像「没说完」；分不清「我停了」和「它挂了」</td></tr>
+          <tr><td><b>G10</b></td><td>未读只在渲染端</td><td><code>App.tsx:358</code> <code>setUnreadByRuntime</code></td><td>刷新后未读全丢；多窗口各算各的</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <b>G8 是最锋利的一条。</b>多个会话并存时它会直接造成科研数据串台：在会话 A 里读进来的数据帧，
+      切到会话 B 后变量面板还在，<code>run_code</code> 能直接用它算出结果——而 B 的分析里从来没有那个数据。
+    </div>
+  </section>
+
+  <!-- 02 DAWN 对照 -->
+  <section id="map">
+    <h2><span class="no">02</span>DAWN 的六条机制，逐条对齐</h2>
+    <p class="lead">左列是 DAWN 主进程源码里实际存在的东西（行号为 <code>dist/electron/main.js</code>），右列是 OMCP 该怎么做。</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th style="width:36px">#</th><th style="width:300px">DAWN 的做法</th><th style="width:200px">为什么有效</th><th>OMCP 对应做法</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>D1</b></td>
+            <td>会话是主键：<code>bound: Map&lt;sessionId, runtime&gt;</code>，runtime 内部再 <code>sessions: Map&lt;sessionId, entry&gt;</code>（<code>206076</code>）</td>
+            <td>身份稳定，执行者可换</td>
+            <td><code>SessionRegistry</code>（sessionFile → 记录）+ <code>SlotPool</code>（槽 → 会话）</td>
+          </tr>
+          <tr>
+            <td><b>D2</b></td>
+            <td><code>write()</code> 故意不 await；每会话一条 <code>pending</code> 链 + <code>inFlight</code>（<code>220094 / 220290</code>）</td>
+            <td>跨会话零等待，同会话严格串行</td>
+            <td>pi RPC 已经异步 ack；主进程只<b>镜像</b>忙/队列/中断，不自己调度模型</td>
+          </tr>
+          <tr>
+            <td><b>D3</b></td>
+            <td>转录中枢：<code>revision</code> + 全量快照 + 订阅门（<code>239915 / 240738</code>）</td>
+            <td>切走不停、切回即得、刷新不丢</td>
+            <td>新建 <code>TranscriptHub</code>，键 = sessionFile</td>
+          </tr>
+          <tr>
+            <td><b>D4</b></td>
+            <td>写权租约 <code>LeaseManager</code>（TTL 300s，带指纹审计）</td>
+            <td>两个窗口不会同时写同一段</td>
+            <td>单窗口下做成内部锁；等真做多窗口再暴露给 UI</td>
+          </tr>
+          <tr>
+            <td><b>D5</b></td>
+            <td>子进程硬上限 + 整组杀（<code>SUBAGENT_LIMITS</code>：8 任务 / 4 并发 / 墙钟 10min）</td>
+            <td>并发不会打爆机器</td>
+            <td>槽位上限 + 内核 LRU +（可选）子任务 4 lane</td>
+          </tr>
+          <tr>
+            <td><b>D6</b></td>
+            <td>启动/恢复/换目录的幂等锁（<code>resuming</code> / <code>rehoming</code> Map）</td>
+            <td>重复点开不会起两份</td>
+            <td><code>Slot.starting</code> Promise 去重 + 每槽 ready 探测</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">不照抄①：同进程多 AgentSession</h3>
+        <p style="margin:0;color:var(--muted)">DAWN 的 N 个会话共用一个进程（<code>createAgentSession</code>）。
+        OMCP 的扩展、权限门、内核 broker 全在 pi 子进程里，迁到主进程是另一个项目——
+        本方案维持 B1（一槽一进程），只借它的<b>结构与协议</b>。</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">不照抄②：无并发上限</h3>
+        <p style="margin:0;color:var(--muted)">DAWN 对主会话没有名额（只限子 agent 4 并发）。
+        OMCP 每个 pi 进程 100–250 MB、每会话内核 100–300 MB，必须有名额与抢占——
+        这是它比 DAWN 多出来的一层。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 身份模型 -->
+  <section id="id">
+    <h2><span class="no">03</span>身份模型：四个东西，各答一个问题</h2>
+    <p class="lead">方案的根在这里。现在「标签 = 进程」，进程换会话时标签不会变，内核却跟着进程走——G1 与 G8 是同一个根因。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 340" role="img" aria-label="四层身份模型">
+        <defs>
+          <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#4338ca"/></marker>
+          <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/></marker>
+        </defs>
+
+        <!-- 标签 -->
+        <rect x="30" y="26" width="220" height="74" rx="12" fill="#eef2f8" stroke="#c9d6e2"/>
+        <text x="52" y="54" font-size="13" font-weight="700" fill="#141b2d">TabId · 标签</text>
+        <text x="52" y="76" font-size="11.5" fill="#66748a">「我现在看谁」</text>
+        <text x="52" y="92" font-size="10.5" fill="#94a3b8">纯视图，不持资源</text>
+
+        <path d="M250 63 H318" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar2)"/>
+        <text x="258" y="54" font-size="10.5" fill="#66748a">1 : 1</text>
+
+        <!-- 会话 -->
+        <rect x="318" y="26" width="300" height="74" rx="12" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="340" y="54" font-size="13" font-weight="700" fill="#312e81">SessionKey · 会话文件</text>
+        <text x="340" y="76" font-size="11.5" fill="#4338ca">「这是哪段对话」→ 标签 / 未读 / 预算 / 方案期 / 内核</text>
+        <text x="340" y="92" font-size="10.5" fill="#6b6bb0">身份主键；活着与挂起都保留</text>
+
+        <path d="M618 63 H686" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar2)"/>
+        <text x="620" y="54" font-size="10.5" fill="#66748a">0..1（可挂起）</text>
+
+        <!-- 槽 -->
+        <rect x="686" y="26" width="324" height="74" rx="12" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="708" y="54" font-size="13" font-weight="700" fill="#0f4f47">SlotId · 一个 pi 子进程</text>
+        <text x="708" y="76" font-size="11.5" fill="#0f766e">「谁在干活」→ 资源 / 可杀 / 可换绑</text>
+        <text x="708" y="92" font-size="10.5" fill="#4b8f88">同一时刻只绑一个会话</text>
+
+        <!-- 工作区 -->
+        <rect x="30" y="150" width="470" height="70" rx="12" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="52" y="178" font-size="13" font-weight="700" fill="#78350f">WorkspaceKey · 工作区根</text>
+        <text x="52" y="200" font-size="11.5" fill="#92400e">「pi 能在哪儿干活」——cwd 焊死（ADR-035），所以会话属于某个工作区</text>
+
+        <rect x="540" y="150" width="470" height="70" rx="12" fill="#f7fafc" stroke="#dce3ee"/>
+        <text x="562" y="178" font-size="13" font-weight="700" fill="#141b2d">槽属于工作区</text>
+        <text x="562" y="200" font-size="11.5" fill="#66748a">跨工作区的会话不能共用槽 → 槽池按工作区分组</text>
+
+        <path d="M795 100 V150" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#ar2)"/>
+        <text x="803" y="130" font-size="10.5" fill="#66748a">N : 1</text>
+
+        <!-- 规则 -->
+        <rect x="30" y="252" width="980" height="62" rx="12" fill="#fff" stroke="#dce3ee"/>
+        <text x="52" y="277" font-size="12.5" font-weight="700" fill="#141b2d">由此得到四条硬规则</text>
+        <text x="52" y="298" font-size="11.8" fill="#5a6a80">① 标签=会话，槽不上标签　② 一会话最多占一槽，一槽同一时刻只绑一会话　③ 槽属于工作区　④ 内核/预算/方案期/策略一律按会话键，槽换绑不改它们</text>
+      </svg>
+      <div class="cap"><b>图 1</b> · 身份模型。把「标签 = 进程」改成「标签 = 会话」，进度与资源两套身份分开。</div>
+    </div>
+  </section>
+
+  <!-- 04 目标架构 -->
+  <section id="arch">
+    <h2><span class="no">04</span>目标架构</h2>
+    <p class="lead">主进程多出四个东西：会话登记表、槽池、准入控制器、转录中枢；副作用模块的键从「全局」改到「会话」。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 660" role="img" aria-label="目标架构分层图">
+        <defs>
+          <marker id="af" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/></marker>
+        </defs>
+
+        <rect x="16" y="16" width="1008" height="628" rx="16" fill="#f7fafc" stroke="#dce3ee"/>
+        <text x="36" y="42" font-size="13" font-weight="700" fill="#141b2d">Electron 主进程</text>
+
+        <!-- renderer -->
+        <rect x="36" y="58" width="968" height="86" rx="10" fill="#eef2f8" stroke="#dbe4ee"/>
+        <text x="52" y="80" font-size="11.5" font-weight="700" fill="#334155">渲染进程（单窗口）</text>
+        <rect x="52" y="90" width="290" height="42" rx="8" fill="#fff" stroke="#c9d6e2"/>
+        <text x="66" y="108" font-size="11.5" font-weight="700" fill="#141b2d">标签栏（会话级）</text>
+        <text x="66" y="124" font-size="10.3" fill="#66748a">标题 · 状态点 · 未读 · 挂起标记</text>
+
+        <rect x="356" y="90" width="300" height="42" rx="8" fill="#fff" stroke="#c9d6e2"/>
+        <text x="370" y="108" font-size="11.5" font-weight="700" fill="#141b2d">每个已打开会话一份视图</text>
+        <text x="370" y="124" font-size="10.3" fill="#66748a">不卸载；滚动位/草稿/附件各自保留</text>
+
+        <rect x="670" y="90" width="318" height="42" rx="8" fill="#fff" stroke="#c9d6e2"/>
+        <text x="684" y="108" font-size="11.5" font-weight="700" fill="#141b2d">订阅集合 = 可见 + 钉住</text>
+        <text x="684" y="124" font-size="10.3" fill="#66748a">其余会话不推，但仍在跑</text>
+
+        <!-- IPC -->
+        <path d="M520 144 V170" stroke="#475569" stroke-width="1.6" marker-end="url(#af)"/>
+        <rect x="36" y="170" width="968" height="40" rx="9" fill="#101526"/>
+        <text x="52" y="195" font-size="11.6" fill="#c7d2e5">事件通道 <tspan fill="#f0c987">{ sessionKey, revision, body }</tspan>　　IPC：<tspan fill="#a5b4fc">session:open / session:close / session:subscribe / approval:respond</tspan></text>
+
+        <path d="M520 210 V238" stroke="#475569" stroke-width="1.6" marker-end="url(#af)"/>
+
+        <!-- core row 1 -->
+        <rect x="36" y="238" width="968" height="238" rx="10" fill="#fff" stroke="#dbe4ee"/>
+        <text x="52" y="260" font-size="11.5" font-weight="700" fill="#334155">会话层（键 = SessionKey）</text>
+
+        <rect x="52" y="272" width="176" height="86" rx="9" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="66" y="294" font-size="11.8" font-weight="700" fill="#312e81">SessionRegistry</text>
+        <text x="66" y="313" font-size="10.3" fill="#4338ca">sessionFile → 记录</text>
+        <text x="66" y="330" font-size="10.3" fill="#4338ca">state / unread / slot</text>
+        <text x="66" y="347" font-size="10.3" fill="#6b6bb0">权威身份表</text>
+
+        <rect x="240" y="272" width="176" height="86" rx="9" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="254" y="294" font-size="11.8" font-weight="700" fill="#312e81">Admission</text>
+        <text x="254" y="313" font-size="10.3" fill="#4338ca">复用 / 抢占 / 排队</text>
+        <text x="254" y="330" font-size="10.3" fill="#4338ca">同会话请求合并</text>
+        <text x="254" y="347" font-size="10.3" fill="#6b6bb0">见 §06 决策树</text>
+
+        <rect x="428" y="272" width="176" height="86" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="442" y="294" font-size="11.8" font-weight="700" fill="#0f4f47">SlotPool</text>
+        <text x="442" y="313" font-size="10.3" fill="#0f766e">按工作区分组的槽</text>
+        <text x="442" y="330" font-size="10.3" fill="#0f766e">ready 以 get_state 判</text>
+        <text x="442" y="347" font-size="10.3" fill="#4b8f88">整组杀 + 墙钟</text>
+
+        <rect x="616" y="272" width="176" height="86" rx="9" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="630" y="294" font-size="11.8" font-weight="700" fill="#312e81">TranscriptHub</text>
+        <text x="630" y="313" font-size="10.3" fill="#4338ca">revision / 快照 / 订阅门</text>
+        <text x="630" y="330" font-size="10.3" fill="#4338ca">条目规范化（无 delta）</text>
+        <text x="630" y="347" font-size="10.3" fill="#6b6bb0">切走不停、切回即得</text>
+
+        <rect x="804" y="272" width="184" height="86" rx="9" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="818" y="294" font-size="11.8" font-weight="700" fill="#78350f">副作用账本</text>
+        <text x="818" y="313" font-size="10.3" fill="#92400e">Budget / PlanGate</text>
+        <text x="818" y="330" font-size="10.3" fill="#92400e">Policy / Audit / Perf</text>
+        <text x="818" y="347" font-size="10.3" fill="#b45309">键全部改成会话</text>
+
+        <!-- core row 2 -->
+        <text x="52" y="386" font-size="11.5" font-weight="700" fill="#334155">资源层</text>
+
+        <rect x="52" y="398" width="254" height="62" rx="9" fill="#fff" stroke="#c9d6e2"/>
+        <text x="66" y="419" font-size="11.6" font-weight="700" fill="#141b2d">KernelManager <tspan font-weight="400" font-size="10.3" fill="#b91c1c">键← session（修 G8）</tspan></text>
+        <text x="66" y="439" font-size="10.3" fill="#66748a">python / r 各一；懒启动 + LRU；回收前明示</text>
+
+        <rect x="318" y="398" width="254" height="62" rx="9" fill="#fff" stroke="#c9d6e2"/>
+        <text x="332" y="419" font-size="11.6" font-weight="700" fill="#141b2d">ServiceHub（token）</text>
+        <text x="332" y="439" font-size="10.3" fill="#66748a">子进程回调反查 → session，不是 runtime</text>
+
+        <rect x="584" y="398" width="200" height="62" rx="9" fill="#fff" stroke="#c9d6e2"/>
+        <text x="598" y="419" font-size="11.6" font-weight="700" fill="#141b2d">写权锁（内部）</text>
+        <text x="598" y="439" font-size="10.3" fill="#66748a">单窗口下自持；多窗口再暴露</text>
+
+        <rect x="796" y="398" width="192" height="62" rx="9" fill="#fff" stroke="#c9d6e2"/>
+        <text x="810" y="419" font-size="11.6" font-weight="700" fill="#141b2d">队列</text>
+        <text x="810" y="439" font-size="10.3" fill="#66748a">满员时入队 + 位次可取消</text>
+
+        <!-- children -->
+        <path d="M520 476 V504" stroke="#475569" stroke-width="1.6" marker-end="url(#af)"/>
+        <rect x="36" y="504" width="968" height="126" rx="10" fill="#fcfdff" stroke="#dbe4ee"/>
+        <text x="52" y="526" font-size="11.5" font-weight="700" fill="#334155">子进程池</text>
+
+        <rect x="52" y="538" width="212" height="76" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="66" y="559" font-size="11.5" font-weight="700" fill="#0f4f47">pi · 槽 1（绑定会话 A）</text>
+        <text x="66" y="578" font-size="10.3" fill="#0f766e">--session A · cwd = 工作区</text>
+        <text x="66" y="596" font-size="10.3" fill="#4b8f88">扩展 / 权限门 / 事件泵</text>
+
+        <rect x="276" y="538" width="212" height="76" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="290" y="559" font-size="11.5" font-weight="700" fill="#0f4f47">pi · 槽 2（绑定会话 B）</text>
+        <text x="290" y="578" font-size="10.3" fill="#0f766e">--session B · 同一工作区</text>
+        <text x="290" y="596" font-size="10.3" fill="#4b8f88">互不阻塞</text>
+
+        <rect x="500" y="538" width="228" height="76" rx="9" fill="#fff" stroke="#e2b9b9" stroke-dasharray="5 4"/>
+        <text x="514" y="559" font-size="11.5" font-weight="700" fill="#8a3b3b">挂起的槽（已 stop）</text>
+        <text x="514" y="578" font-size="10.3" fill="#a05a5a">标签保留 · 快照保留</text>
+        <text x="514" y="596" font-size="10.3" fill="#a05a5a">切回时 resume，不重拉全量</text>
+
+        <rect x="740" y="538" width="248" height="76" rx="9" fill="#fff" stroke="#c9d6e2"/>
+        <text x="754" y="559" font-size="11.5" font-weight="700" fill="#141b2d">kernel sidecar × 会话</text>
+        <text x="754" y="578" font-size="10.3" fill="#66748a">python / r；变量归会话</text>
+        <text x="754" y="596" font-size="10.3" fill="#66748a">（可选）subagent × ≤4</text>
+      </svg>
+      <div class="cap"><b>图 2</b> · 目标架构。虚线框是「保留但不占资源」的状态——这正是现在缺的那一档。</div>
+    </div>
+  </section>
+
+  <!-- 05 并发时序 -->
+  <section id="seq">
+    <h2><span class="no">05</span>一次真正的并发（时序）</h2>
+    <p class="lead">三个会话：A 在等审批、B 在流式输出并跑内核、C 已挂起。用户视角只在两个标签之间切换，后台一个都没停。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 540" role="img" aria-label="并发时序图">
+        <defs>
+          <marker id="s1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#4338ca"/></marker>
+          <marker id="s2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#0f766e"/></marker>
+          <marker id="s3" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/></marker>
+        </defs>
+
+        <!-- lifelines -->
+        <g font-size="11.6" font-weight="700" text-anchor="middle">
+          <rect x="24" y="24" width="132" height="34" rx="8" fill="#eef2f8" stroke="#c9d6e2"/>
+          <text x="90" y="46" fill="#141b2d">渲染进程</text>
+          <rect x="244" y="24" width="150" height="34" rx="8" fill="#e9e8fd" stroke="#c9c6f8"/>
+          <text x="319" y="46" fill="#312e81">主进程（Hub/准入）</text>
+          <rect x="482" y="24" width="132" height="34" rx="8" fill="#e3f2f0" stroke="#bfe0da"/>
+          <text x="548" y="46" fill="#0f4f47">槽 A · 会话 A</text>
+          <rect x="672" y="24" width="132" height="34" rx="8" fill="#e3f2f0" stroke="#bfe0da"/>
+          <text x="738" y="46" fill="#0f4f47">槽 B · 会话 B</text>
+          <rect x="872" y="24" width="130" height="34" rx="8" fill="#fff" stroke="#c9d6e2"/>
+          <text x="937" y="46" fill="#141b2d">内核（会话 B）</text>
+        </g>
+
+        <g stroke="#e2e8f0" stroke-width="1.2" stroke-dasharray="4 5">
+          <path d="M90 58 V520"/><path d="M319 58 V520"/><path d="M548 58 V520"/><path d="M738 58 V520"/><path d="M937 58 V520"/>
+        </g>
+
+        <!-- 1 open A -->
+        <path d="M90 92 H311" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="96" y="85" font-size="10.8" fill="#4338ca">open(会话 A)</text>
+        <path d="M319 112 H540" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="330" y="105" font-size="10.8" fill="#4338ca">准入：有空槽 → bind(A)</text>
+
+        <!-- 2 open B, evict -->
+        <path d="M90 150 H311" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="96" y="143" font-size="10.8" fill="#4338ca">open(会话 B)</text>
+        <rect x="252" y="162" width="318" height="46" rx="8" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="264" y="180" font-size="10.6" fill="#78350f">槽位满 → 挂起最久未用的空闲槽（会话 C）</text>
+        <text x="264" y="197" font-size="10.6" fill="#92400e">→ 复用该槽额度，新建槽 B 并 bind(B)</text>
+        <path d="M319 224 H730" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="330" y="216" font-size="10.8" fill="#4338ca">start(--session B)</text>
+
+        <!-- 3 B streams -->
+        <path d="M738 256 H327" stroke="#0f766e" stroke-width="1.6" marker-end="url(#s2)"/>
+        <text x="452" y="249" font-size="10.8" fill="#0f766e">事件流（delta 合并）→ ingest，revision +1</text>
+        <path d="M319 282 H98" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="126" y="275" font-size="10.8" fill="#4338ca">update{rev}（B 可见 → 推送）</text>
+
+        <!-- 4 switch away -->
+        <rect x="30" y="300" width="240" height="34" rx="8" fill="#eef2f8" stroke="#c9d6e2"/>
+        <text x="42" y="322" font-size="10.6" fill="#334155">切到 A：退订 B（B 不停）</text>
+        <path d="M738 356 H327" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#s3)"/>
+        <text x="452" y="349" font-size="10.6" fill="#66748a">B 仍在 ingest → 只进内存，不推 UI</text>
+
+        <!-- 5 A approval -->
+        <path d="M548 386 H327" stroke="#0f766e" stroke-width="1.6" marker-end="url(#s2)"/>
+        <text x="372" y="379" font-size="10.8" fill="#0f766e">approval 请求（审批卡挂住 A）</text>
+        <path d="M319 410 H98" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="150" y="403" font-size="10.8" fill="#4338ca">审批卡（带会话标题）</text>
+
+        <!-- 6 B kernel -->
+        <path d="M738 442 H929" stroke="#0f766e" stroke-width="1.6" marker-end="url(#s2)"/>
+        <text x="760" y="435" font-size="10.8" fill="#0f766e">run_code</text>
+        <path d="M937 466 H327" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#s3)"/>
+        <text x="600" y="459" font-size="10.6" fill="#66748a">结果 → hub(会话 B)</text>
+
+        <!-- 7 back to B -->
+        <path d="M90 500 H311" stroke="#4338ca" stroke-width="1.6" marker-end="url(#s1)"/>
+        <text x="96" y="493" font-size="10.8" fill="#4338ca">切回 B：subscribe(B)</text>
+        <path d="M319 516 H98" stroke="#4338ca" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#s1)"/>
+        <text x="130" y="532" font-size="10.6" fill="#4338ca">snapshot{rev=N} → 接着 rev=N+1 推</text>
+      </svg>
+      <div class="cap"><b>图 3</b> · 并发时序。<b>退订 ≠ 停止</b>：切走只是不推 UI，会话照跑、快照照建；切回一次快照就能续上。</div>
+    </div>
+  </section>
+
+  <!-- 06 准入 -->
+  <section id="admit">
+    <h2><span class="no">06</span>准入与抢占（修 G6）</h2>
+    <p class="lead">现在满员直接抛错。改成六级判定：能复用就复用，能挂起就挂起，实在不行才排队。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 470" role="img" aria-label="准入决策树">
+        <defs>
+          <marker id="d1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/></marker>
+        </defs>
+
+        <rect x="380" y="18" width="280" height="40" rx="9" fill="#101526"/>
+        <text x="520" y="43" font-size="12" font-weight="700" fill="#e8eefb" text-anchor="middle">open(sessionKey)</text>
+
+        <path d="M520 58 V86" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+
+        <!-- q1 -->
+        <rect x="352" y="86" width="336" height="38" rx="8" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="520" y="110" font-size="11.4" fill="#312e81" text-anchor="middle">① 该会话已绑槽，且 ready / busy？</text>
+        <path fill="none" d="M688 105 H760 V80 H806" stroke="#475569" stroke-width="1.5" marker-end="url(#d1)"/>
+        <text x="762" y="74" font-size="10.5" fill="#15803d" font-weight="700">是</text>
+        <rect x="806" y="62" width="196" height="38" rx="8" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="904" y="86" font-size="11" fill="#14532d" text-anchor="middle">直接激活（O(1)）</text>
+
+        <path d="M520 124 V152" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+
+        <!-- q2 -->
+        <rect x="352" y="152" width="336" height="38" rx="8" fill="#e9e8fd" stroke="#c9c6f8"/>
+        <text x="520" y="176" font-size="11.4" fill="#312e81" text-anchor="middle">② 同工作区有 free 槽？</text>
+        <path fill="none" d="M688 171 H760 V146 H806" stroke="#475569" stroke-width="1.5" marker-end="url(#d1)"/>
+        <text x="762" y="140" font-size="10.5" fill="#15803d" font-weight="700">是</text>
+        <rect x="806" y="128" width="196" height="38" rx="8" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="904" y="152" font-size="11" fill="#14532d" text-anchor="middle">bind + start</text>
+
+        <path d="M520 190 V218" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+
+        <!-- q3 -->
+        <rect x="352" y="218" width="336" height="38" rx="8" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="520" y="242" font-size="11.4" fill="#0f4f47" text-anchor="middle">③ 有同工作区的 suspended 槽？</text>
+        <path fill="none" d="M688 237 H760 V212 H806" stroke="#475569" stroke-width="1.5" marker-end="url(#d1)"/>
+        <text x="762" y="206" font-size="10.5" fill="#15803d" font-weight="700">是</text>
+        <rect x="806" y="194" width="196" height="38" rx="8" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="904" y="218" font-size="11" fill="#14532d" text-anchor="middle">resume（start + --session）</text>
+
+        <path d="M520 256 V284" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+
+        <!-- q4 -->
+        <rect x="352" y="284" width="336" height="38" rx="8" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="520" y="308" font-size="11.4" fill="#0f4f47" text-anchor="middle">④ 全局槽位未满？</text>
+        <path fill="none" d="M688 303 H760 V278 H806" stroke="#475569" stroke-width="1.5" marker-end="url(#d1)"/>
+        <text x="762" y="272" font-size="10.5" fill="#15803d" font-weight="700">是</text>
+        <rect x="806" y="260" width="196" height="38" rx="8" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="904" y="284" font-size="11" fill="#14532d" text-anchor="middle">新建槽</text>
+
+        <path d="M520 322 V350" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+
+        <!-- q5 -->
+        <rect x="316" y="350" width="408" height="46" rx="8" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="520" y="369" font-size="11.4" fill="#78350f" text-anchor="middle">⑤ 有可抢占槽？（不 busy、不等审批、不可见）</text>
+        <text x="520" y="387" font-size="10.3" fill="#92400e" text-anchor="middle">取最久未用 → stop pi（快照保留）→ 复用额度</text>
+        <path fill="none" d="M724 373 H790 V352 H806" stroke="#475569" stroke-width="1.5" marker-end="url(#d1)"/>
+        <text x="728" y="345" font-size="10.5" fill="#15803d" font-weight="700">是</text>
+        <rect x="806" y="334" width="196" height="38" rx="8" fill="#e7f5ec" stroke="#bfe3cb"/>
+        <text x="904" y="358" font-size="11" fill="#14532d" text-anchor="middle">挂起它 → 新建槽</text>
+
+        <path d="M520 396 V424" stroke="#475569" stroke-width="1.6" marker-end="url(#d1)"/>
+        <rect x="316" y="424" width="408" height="38" rx="8" fill="#eef2f8" stroke="#c9d6e2"/>
+        <text x="520" y="448" font-size="11.2" fill="#334155" text-anchor="middle">⑥ 入队（显示位次、可取消）→ 有槽空出自动出队</text>
+      </svg>
+      <div class="cap"><b>图 4</b> · 准入。等审批的槽<b>不可抢占</b>——抢走会让一张审批卡变成孤儿。</div>
+    </div>
+  </section>
+
+  <!-- 07 状态机 -->
+  <section id="state">
+    <h2><span class="no">07</span>两套状态机</h2>
+    <p class="lead">会话状态决定「用户看到什么」，槽状态决定「还有没有资源」。两套必须分开记，否则挂起与崩溃分不清。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 1040 300" role="img" aria-label="会话与槽的状态机">
+        <defs>
+          <marker id="m1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/></marker>
+        </defs>
+
+        <text x="24" y="28" font-size="12" font-weight="700" fill="#141b2d">会话（用户视角）</text>
+
+        <rect x="24" y="44" width="98" height="44" rx="9" fill="#f7fafc" stroke="#c9d6e2"/>
+        <text x="73" y="71" font-size="11.5" fill="#334155" text-anchor="middle">closed</text>
+
+        <rect x="172" y="44" width="132" height="44" rx="9" fill="#fff" stroke="#e2b9b9" stroke-dasharray="5 4"/>
+        <text x="238" y="71" font-size="11.5" fill="#8a3b3b" text-anchor="middle">suspended</text>
+
+        <rect x="364" y="44" width="100" height="44" rx="9" fill="#eef2f8" stroke="#c9d6e2"/>
+        <text x="414" y="71" font-size="11.5" fill="#334155" text-anchor="middle">idle</text>
+
+        <rect x="536" y="44" width="100" height="44" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="586" y="71" font-size="11.5" fill="#0f4f47" text-anchor="middle">busy</text>
+
+        <rect x="700" y="44" width="150" height="44" rx="9" fill="#fdeaea" stroke="#f3c2c2"/>
+        <text x="775" y="71" font-size="11.5" fill="#7f1d1d" text-anchor="middle">interrupted</text>
+
+        <path d="M122 66 H164" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="128" y="58" font-size="10" fill="#66748a">open</text>
+
+        <path d="M304 66 H356" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="310" y="58" font-size="10" fill="#66748a">bind</text>
+
+        <path d="M464 58 H528" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="500" y="50" font-size="10" fill="#66748a" text-anchor="middle">prompt</text>
+        <path d="M528 74 H472" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="500" y="92" font-size="10" fill="#66748a" text-anchor="middle">settle</text>
+
+        <path d="M636 66 H692" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#m1)"/>
+        <text x="640" y="58" font-size="10" fill="#b91c1c">崩溃</text>
+
+        <path fill="none" d="M775 88 V120 H238 V96" stroke="#475569" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#m1)"/>
+        <text x="506" y="135" font-size="10" fill="#66748a" text-anchor="middle">下次打开 / 重发</text>
+
+        <text x="24" y="178" font-size="12" font-weight="700" fill="#141b2d">槽（资源视角）</text>
+
+        <rect x="24" y="194" width="110" height="44" rx="9" fill="#f7fafc" stroke="#c9d6e2"/>
+        <text x="79" y="221" font-size="11.5" fill="#334155" text-anchor="middle">free</text>
+
+        <rect x="190" y="194" width="130" height="44" rx="9" fill="#fdf1e3" stroke="#f0d5ae"/>
+        <text x="255" y="221" font-size="11.5" fill="#78350f" text-anchor="middle">starting</text>
+
+        <rect x="400" y="194" width="120" height="44" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="460" y="221" font-size="11.5" fill="#0f4f47" text-anchor="middle">bound-idle</text>
+
+        <rect x="592" y="194" width="120" height="44" rx="9" fill="#e3f2f0" stroke="#bfe0da"/>
+        <text x="652" y="221" font-size="11.5" fill="#0f4f47" text-anchor="middle">bound-busy</text>
+
+        <rect x="772" y="194" width="130" height="44" rx="9" fill="#fdeaea" stroke="#f3c2c2"/>
+        <text x="837" y="221" font-size="11.5" fill="#7f1d1d" text-anchor="middle">dead</text>
+
+        <path d="M134 210 H182" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="140" y="202" font-size="10" fill="#66748a">bind</text>
+
+        <path d="M320 210 H392" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="356" y="202" font-size="10" fill="#66748a" text-anchor="middle">ready</text>
+
+        <path d="M520 208 H584" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="556" y="200" font-size="10" fill="#66748a" text-anchor="middle">prompt</text>
+        <path d="M584 224 H528" stroke="#475569" stroke-width="1.5" marker-end="url(#m1)"/>
+        <text x="556" y="242" font-size="10" fill="#66748a" text-anchor="middle">settle</text>
+
+        <path d="M712 216 H764" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#m1)"/>
+        <text x="716" y="208" font-size="10" fill="#b91c1c">崩溃 / 杀</text>
+
+        <rect x="24" y="258" width="878" height="32" rx="8" fill="#eef2f8" stroke="#dbe4ee"/>
+        <text x="38" y="279" font-size="10.8" fill="#334155">关键：<tspan font-weight="700">starting 期间同一会话的重复打开合并到同一个 Promise</tspan>；ready 以一次成功的 get_state 为判据，不是 rpc.attached（修 G5）。</text>
+      </svg>
+      <div class="cap"><b>图 5</b> · 状态机。挂起是「保留身份、释放资源」，崩溃是「资源没了、回合被打断」，两者在 UI 上必须长得不一样。</div>
+    </div>
+  </section>
+
+  <!-- 08 隔离矩阵 -->
+  <section id="iso">
+    <h2><span class="no">08</span>副作用隔离矩阵（搬迁清单）</h2>
+    <p class="lead">这一节是工作量的主体：<code>workspaceRoot</code> 在 <code>index.ts</code> 里有 120 处引用。</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:250px">现在</th><th style="width:250px">位置</th><th style="width:250px">改成</th><th>键</th></tr></thead>
+        <tbody>
+          <tr><td><code>workspaceRoot</code></td><td><code>index.ts:134</code></td><td><code>Slot.workspace</code> / <code>Session.workspace</code></td><td>workspace</td></tr>
+          <tr><td><code>currentSessionFile</code></td><td><code>index.ts:143</code></td><td><code>SessionRegistry.current</code></td><td>session</td></tr>
+          <tr><td><code>budget</code> / <code>dailySpent</code> / <code>sessionCosts</code></td><td><code>index.ts:144-149</code></td><td><code>BudgetLedger</code>（增量记账，见 ADR-017）</td><td>session + 日</td></tr>
+          <tr><td><code>planGate</code>（单对象）</td><td><code>index.ts:213</code></td><td><code>PlanGateBook</code></td><td>session</td></tr>
+          <tr><td><code>policyService</code>（含 mode）</td><td><code>index.ts:163</code></td><td><code>PolicyView</code>（工作区 + 会话覆盖）</td><td>workspace / session</td></tr>
+          <tr><td><code>grants</code></td><td><code>index.ts:161</code></td><td>保留，键用会话所属工作区</td><td>workspace</td></tr>
+          <tr><td><code>turnTrace</code>（写全局工作区）</td><td><code>index.ts:231</code></td><td><code>PerfSink</code></td><td>session</td></tr>
+          <tr><td><code>piReady</code>（单 flag）</td><td><code>index.ts:271</code></td><td><code>Slot.ready</code> + <code>Slot.starting</code></td><td>slot</td></tr>
+          <tr><td><code>pendingApprovals</code>（已有 runtimeId）</td><td><code>index.ts:208</code></td><td>键改 sessionKey</td><td>session</td></tr>
+          <tr><td><code>auditLog</code> + <code>runtimeAuditLogs</code></td><td><code>index.ts:330</code></td><td><code>AuditSink</code></td><td>session</td></tr>
+          <tr><td><code>KernelManager.get(runtimeId)</code></td><td><code>kernel-manager.ts:34</code></td><td><code>get(sessionKey)</code></td><td>session</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout good">
+      <b>降低风险的手法：</b>不一次性删全局，而是先加一个 <code>runtimeOf(sessionKey)</code> 取值函数，
+      把「读」全部改成从这里取；<code>workspaceRoot</code> 保留为「当前可见会话的工作区」的只读别名。
+      这样每一步都可编译、可回归，不必开一条两星期的长分支。
+    </div>
+  </section>
+
+  <!-- 09 并发通道 -->
+  <section id="ch">
+    <h2><span class="no">09</span>三条并发通道与预算</h2>
+
+    <div class="grid3">
+      <div class="card">
+        <div class="chip indigo">通道 1</div>
+        <h3>会话并发</h3>
+        <p style="margin:0;color:var(--muted)">单位＝槽（pi 进程）。<b>默认 2，可配 1–4。</b>满了走 §06 准入。
+        每个 pi 进程 100–250 MB。</p>
+      </div>
+      <div class="card">
+        <div class="chip teal">通道 2</div>
+        <h3>内核并发</h3>
+        <p style="margin:0;color:var(--muted)">单位＝会话 × 语言。每会话 python / r 各一，懒启动。
+        空闲 10 分钟回收，<b>回收要明示变量已丢失</b>。每内核 100–300 MB。</p>
+      </div>
+      <div class="card">
+        <div class="chip amber">通道 3（可选 M4）</div>
+        <h3>子任务并发</h3>
+        <p style="margin:0;color:var(--muted)">pi 1.5.2 自带 subagent <b>示例扩展</b>（<code>examples/extensions/subagent</code>）：
+        8 任务 / 4 并发 / SIGTERM→SIGKILL。与 DAWN 同一组数字。</p>
+      </div>
+    </div>
+
+    <div class="callout bad">
+      <b>乘法要算清。</b>2 槽 × 每槽 4 子任务 = 最多 <b>8 个模型请求同时在飞</b>。
+      所以 M4 若做，必须同时加<b>全局请求闸</b>（或 provider 侧限流），否则并发一开就 429——那不是"更快的并发"，是"整批一起失败"。
+    </div>
+  </section>
+
+  <!-- 10 失败 -->
+  <section id="fail">
+    <h2><span class="no">10</span>失败与恢复</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:300px">场景</th><th>期望行为</th></tr></thead>
+        <tbody>
+          <tr><td>pi 进程崩溃（非主动 stop）</td><td>槽 → <code>dead</code>；hub 写一条 <code>interrupted</code>（"本回合被中断，可重发"）；其余会话不受影响</td></tr>
+          <tr><td>会话被空闲回收</td><td>标签保留 + "挂起"；hub 快照保留；切回 resume，不重拉全量</td></tr>
+          <tr><td>渲染进程 F5</td><td>从 hub 拉快照（含未读、运行中标记），不依赖渲染端遗留状态（修 G10）</td></tr>
+          <tr><td>换工作区</td><td>该工作区的槽全部 stop 并保留会话；其他工作区的槽不受影响（修 G7）</td></tr>
+          <tr><td>应用重启</td><td>所有槽 <code>dead</code>；会话列表从盘恢复；打开时按 §06 重建</td></tr>
+          <tr><td>满员且全部 busy</td><td>入队并给出位次；不静默丢弃</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 11 路线 -->
+  <section id="plan">
+    <h2><span class="no">11</span>分阶段</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:70px">阶段</th><th>内容</th><th style="width:300px">主要文件</th><th style="width:90px">预估</th></tr></thead>
+        <tbody>
+          <tr><td><b>M0</b></td><td><code>SessionRegistry</code> + <code>SlotPool</code> + <code>AdmissionController</code>；标签改会话级；行为与现在等价</td><td><code>runtime-manager.ts</code>、新增 <code>session-registry.ts</code> / <code>admission.ts</code></td><td>1–2 天</td></tr>
+          <tr><td><b>D1</b></td><td><code>TranscriptHub</code>：revision / 快照 / 订阅门 / 未读权威；渲染端改订阅制</td><td>新增 <code>transcript-hub.ts</code>、<code>App.tsx</code></td><td>2–3 天</td></tr>
+          <tr><td><b>D2</b></td><td>副作用键改 session：预算、方案期、策略、性能、审计、内核</td><td><code>index.ts</code>（最大改动面）</td><td>2–3 天</td></tr>
+          <tr><td><b>D3</b></td><td>崩溃标注、ready 探测、换工作区回收、排队位次</td><td><code>supervisor.ts</code>、<code>session-runtime.ts</code></td><td>1–2 天</td></tr>
+          <tr><td><b>M4</b><span class="chip amber" style="margin-left:6px">可选</span></td><td>子任务通道 + 全局请求闸</td><td><code>vendor/pi</code> 扩展装配</td><td>2–3 天</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:12px;color:var(--muted);font-size:13.5px">合计 <b>8–13 人日</b>（M0–M3，不含 M4）。M2 风险最高，建议单独分支、单独回归。</p>
+  </section>
+
+  <!-- 12 验收 -->
+  <section id="acc">
+    <h2><span class="no">12</span>验收标准</h2>
+
+    <ul class="check">
+      <li>同时开 3 个会话：1 个跑长任务、1 个等审批、1 个空闲 → 第 3 个能开（抢占挂起最久空闲），且<b>不打断</b>前两个</li>
+      <li>切走 10 分钟再回来：条目无重复、无丢失、revision 连续；运行中标记正确</li>
+      <li>F5 后：后台会话的完整转录、未读数、"运行中"仍在</li>
+      <li>会话 A 批准方案不影响会话 B 的只读状态</li>
+      <li>会话 A 超预算被自己拦住；A 超限不影响 B 发送</li>
+      <li>同一槽从 A 切到 B：B 的内核变量为空（或明确提示已重置），不是 A 的</li>
+      <li><code>taskkill</code> 掉某个 pi 进程：只有该会话标"回合被中断"，其余会话继续跑</li>
+      <li>换工作区后：旧工作区的后台槽全部停掉；旧会话仍可从列表打开</li>
+    </ul>
+  </section>
+
+  <!-- 13 风险 -->
+  <section id="risk">
+    <h2><span class="no">13</span>风险</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:250px">风险</th><th>说明</th><th style="width:300px">缓解</th></tr></thead>
+        <tbody>
+          <tr><td><code>workspaceRoot</code> 120 处</td><td>M2 是面最广的重构</td><td>加 <code>runtimeOf(sessionKey)</code> 取值函数逐步替换；全局保留为当前可见会话的只读别名</td></tr>
+          <tr><td>展示态搬迁（G2）</td><td>条目模型要与现有 <code>toMsgs</code> 对齐，否则历史重建会变形</td><td>先做「hub = toMsgs 缓存 + revision 包装」，条目结构复用现有类型</td></tr>
+          <tr><td>内核回收丢变量</td><td>用户以为变量还在</td><td>回收前后都明示；提供「保活本会话内核」开关</td></tr>
+          <tr><td>抢占误判</td><td>抢了正在等审批的槽</td><td>可抢占集合显式排除 <code>waiting-approval</code> / <code>busy</code> / <code>visible</code></td></tr>
+          <tr><td>并发打爆 provider</td><td>2 槽 × 4 子任务</td><td>M4 必须配全局请求闸；不加就不做 M4</td></tr>
+          <tr><td>多窗口</td><td>真正的并发写</td><td>本方案只做单窗口；多窗口需要 D4 租约，另立</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 14 待确认 -->
+  <section id="ask">
+    <h2><span class="no">14</span>需要确认</h2>
+
+    <div class="card">
+      <ol style="margin:0;padding-left:22px;line-height:2.1">
+        <li><b>标签身份</b>：标签直接等于会话（推荐），还是保留「标签 = 进程、会话在标签内切换」？</li>
+        <li><b>抢占策略</b>：满员时自动挂起最久未用的空闲槽（推荐），还是让用户手选要挂起哪个？</li>
+        <li><b>内核归属</b>：跟会话（推荐，切走回收要提示变量丢失），还是尽量随会话保活（内存涨）？</li>
+        <li><b>子任务通道（M4）</b>：本次一起做，还是另立？做就必须同时加全局请求闸。</li>
+        <li><b>多窗口</b>：这次是否要（会引入写权租约与窗口 ↔ 会话订阅路由）？</li>
+      </ol>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      确认之后按 M0 → M1 → M2 → M3 排期；M0 与 M1 可以并行开分支（M1 只依赖 M0 的 <code>sessionKey</code> 约定）。
+    </div>
+  </section>
+
+</main>
+
+<div class="footer">
+  oh-my-coding-pi · 修改 4 会话并发架构 · 2026-11-23 · 方案未落代码 ·
+  可导出 PDF：浏览器 <span class="mono">Ctrl+P</span> → 另存为 PDF
+</div>
+
+</body>
+</html>

@@ -14,6 +14,7 @@ import {
   type PolicyConfig,
   type PolicyDecision,
   toPermissionMode,
+  type PermissionMode,
   type PolicyMode,
 } from "@oh-my-coding-pi/shared";
 import { sanitize, type AuditEntry } from "./audit.ts";
@@ -38,8 +39,16 @@ export interface PolicyServiceOptions {
   onChange?: (info: PolicyInfo) => void;
   /** 设置页指定的策略文件（可选） */
   getSettingsPolicy?: () => string | undefined;
-  /** 方案期门：enabled 且未 approved 时只放只读工具 */
-  getPlanGate?: () => { enabled: boolean; approved: boolean };
+  /**
+   * 方案期门：enabled 且未 approved 时只放只读工具。
+   * 修改 4 · M2：按**会话**取（A 批准了不代表 B 也批准）。
+   */
+  getPlanGate?: (ctx?: { runtimeId?: string; sessionKey?: string }) => {
+    enabled: boolean;
+    approved: boolean;
+  };
+  /** 修改 4 · M2：按会话算权限档；缺省沿用全局 mode */
+  modeFor?: (ctx: { runtimeId?: string; sessionKey?: string }) => PermissionMode | undefined;
   /** P1b2c2：runtime token → 该 runtime 的 workspace */
   resolveRuntime?: (token: string) => {
     runtimeId: string;
@@ -51,7 +60,10 @@ export interface PolicyServiceOptions {
    * 批准后的内容复核：计划文件被改/被删时返回 ok=false，并由调用方撤销批准。
    * 只在已批准且工具非只读时调用，因此不会干扰“看方案”本身。
    */
-  revalidatePlan?: () => { ok: boolean; reason?: string };
+  revalidatePlan?: (ctx?: { runtimeId?: string; sessionKey?: string }) => {
+    ok: boolean;
+    reason?: string;
+  };
 }
 
 function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
@@ -217,13 +229,15 @@ export class PolicyService {
       runtimeId?: string;
       workspaceRoot?: string;
       sessionKey?: string;
+      /** 修改 4 · M2：这个槽/会话此刻的权限档（缺省用全局） */
+      mode?: PermissionMode;
       audit?: (entry: AuditEntry) => void;
     },
   ): PolicyDecision {
     const root = ctx?.workspaceRoot ?? this.opts.getWorkspaceRoot();
 
     // 方案期：默认拒一切非只读操作（fail-closed 的同族规则）
-    const gate = this.opts.getPlanGate?.();
+    const gate = this.opts.getPlanGate?.({ runtimeId: ctx?.runtimeId, sessionKey: ctx?.sessionKey });
     if (gate?.enabled) {
       const readonly = ["read", "grep", "find", "ls", "glob"];
       // 只信 mcp__ 前缀的 readOnlyHint：其它工具不能自称只读来绕过方案期
@@ -243,7 +257,10 @@ export class PolicyService {
           return decision;
         }
         // 已批准：确认批准的仍是“这份内容”（P1-01）
-        const drift = this.opts.revalidatePlan?.();
+        const drift = this.opts.revalidatePlan?.({
+          runtimeId: ctx?.runtimeId,
+          sessionKey: ctx?.sessionKey,
+        });
         if (drift && !drift.ok) {
           const decision: PolicyDecision = {
             action: "deny",
@@ -262,7 +279,7 @@ export class PolicyService {
      * - 三档下，风险命中 ask 时走既有授权流程，命中 deny 时直接拒；
      * - 旧档（ask/allow/readonly/deny）保持原行为，不被风险层改写。
      */
-    const effective = this.effectiveMode();
+    const effective = ctx?.mode ?? this.effectiveMode();
     const riskMode = toPermissionMode(effective);
     const risk = assessRisk(toolName, input ?? {}, { workspace: root });
     if (risk?.category === "hard-deny") {
@@ -443,7 +460,20 @@ export class PolicyService {
         body.toolName,
         input,
         body.readOnly === true ? { readOnly: true } : undefined,
-        runtime ? { runtimeId: runtime.runtimeId, workspaceRoot: runtime.workspace } : undefined,
+        runtime
+          ? {
+              runtimeId: runtime.runtimeId,
+              workspaceRoot: runtime.workspace,
+              ...(runtime.sessionKey ? { sessionKey: runtime.sessionKey } : {}),
+              ...(() => {
+                const mode = this.opts.modeFor?.({
+                  runtimeId: runtime.runtimeId,
+                  ...(runtime.sessionKey ? { sessionKey: runtime.sessionKey } : {}),
+                });
+                return mode ? { mode } : {};
+              })(),
+            }
+          : undefined,
       );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, decision, policy: this.info() }));

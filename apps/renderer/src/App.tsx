@@ -30,7 +30,7 @@ import Markdown from "./Markdown";
 import UploadMenu from "./UploadMenu";
 import ToolCard from "./ToolCard";
 import ToolGroup from "./ToolGroup";
-import { messagesFromAgent } from "./tool-rebuild";
+import { applyPiEvent, messagesFromAgent } from "./tool-rebuild";
 import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
@@ -69,6 +69,10 @@ import type {
   FileStatResult,
   ImageAttachment,
   RuntimeView,
+  SessionBoardView,
+  SessionOpenView,
+  SessionView,
+  ChatItem,
   ThinkingLevel,
   WorkspaceInfo,
   WorkspaceIndexEntry,
@@ -320,72 +324,17 @@ export default function App() {
       }));
       return;
     }
-    if (ev.type === "message_start" && ev.message.role === "assistant") {
-      setMessagesFor(runtimeId, (prev) => [
-        ...prev,
-        { kind: "assistant", text: "", id: `${runtimeId}-${Date.now()}` },
-      ]);
-      return;
-    }
-    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
-      const delta = ev.assistantMessageEvent.delta;
-      setMessagesFor(runtimeId, (prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const item = next[i]!;
-          if (item.kind === "assistant") {
-            next[i] = { ...item, text: item.text + delta };
-            return next;
-          }
-        }
-        return [...next, { kind: "assistant", text: delta, id: `${runtimeId}-${Date.now()}` }];
-      });
-      return;
-    }
-    if (ev.type === "message_end" && ev.message.role === "assistant") {
-      const text = textOf(ev.message.content);
-      setMessagesFor(runtimeId, (prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const item = next[i]!;
-          if (item.kind === "assistant") {
-            next[i] = { ...item, text: text || item.text };
-            return next;
-          }
-        }
-        return text ? [...next, { kind: "assistant", text, id: `${runtimeId}-${Date.now()}` }] : next;
-      });
-      setUnreadByRuntime((prev) => ({ ...prev, [runtimeId]: (prev[runtimeId] ?? 0) + 1 }));
-      return;
-    }
-    if (ev.type === "tool_execution_start") {
-      setMessagesFor(runtimeId, (prev) => [
-        ...prev,
-        {
-          kind: "tool",
-          id: ev.toolCallId,
-          name: ev.toolName,
-          args: JSON.stringify(ev.args ?? {}),
-          done: false,
-          startedAt: Date.now(),
-        },
-      ]);
-      return;
-    }
-    if (ev.type === "tool_execution_end") {
-      setMessagesFor(runtimeId, (prev) =>
-        prev.map((item) =>
-          item.kind === "tool" && item.id === ev.toolCallId
-            ? {
-                ...item,
-                done: true,
-                endedAt: Date.now(),
-                ...(ev.isError ? { isError: true } : {}),
-                result: textOf(ev.result?.content as never),
-              }
-            : item,
-        ),
-      );
+    // 转写部分与主进程共用同一个归约（修改 4 · M1）：
+    // 以前这里另写了一份，覆盖范围不同（没有 system / 工具失败态更少），
+    // 于是"一直盯着"与"切走再回来"看到的会不一样。
+    if (
+      ev.type === "message_start" ||
+      ev.type === "message_update" ||
+      ev.type === "message_end" ||
+      ev.type === "tool_execution_start" ||
+      ev.type === "tool_execution_end"
+    ) {
+      setMessagesFor(runtimeId, (prev) => applyPiEvent(prev as ChatItem[], ev) as unknown as Msg[]);
     }
   }
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -402,6 +351,11 @@ export default function App() {
   /** Esc 取消时输入框卸载会触发 blur，用标记拦住那次误提交 */
   const renameCancelled = useRef(false);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
+  /** 事件回调里要读"此刻打开的是哪个会话"，state 在这里是过期的 */
+  const currentFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    currentFileRef.current = currentFile;
+  }, [currentFile]);
   const [openTabs, setOpenTabs] = useState<string[]>(readTabs);
   /** 草稿和滚动位置只存内存：关掉应用就没了，不假装持久化。 */
   const draftsRef = useRef<Record<string, string>>({});
@@ -467,7 +421,16 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [runtimes, setRuntimes] = useState<RuntimeView[]>([]);
   const runtimesRef = useRef<RuntimeView[]>([]);
-  const [unreadByRuntime, setUnreadByRuntime] = useState<Record<string, number>>({});
+  /** 修改 4 · M0：会话 + 槽的权威表（主进程给） */
+  const [board, setBoard] = useState<SessionBoardView | null>(null);
+  /**
+   * 修改 4 · M0：可发送与否要看**当前这个槽**。
+   * `piReady` 只反映默认槽（它是启动时的那个进程）；后台槽挂起/恢复时
+   * 不能拿它当全局开关，否则切到后台标签会被误判成"pi 正在启动"。
+   */
+  const activeSlotInfo = board?.slots.find((item) => item.id === activeRuntimeId);
+  const slotReady = activeRuntimeId === "default" ? piReady : Boolean(activeSlotInfo?.ready);
+
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [appError, setAppError] = useState<AppError | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
@@ -723,11 +686,66 @@ export default function App() {
     });
   }, []);
 
+  // 修改 4 · M0：会话表由主进程推；渲染端不再自己算"谁在跑"
+  useEffect(() => {
+    let alive = true;
+    void window.api
+      .getSessionBoard()
+      .then((next) => {
+        if (alive) setBoard(next as SessionBoardView);
+      })
+      .catch(() => undefined);
+    // 修改 4 · M3：忙/闲以主进程的槽表为准。崩溃时 `agent_settled` 永远不会来，
+    // 渲染端自己攒的 busy 就会一直挂着（输入框变成"追加"，发不出话）。
+    const off = window.api.onSessionChanged((next) => {
+      const view = next as SessionBoardView;
+      setBoard(view);
+      setBusyByRuntime((prev) => {
+        const merged = { ...prev };
+        for (const slot of view.slots) merged[slot.id] = slot.busy;
+        return merged;
+      });
+    });
+    const offOpen = window.api.onSessionOpened((payload) => {
+      const file = (payload as { file?: string }).file;
+      if (file) setNotice(`排队的会话已空出位置并打开：${file.split(/[\/]/).pop() ?? file}`);
+    });
+    // 修改 4 · M3：崩溃中断、内核回收这类系统提示，主进程会同时推进中枢与界面；
+    // 正在看着这段会话的人应当马上看到，不必切走再回来。
+    const offNote = window.api.onSessionNote((payload) => {
+      const { file, text } = payload as { file?: string; text?: string };
+      if (!file || !text) return;
+      if (currentFileRef.current && file !== currentFileRef.current) return;
+      setMessages((prev) => [
+        ...prev,
+        { kind: "system", id: `note-${Date.now()}`, text },
+      ]);
+    });
+    // 修改 4 · M2：内核按会话回收，关掉就没有变量了——这件事必须说出来
+    const offReaped = window.api.onKernelReaped((payload) => {
+      const file = (payload as { file?: string | null }).file;
+      const name = file ? file.split(/[\/]/).pop() : "后台会话";
+      setNotice(`「${name}」的内核空闲已关闭，变量已清空；下次运行代码会重新启动。`);
+    });
+    return () => {
+      alive = false;
+      off();
+      offOpen();
+      offReaped();
+      offNote();
+    };
+  }, []);
+
+  /** 某个会话文件在权威表里的那一行（标签状态点、未读都读它） */
+  function sessionViewFor(file: string | null): SessionView | undefined {
+    if (!file || !board) return undefined;
+    return board.sessions.find((item) => item.file === file);
+  }
+
   const activateRuntime = useCallback(
     async (id: string) => {
       activeRuntimeRef.current = id;
       setActiveRuntimeId(id);
-      setUnreadByRuntime((prev) => ({ ...prev, [id]: 0 }));
       try {
         const list = (await window.api.activateRuntime(id)) as RuntimeView[];
         if (list) applyRuntimeList(list);
@@ -787,11 +805,6 @@ export default function App() {
       try {
         await window.api.closeRuntime(id);
         setMessagesByRuntime((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setUnreadByRuntime((prev) => {
           const next = { ...prev };
           delete next[id];
           return next;
@@ -1351,8 +1364,8 @@ export default function App() {
   async function send(mode: "prompt" | "steer" | "followUp") {
     const text = input.trim();
     if (!text) return;
-    if (!piReady) {
-      setNotice("pi 正在启动，请稍候再发送");
+    if (!slotReady) {
+      setNotice("这个会话的 pi 正在启动，请稍候再发送");
       return;
     }
     if (!modelKey) {
@@ -1547,20 +1560,66 @@ export default function App() {
     await window.api.abort(activeRuntimeRef.current).catch(() => undefined);
   }
 
+  /**
+   * 切到一个会话（修改 4 · M0）。
+   *
+   * 不再走 `switch_session`——那是在**同一个进程里换会话**，pi 会中断在飞的回合，
+   * 所以旧代码只能在"不忙"的时候切。现在每个会话有自己的槽：切过去就是把那个槽
+   * 叫醒/绑定，别的槽照跑。
+   */
   async function loadSession(file: string) {
-    if (busy || file === currentFile) return;
+    if (file === currentFile) return;
     if (currentFile) {
       draftsRef.current[currentFile] = input;
       scrollRef.current[currentFile] = listRef.current?.scrollTop ?? 0;
     }
-    const ok = await window.api.switchSession(file, activeRuntimeRef.current).catch(() => false);
-    if (ok) {
+    let result: SessionOpenView;
+    try {
+      result = (await window.api.openSession(file)) as SessionOpenView;
+    } catch (error) {
+      setNotice(`打不开这个会话：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (result?.board) setBoard(result.board);
+    if (result?.kind === "queued") {
+      setNotice(
+        `同时运行的会话已达上限，已排队（第 ${result.position ?? 1} 位）；有空位时会自动打开。`,
+      );
       ensureTab(file);
-      // 只在有存过的位置时接管滚动，否则让它滚到底
-      if (file in scrollRef.current) pendingScroll.current = { file, top: scrollRef.current[file] };
+      return;
+    }
+    ensureTab(file);
+    setCurrentFile(file);
+    if (result?.slotId) {
+      // 复用已有的一整套加载（消息 / 模型 / 统计 / 会话列表），它按 runtimeId 取数
+      await activateRuntime(result.slotId);
+      // 修改 4 · M1：主进程的转录中枢里如果有这段，就用它整段覆盖——
+      // 它包含后台期间发生的全部事件（工具卡片、流式文本、系统提示），
+      // 而 pi 的 get_messages 只给消息，展示态要重算一遍。
+      await applyHubTranscript(result.slotId, file);
+    } else {
       await refreshSession();
-      await refreshSessions();
-      setInput(draftsRef.current[file] ?? "");
+    }
+    // 只在有存过的位置时接管滚动，否则让它滚到底
+    if (file in scrollRef.current) pendingScroll.current = { file, top: scrollRef.current[file] };
+    await refreshSessions();
+    setInput(draftsRef.current[file] ?? "");
+  }
+
+  /**
+   * 用转录中枢的快照覆盖某个槽的消息列表（修改 4 · M1）。
+   * `cold` = 中枢里还没有这段（重启后第一次打开），这时保留前面的 pi 拉取结果。
+   */
+  async function applyHubTranscript(slotId: string, file: string): Promise<void> {
+    try {
+      const shot = (await window.api.getTranscript(file)) as
+        | { items: ChatItem[]; cold: boolean }
+        | null;
+      if (shot && !shot.cold && shot.items.length > 0) {
+        setMessagesFor(slotId, shot.items as unknown as Msg[]);
+      }
+    } catch {
+      // 中枢不可用时用 pi 拉来的那份，不影响使用
     }
   }
 
@@ -1578,8 +1637,18 @@ export default function App() {
     const rest = openTabs.filter((f) => f !== file);
     if (rest.length === 0) return; // 至少留一个页签
     if (file === currentFile) {
-      if (busy) return; // 忙时切不了，先不关
+      // 忙也能切走（这正是 M0 要的行为）；先把视图挪到相邻标签
       await loadSession(rest[Math.min(idx, rest.length - 1)]);
+    }
+    // 关标签才回收：没在跑的会话，槽一起关掉；在跑的就留在后台
+    const view = sessionViewFor(file);
+    if (!view || !view.busy) {
+      try {
+        const next = (await window.api.closeSession(file)) as SessionBoardView;
+        setBoard(next);
+      } catch {
+        // 关不掉就留着，下次再关
+      }
     }
     setOpenTabs(rest);
   }
@@ -2313,72 +2382,6 @@ export default function App() {
       />
 
         <header className="bar">
-          <div className="runtime-tabs" role="tablist" aria-label="运行时">
-            {runtimes.map((runtime, index) => (
-              <div
-                key={runtime.id}
-                className={`runtime-tab ${runtime.id === activeRuntimeId ? "on" : ""} ${
-                  runtime.id !== "default" && !runtime.running ? "suspended" : ""
-                }`}
-              >
-                <button
-                  type="button"
-                  className="runtime-tab-main"
-                  role="tab"
-                  aria-selected={runtime.id === activeRuntimeId}
-                  onClick={() => void activateRuntime(runtime.id)}
-                  title={[
-                    runtime.workspace || runtime.id,
-                    runtime.id !== "default" && !runtime.running
-                      ? "已挂起，切回会恢复"
-                      : runtime.busy || busyByRuntime[runtime.id]
-                        ? "运行中"
-                        : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                >
-                  <span
-                    className="runtime-dot"
-                    data-busy={
-                      runtime.busy || busyByRuntime[runtime.id] ? "1" : undefined
-                    }
-                    data-suspended={
-                      runtime.id !== "default" && !runtime.running ? "1" : undefined
-                    }
-                  />
-                  {runtime.id === "default" ? "默认" : `后台 ${index}`}
-                  {runtime.id !== "default" && !runtime.running ? (
-                    <span className="runtime-tab-state">挂起</span>
-                  ) : null}
-                  {unreadByRuntime[runtime.id] ? (
-                    <span className="runtime-badge">{unreadByRuntime[runtime.id]}</span>
-                  ) : null}
-                </button>
-                {runtime.id !== "default" && (
-                  <button
-                    type="button"
-                    className="runtime-tab-close"
-                    onClick={() => void closeRuntime(runtime.id)}
-                    title="关闭这个后台运行时"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            ))}
-            <button
-              type="button"
-              className="runtime-tab-add"
-              onClick={() => void createRuntime()}
-              title="新建后台运行时（同工作区）"
-            >
-              ＋
-            </button>
-            <span className="runtime-count">
-              {runtimes.filter((item) => item.running).length} 运行 / {runtimes.length}
-            </span>
-          </div>
           <div className="bar-right">
             <PermissionPill />
             <ContextMeter sessionKey={currentFile} busy={busy} />
@@ -2428,24 +2431,52 @@ export default function App() {
             {openTabs.map((file) => {
               const active = file === currentFile;
               const label = tabLabel(file);
+              const info = sessionViewFor(file);
+              const running = info?.running ?? false;
+              const tabBusy = info?.busy ?? false;
+              const unread = info?.unread ?? 0;
+              const crashed = info?.state === "interrupted";
+              const queued = info?.queued ?? 0;
               return (
-                <div key={file} className={`session-tab ${active ? "active" : ""}`}>
+                <div
+                  key={file}
+                  className={`session-tab ${active ? "active" : ""} ${running ? "" : "suspended"}`}
+                >
                   <button
                     type="button"
                     className="tab-label"
                     role="tab"
                     aria-selected={active}
-                    disabled={busy && !active}
-                    title={busy && !active ? "正在运行，先停止再切换" : file}
+                    title={[
+                      file,
+                      queued
+                        ? `排队第 ${queued} 位（名额空出会自动打开）`
+                        : crashed
+                          ? "上一轮被中断（pi 进程异常退出），可直接重发"
+                          : tabBusy
+                            ? "运行中"
+                            : running
+                              ? "空闲"
+                              : "已挂起（切回会自动恢复）",
+                    ].join(" · ")}
                     onClick={() => void loadSession(file)}
                   >
+                    <span
+                      className="tab-dot"
+                      data-busy={tabBusy ? "1" : undefined}
+                      data-suspended={!running && !queued ? "1" : undefined}
+                      data-error={crashed ? "1" : undefined}
+                      data-queued={queued ? "1" : undefined}
+                    />
                     {label}
+                    {queued > 0 && <span className="tab-queued">排队 {queued}</span>}
+                    {unread > 0 && <span className="tab-unread">{unread}</span>}
                   </button>
                   <button
                     type="button"
                     className="tab-close"
                     aria-label={`关闭页签 ${label}`}
-                    disabled={openTabs.length === 1 || (active && busy)}
+                    disabled={openTabs.length === 1}
                     title={openTabs.length === 1 ? "至少保留一个页签" : "关闭页签，不删除会话文件"}
                     onClick={() => void closeTab(file)}
                   >
@@ -2454,6 +2485,11 @@ export default function App() {
                 </div>
               );
             })}
+            {board && (
+              <span className="session-count">
+                {board.slots.filter((item) => item.running).length} 运行 / {openTabs.length} 标签
+              </span>
+            )}
           </div>
         )}
         <div className="viewtabs">
@@ -2626,13 +2662,13 @@ export default function App() {
 
         {view === "chat" && (
         <footer className="composer">
-          {!piReady && (
+          {!slotReady && (
             <div className="submit-state" role="status">
               <span className="submit-dot" aria-hidden="true" />
-              <span>pi 正在启动…（首次启动可能需要几十秒）</span>
+              <span>这个会话的 pi 正在启动…（首次启动可能需要几十秒）</span>
             </div>
           )}
-          {piReady && (submitPhase === "submitting" || submitPhase === "accepted" || submitPhase === "preparing") && (
+          {slotReady && (submitPhase === "submitting" || submitPhase === "accepted" || submitPhase === "preparing") && (
             <div className="submit-state" role="status">
               <span className="submit-dot" aria-hidden="true" />
               <span>{SUBMIT_LABEL[submitPhase]}</span>
@@ -2805,8 +2841,8 @@ export default function App() {
           ) : (
             <button
               onClick={() => send("prompt")}
-              disabled={!input.trim() || submitPhase !== "idle" || !piReady}
-              title={!piReady ? "pi 正在启动" : submitPhase !== "idle" ? SUBMIT_LABEL[submitPhase] : undefined}
+              disabled={!input.trim() || submitPhase !== "idle" || !slotReady}
+              title={!slotReady ? "这个会话的 pi 正在启动" : submitPhase !== "idle" ? SUBMIT_LABEL[submitPhase] : undefined}
             >
               发送
             </button>
