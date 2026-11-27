@@ -35,7 +35,22 @@ export default function Permissions() {
   const [exported, setExported] = useState("");
   const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState<PermissionState | null>(null);
-  const [asDefault, setAsDefault] = useState(false);
+  /** 与顶栏一致：常驻勾选（记住上次选择），并在旁边写清当前默认档 */
+  const [asDefault, setAsDefaultState] = useState(() => {
+    try {
+      return localStorage.getItem("omcp.permissionAsDefault") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setAsDefault = (value: boolean) => {
+    setAsDefaultState(value);
+    try {
+      localStorage.setItem("omcp.permissionAsDefault", value ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  };
 
   const refreshPolicyAndGrants = useCallback(async () => {
     try {
@@ -71,6 +86,16 @@ export default function Permissions() {
   useEffect(() => {
     void refreshPolicyAndGrants();
   }, [refreshPolicyAndGrants]);
+
+  // 修改六 · S4：顶栏改了档 / 切了会话，这里立刻跟上（不用重开面板）
+  useEffect(
+    () =>
+      window.api.onPermissionChanged((next) => {
+        setPerm(next as PermissionState);
+        void window.api.getPolicy().then((info) => setPolicy((info as PolicyInfo) ?? null)).catch(() => undefined);
+      }),
+    [],
+  );
 
   useEffect(() => {
     void refreshAudit();
@@ -162,6 +187,9 @@ export default function Permissions() {
                 <label className="perm-tier-default">
                   <input type="checkbox" checked={asDefault} onChange={(e) => setAsDefault(e.target.checked)} />
                   设为新会话默认
+                  <span className="perm-note">
+                    （当前默认：{TIERS.find((t) => t.mode === perm?.default)?.name ?? "请求批准"}）
+                  </span>
                 </label>
               </div>
             </div>

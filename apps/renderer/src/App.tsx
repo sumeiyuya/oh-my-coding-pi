@@ -35,6 +35,8 @@ import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
 import { pickMessages } from "./chat-preview";
 import { formatElapsed } from "./time-format";
+import { bytesOfBase64, mergeImages, type PendingImage } from "./attachments";
+import { isNearBottom, unreadAfter } from "./scroll-stick";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
 import ErrorBanner from "./ErrorBanner";
 import { presentAppError, presentModelError } from "./error-view";
@@ -57,7 +59,6 @@ import type {
   ModelInfo,
   PiStreamItem,
   PolicyInfo,
-  PolicyMode,
   SessionMetaEntry,
   SessionStats,
   SessionSummary,
@@ -130,6 +131,12 @@ function nextMsgId(): string {
 }
 
 /** 相对时间（修改 3）：2m / 3h / 2d；超过一周回落到日期 */
+/** 字节数 → `0.4 MB`（输入区附件角的标注用；小于 0.1 MB 时说 KB） */
+function formatMb(bytes: number): string {
+  if (bytes < 100 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function formatRelative(iso: string | undefined): string {
   if (!iso) return "";
   const t = Date.parse(iso);
@@ -182,16 +189,6 @@ const DOCK_LABEL: Record<DockTab, string> = {
   notebook: "笔记本",
   artifacts: "产物",
   run: "运行",
-};
-
-const POLICY_LABEL: Record<PolicyMode, string> = {
-  ask: "请求批准",
-  allow: "完全访问",
-  deny: "全拒",
-  readonly: "只读",
-  "deny-risky": "自动拦截",
-  "ask-risky": "请求批准",
-  "allow-all": "完全访问",
 };
 
 function ReadonlyBanner() {
@@ -359,6 +356,24 @@ export default function App() {
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
     () => new Set(loadUiState().expandedWorkspaces),
   );
+  /** 修改三：当前工作区分组也能折叠（每个根各自记） */
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
+    () => new Set(loadUiState().collapsedWorkspaces),
+  );
+  /** 修改五续：侧栏两段（项目 / 会话）也能折叠 */
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
+    () => new Set(loadUiState().collapsedSections),
+  );
+
+  function toggleSection(name: "projects" | "sessions") {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      saveUiState({ collapsedSections: [...next] });
+      return next;
+    });
+  }
   /** 修改 5 · C5：别的工作区的会话（按根缓存，展开时才拉） */
   const [wsSessions, setWsSessions] = useState<
     Record<string, { sessions: SessionSummary[]; titles: Record<string, string> }>
@@ -390,6 +405,18 @@ export default function App() {
   const draftsRef = useRef<Record<string, string>>({});
   const scrollRef = useRef<Record<string, number>>({});
   const pendingScroll = useRef<{ file: string; top: number } | null>(null);
+  /**
+   * 修改四：会话区滚动。
+   *
+   * - `atBottom`：此刻是否在底部附近（≤24px）。**只有为真才自动跟随新内容**，
+   *   所以往上翻历史时流式输出不会把视图拽回去；
+   * - `newWhileAway`：离开底部后累计来了几条，按钮上的角标。
+   */
+  const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  const [newWhileAway, setNewWhileAway] = useState(0);
+  const listScrollRaf = useRef(0);
+  const prevMsgCount = useRef(0);
   /** 用户按「停止」的时刻：用于把随后结束的工具记为「已停止」而不是失败 */
   const abortedAt = useRef<number | null>(null);
   const [inputByRuntime, setInputByRuntime] = useState<Record<string, string>>({});
@@ -544,6 +571,15 @@ export default function App() {
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [attachmentsByRuntime, setAttachmentsByRuntime] = useState<Record<string, UserImage[]>>({});
   const attachments = attachmentsByRuntime[activeRuntimeId] ?? [];
+  /**
+   * 待发图片的"最新值"镜像（修改一）。
+   *
+   * 粘贴是异步的（要先读 arrayBuffer）。旧写法在 await 之后基于**调用时的快照**
+   * 拼新数组，两次粘贴挨得近就后写覆盖先写 —— 现象是"只能粘一张"。
+   * 这里读 ref、同步写回，合并永远发生在最新列表上。
+   */
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   function setAttachments(value: UserImage[] | ((prev: UserImage[]) => UserImage[])): void {
     const runtimeId = activeRuntimeRef.current;
     setAttachmentsByRuntime((prev) => {
@@ -628,9 +664,140 @@ export default function App() {
     }
   }, [expandedWorkspaces, wsSessions, loadWsSessions]);
 
+  /* ---------------- 修改五：项目 / 会话 两段 ---------------- */
+
+  /** 项目表 + 临时会话（scratch）；侧栏两段的数据源 */
+  const [projectList, setProjectList] = useState<{
+    projects: Array<{
+      root: string;
+      name: string;
+      sessionCount: number;
+      lastActiveAt?: string;
+    }>;
+    scratch: { root: string; sessionCount: number };
+  } | null>(null);
+
+  const refreshProjects = useCallback(async () => {
+    try {
+      const data = (await window.api.listProjects()) as {
+        projects: Array<{ root: string; name: string; sessionCount: number; lastActiveAt?: string }>;
+        scratch: { root: string; sessionCount: number };
+      };
+      setProjectList(data);
+      void loadWsSessions(data.scratch.root);
+    } catch {
+      // 主进程不可用时保留上一份
+    }
+  }, [loadWsSessions]);
+
+  useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects, workspace?.root, sessions.length]);
+
+  /** 多选：一次只开一段（项目 / 会话），切换段时清空选择 */
+  const [selectMode, setSelectMode] = useState<"projects" | "sessions" | null>(null);
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+
+  function toggleSelect(mode: "projects" | "sessions") {
+    setSelectMode((prev) => (prev === mode ? null : mode));
+    setSelectedRows(new Set());
+  }
+
+  function toggleRow(key: string) {
+    setSelectedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  async function forgetSelectedProjects() {
+    const roots = [...selectedRows];
+    if (roots.length === 0) return;
+    if (!window.confirm(`从列表移出 ${roots.length} 个项目？（只移出列表，不动磁盘上的任何文件）`)) return;
+    await window.api.forgetProjects(roots);
+    setSelectedRows(new Set());
+    await refreshProjects();
+  }
+
+  async function archiveSelectedSessions(archived: boolean) {
+    const files = [...selectedRows];
+    if (files.length === 0) return;
+    const res = (await window.api.archiveSessions(files, archived)) as { ok: number; failed: string[] };
+    if (res.failed?.length) setNotice(`${res.ok} 条已${archived ? "归档" : "还原"}，${res.failed.length} 条失败`);
+    setSelectedRows(new Set());
+    await Promise.all([refreshProjects(), refreshSessions(), refreshScratch()]);
+  }
+
+  async function removeSelectedSessions() {
+    const files = [...selectedRows];
+    if (files.length === 0) return;
+    if (!window.confirm(`把 ${files.length} 段会话移到各自工作区的回收站？（不会立即删除文件）`)) return;
+    const res = (await window.api.removeSessions(files)) as {
+      ok: number;
+      failed: Array<{ file: string; reason: string }>;
+    };
+    if (res.failed?.length) {
+      setNotice(`${res.ok} 条已移入回收站，${res.failed.length} 条没动（${res.failed[0]?.reason ?? ""}）`);
+    }
+    setSelectedRows(new Set());
+    await Promise.all([refreshProjects(), refreshSessions(), refreshScratch()]);
+  }
+
+  /** 会话段（scratch）单独刷一次：它不属于任何项目 */
+  const refreshScratch = useCallback(async () => {
+    const root = projectList?.scratch.root;
+    if (!root) return;
+    await loadWsSessions(root);
+  }, [projectList?.scratch.root, loadWsSessions]);
+
+  /** 新建临时会话：落在 scratch，不进项目 */
+  async function newScratchSession() {
+    const root = projectList?.scratch.root;
+    if (!root) {
+      setNotice("临时会话目录还没准备好，稍后再试");
+      return;
+    }
+    await newSessionIn(root);
+    await refreshProjects();
+  }
+
   useEffect(() => {
     void refreshWorkspaceIndex();
   }, [workspace?.root, sessions.length, refreshWorkspaceIndex]);
+
+  /**
+   * 输入框随内容增高（修改一）：1–6 行，超过 6 行内部滚动。
+   * 只在输入/附件/会话变化和窗口尺寸变化时重算，不做常驻监听。
+   */
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const MIN = 52;
+    const MAX = 168;
+    const border = el.offsetHeight - el.clientHeight;
+    el.style.height = "auto";
+    const needed = el.scrollHeight + border;
+    el.style.height = `${Math.min(Math.max(needed, MIN), MAX)}px`;
+    el.style.overflowY = needed > MAX ? "auto" : "hidden";
+  }, [input, attachments.length, currentFile]);
+
+  useEffect(() => {
+    const onResize = () => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const MIN = 52;
+      const MAX = 168;
+      const border = el.offsetHeight - el.clientHeight;
+      el.style.height = "auto";
+      const needed = el.scrollHeight + border;
+      el.style.height = `${Math.min(Math.max(needed, MIN), MAX)}px`;
+      el.style.overflowY = needed > MAX ? "auto" : "hidden";
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -1355,6 +1522,53 @@ export default function App() {
     });
   }
 
+  /** 量一次"现在在不在底部"，顺带维护角标 */
+  const measureAtBottom = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const near = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+    atBottomRef.current = near;
+    setAtBottom(near);
+    if (near) setNewWhileAway(0);
+  }, []);
+
+  /** 用户自己滚：rAF 节流，别在每个 scroll 事件里 setState */
+  const onListScroll = useCallback(() => {
+    if (listScrollRaf.current) return;
+    listScrollRaf.current = requestAnimationFrame(() => {
+      listScrollRaf.current = 0;
+      measureAtBottom();
+    });
+  }, [measureAtBottom]);
+
+  const scrollToBottom = useCallback((smooth = true) => {
+    const el = listRef.current;
+    if (!el) return;
+    const reduced =
+      typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth && !reduced ? "smooth" : "auto" });
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setNewWhileAway(0);
+  }, []);
+
+  // 换会话：回到"在底部"，并清掉上一段的角标与计数基线
+  useEffect(() => {
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setNewWhileAway(0);
+    prevMsgCount.current = 0;
+  }, [currentFile]);
+
+  // 尺寸变化（窗口、右坞、折叠工具卡）后重新判定，别"明明在底部却显示按钮"
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measureAtBottom());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measureAtBottom]);
+
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
@@ -1364,8 +1578,19 @@ export default function App() {
       pendingScroll.current = null;
       return;
     }
-    el.scrollTop = el.scrollHeight;
+    // 修改四：**只在本来就在底部时**才跟随；往上翻历史时不抢滚动
+    if (atBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [shownMessages, currentFile]);
+
+  // 离开底部后新来的消息计入角标（按条数增量算，不重算总数）
+  useEffect(() => {
+    const len = shownMessages.length;
+    const added = Math.max(0, len - prevMsgCount.current);
+    prevMsgCount.current = len;
+    if (added > 0 && !atBottomRef.current) {
+      setNewWhileAway((prev) => unreadAfter(prev, added, false));
+    }
+  }, [shownMessages.length]);
 
   useEffect(() => {
     if (!imagePreview) return;
@@ -1520,6 +1745,11 @@ export default function App() {
     // 发出去就不再算草稿，否则切走再切回来会把已发送的文字又填回输入框
     if (currentFile) draftsRef.current[currentFile] = "";
     setAttachments([]);
+    // 修改四：自己说的话必须看得见——无论此刻翻到哪
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setNewWhileAway(0);
+    requestAnimationFrame(() => scrollToBottom(false));
 
     if (isPrompt) {
       // 发送前预检：缺凭据 / 地址不对 / 模型不存在就别发，直接告诉用户怎么修
@@ -1985,95 +2215,78 @@ export default function App() {
     return Boolean(found.input?.includes("image"));
   })();
 
+  const imageLimits = {
+    maxCount: UPLOAD_IMAGE_MAX_COUNT,
+    maxBytes: UPLOAD_IMAGE_MAX_BYTES,
+    totalBytes: UPLOAD_IMAGE_TOTAL_BYTES,
+  };
+
+  /**
+   * 把一批图片并进待发列表（修改一）。
+   *
+   * 读 `attachmentsRef` 的**最新值**再合并，所以两次粘贴挨着也不会互相覆盖；
+   * 超限的逐条给理由——静默丢一张比多一张更让人困惑。
+   */
+  const pushImages = useCallback((incoming: PendingImage[]) => {
+    if (incoming.length === 0) return;
+    const { list, rejected } = mergeImages(attachmentsRef.current, incoming, imageLimits);
+    attachmentsRef.current = list;
+    setAttachments(list);
+    if (rejected.length > 0) {
+      const first = rejected[0]?.reason ?? "超出限制";
+      setNotice(
+        `已忽略 ${rejected.length} 张图片（${first}）；已附 ${list.length}/${UPLOAD_IMAGE_MAX_COUNT} 张`,
+      );
+    }
+  }, []);
+
   const addImageFiles = useCallback(
     async (files: File[]) => {
       const images = files.filter((f) => f.type.startsWith("image/"));
       if (images.length === 0) return;
-      const accepted: Array<{ id: string; data: string; mimeType: string; size: number }> = [];
-      let skipped = 0;
+      // 先把所有文件读完再一次性合并——中途不写状态，就没有"半成品列表"
+      const incoming: PendingImage[] = [];
+      const tooBig: string[] = [];
       for (const file of images) {
         if (file.size > UPLOAD_IMAGE_MAX_BYTES) {
-          skipped += 1;
-          continue;
-        }
-        if (accepted.length >= UPLOAD_IMAGE_MAX_COUNT) {
-          skipped += 1;
+          tooBig.push(file.name || "粘贴的图片");
           continue;
         }
         const buf = await file.arrayBuffer();
         const bytes = new Uint8Array(buf);
         let binary = "";
         for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        accepted.push({
-          id: `${file.name}-${Date.now()}-${accepted.length}`,
+        incoming.push({
+          id: `${file.name || "paste"}-${Date.now().toString(36)}-${incoming.length}`,
           data: btoa(binary),
           mimeType: file.type || "image/png",
           size: file.size,
         });
       }
-
-      let total = attachments.reduce(
-        (sum, a) => sum + Math.ceil((a.data.length * 3) / 4),
-        0,
-      );
-      const out = [...attachments];
-      for (const item of accepted) {
-        if (out.length >= UPLOAD_IMAGE_MAX_COUNT) {
-          skipped += 1;
-          continue;
-        }
-        if (total + item.size > UPLOAD_IMAGE_TOTAL_BYTES) {
-          skipped += 1;
-          continue;
-        }
-        out.push({ id: item.id, data: item.data, mimeType: item.mimeType });
-        total += item.size;
-      }
-      setAttachments(out);
-      if (skipped > 0) {
+      if (tooBig.length > 0) {
+        const names = tooBig.slice(0, 2).join("、");
         setNotice(
-          `已忽略 ${skipped} 张图片（最多 ${UPLOAD_IMAGE_MAX_COUNT} 张，单张 ≤4 MB，总计 ≤12 MB）`,
+          `已忽略 ${tooBig.length} 张超过 ${Math.round(UPLOAD_IMAGE_MAX_BYTES / 1024 / 1024)} MB 的图片：${names}`,
         );
       }
+      pushImages(incoming);
     },
-    [attachments],
+    [pushImages],
   );
 
-  /** 图片对话框选中的项：data 已由主进程读好 */
+  /** 图片对话框选中的项：data 已由主进程读好（修改一：同样走合并规则） */
   function addPickedImages(picked: PickedUpload[]) {
-    let total = attachments.reduce(
-      (sum, a) => sum + Math.ceil((a.data.length * 3) / 4),
-      0,
-    );
-    const out = [...attachments];
-    let skipped = 0;
+    const incoming: PendingImage[] = [];
     for (const f of picked) {
       if (!f.data) continue;
-      if (out.length >= UPLOAD_IMAGE_MAX_COUNT) {
-        skipped += 1;
-        continue;
-      }
-      if (f.size > UPLOAD_IMAGE_MAX_BYTES) {
-        skipped += 1;
-        continue;
-      }
-      if (total + f.size > UPLOAD_IMAGE_TOTAL_BYTES) {
-        skipped += 1;
-        continue;
-      }
-      out.push({
-        id: `pick-${Date.now()}-${out.length}`,
+      incoming.push({
+        id: `pick-${Date.now().toString(36)}-${incoming.length}`,
         data: f.data,
         mimeType: f.mimeType ?? "image/png",
+        ...(typeof f.size === "number" ? { size: f.size } : {}),
       });
-      total += f.size;
     }
-    setAttachments(out);
-    if (skipped > 0) {
-      setNotice(
-        `已忽略 ${skipped} 张图片（最多 ${UPLOAD_IMAGE_MAX_COUNT} 张，单张 ≤4 MB，总计 ≤12 MB）`,
-      );
-    }
+    pushImages(incoming);
   }
 
   /** 在光标处插入 @ 引用；路径不能含空白（外部/含空格文件已复制为安全名） */
@@ -2249,6 +2462,28 @@ export default function App() {
       return String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? ""));
     });
 
+  /**
+   * 当前工作区分组是否展开（修改三）。
+   *
+   * - 默认展开；点组头折叠，状态按工作区根分别记住；
+   * - **搜索时强制展开**：否则"搜到了却看不见"比不能折叠更糟。
+   */
+  /** 段是否展开；搜索时强制展开（否则"搜到了却看不见"） */
+  const sectionOpen = (name: "projects" | "sessions"): boolean =>
+    sessionQuery.trim().length > 0 || !collapsedSections.has(name);
+
+  const currentGroupOpen =
+    sessionQuery.trim().length > 0 || !collapsedWorkspaces.has(workspace?.root ?? "");
+
+  /** 修改五：项目段数据（当前项目在下面单独渲染，其余走 otherProjects） */
+  const currentProject =
+    projectList?.projects.find(
+      (p) => String(p.root).toLowerCase() === String(workspace?.root ?? "").toLowerCase(),
+    ) ?? null;
+  const otherProjects = (projectList?.projects ?? []).filter(
+    (p) => String(p.root).toLowerCase() !== String(workspace?.root ?? "").toLowerCase(),
+  );
+
   const recentWorkspaces = workspaceIndex.filter((e) => {
     if (e.root === workspace?.root) return false;
     const q = sessionQuery.trim().toLowerCase();
@@ -2325,14 +2560,85 @@ export default function App() {
             {metaIgnored && (
               <div className="side-empty">标题文件损坏，已忽略。会话列表不受影响。</div>
             )}
-            <div className="ws-group open">
-              <div className="ws-group-head static">
-                <span className="caret">▾</span>
-                <span className="ws-name" title={workspace?.root}>
-                  {workspaceLabel(workspace?.root)}
-                </span>
-                <span className="count">{sessions.length}</span>
+            <section className="side-section">
+              <div
+                className="side-section-head"
+                role="button"
+                tabIndex={0}
+                aria-expanded={sectionOpen("projects")}
+                title={sectionOpen("projects") ? "收起项目" : "展开项目"}
+                onClick={() => toggleSection("projects")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleSection("projects");
+                  }
+                }}
+              >
+                <span className="caret">{sectionOpen("projects") ? "▾" : "▸"}</span>
+                <span className="side-section-title">项目</span>
+                <span className="count">{projectList?.projects.length ?? 0}</span>
+                <button
+                  type="button"
+                  className="side-section-act"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleSelect("projects");
+                  }}
+                  title="多选项目（只移出列表，不动磁盘）"
+                >
+                  {selectMode === "projects" ? "完成" : "多选"}
+                </button>
               </div>
+              {!sectionOpen("projects") ? null : (
+              <>
+              {selectMode === "projects" && (
+                <div className="side-batch">
+                  <span>已选 {selectedRows.size}</span>
+                  <button
+                    type="button"
+                    onClick={() => void forgetSelectedProjects()}
+                    disabled={selectedRows.size === 0}
+                  >
+                    移出列表
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectMode(null);
+                      setSelectedRows(new Set());
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
+            <div
+              className={`ws-group ${currentGroupOpen ? "open" : ""}`}
+            >
+              <button
+                type="button"
+                className="ws-group-head"
+                aria-expanded={currentGroupOpen}
+                title={currentGroupOpen ? "收起这个工作区的会话" : "展开这个工作区的会话"}
+                onClick={() => {
+                  const root = workspace?.root ?? "";
+                  if (!root) return;
+                  setCollapsedWorkspaces((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(root)) next.delete(root);
+                    else next.add(root);
+                    saveUiState({ collapsedWorkspaces: [...next] });
+                    return next;
+                  });
+                }}
+              >
+                <span className="caret">{currentGroupOpen ? "▾" : "▸"}</span>
+                <span className="ws-name" title={workspace?.root}>
+                  {currentProject?.name ?? workspaceLabel(workspace?.root)}
+                </span>
+                <span className="count">{currentProject?.sessionCount ?? sessions.length}</span>
+              </button>
               <div className="ws-sessions">
                 {visibleSessions.map((s) => {
                   const key = sessionFileKey(s.sessionFile);
@@ -2480,43 +2786,55 @@ export default function App() {
                 )}
               </div>
             </div>
-            {recentWorkspaces.map((entry) => {
+            {otherProjects.map((entry) => {
               const expanded = expandedWorkspaces.has(entry.root);
               return (
                 <div className={`ws-group ${expanded ? "open" : ""}`} key={entry.root}>
-                  <button
-                    type="button"
-                    className="ws-group-head"
-                    onClick={() =>
-                      setExpandedWorkspaces((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(entry.root)) next.delete(entry.root);
-                        else next.add(entry.root);
-                        saveUiState({ expandedWorkspaces: [...next] });
-                        return next;
-                      })
-                    }
-                  >
-                    <span className="caret">{expanded ? "▾" : "▸"}</span>
-                    <span className="ws-name" title={entry.root}>
-                      {workspaceLabel(entry.root)}
-                    </span>
-                    <span className="count">{entry.sessionCount}</span>
-                  </button>
+                  <div className="ws-project-row">
+                    {selectMode === "projects" && (
+                      <input
+                        type="checkbox"
+                        className="side-check"
+                        checked={selectedRows.has(entry.root)}
+                        onChange={() => toggleRow(entry.root)}
+                        aria-label={`选择项目 ${entry.name}`}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className="ws-group-head"
+                      onClick={() =>
+                        setExpandedWorkspaces((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(entry.root)) next.delete(entry.root);
+                          else next.add(entry.root);
+                          saveUiState({ expandedWorkspaces: [...next] });
+                          return next;
+                        })
+                      }
+                    >
+                      <span className="caret">{expanded ? "▾" : "▸"}</span>
+                      <span className="ws-name" title={entry.root}>
+                        {entry.name}
+                      </span>
+                      <span className="count">{entry.sessionCount}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ws-project-new"
+                      title="在这个项目里新建会话"
+                      onClick={() => void newSessionIn(entry.root)}
+                    >
+                      ＋
+                    </button>
+                  </div>
                   {expanded && (
                     <div className="ws-sessions">
-                      <button
-                        type="button"
-                        className="ws-switch"
-                        onClick={() => void newSessionIn(entry.root)}
-                      >
-                        在此新建会话
-                      </button>
                       {wsLoading[entry.root] ? (
                         <div className="ws-hint">读取会话…</div>
                       ) : (wsSessions[entry.root]?.sessions ?? []).length === 0 ? (
                         <div className="ws-hint">
-                          {entry.sessionCount > 0 ? "会话列表没读到" : "这个工作区还没有会话"}
+                          {entry.sessionCount > 0 ? "会话列表没读到" : "这个项目还没有会话"}
                         </div>
                       ) : (
                         (wsSessions[entry.root]?.sessions ?? []).slice(0, 50).map((item) => {
@@ -2543,6 +2861,139 @@ export default function App() {
                 </div>
               );
             })}
+              </>
+              )}
+            </section>
+
+            {/* 会话段：临时会话（scratch），不属于任何项目 */}
+            <section className="side-section">
+              <div
+                className="side-section-head"
+                role="button"
+                tabIndex={0}
+                aria-expanded={sectionOpen("sessions")}
+                title={sectionOpen("sessions") ? "收起会话" : "展开会话"}
+                onClick={() => toggleSection("sessions")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleSection("sessions");
+                  }
+                }}
+              >
+                <span className="caret">{sectionOpen("sessions") ? "▾" : "▸"}</span>
+                <span className="side-section-title">会话</span>
+                <span className="count">{projectList?.scratch.sessionCount ?? 0}</span>
+                <button
+                  type="button"
+                  className="side-section-act"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void newScratchSession();
+                  }}
+                  title="新建临时会话（不绑定文件夹）"
+                >
+                  ＋
+                </button>
+                <button
+                  type="button"
+                  className="side-section-act"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleSelect("sessions");
+                  }}
+                  title="多选会话（归档 / 删除）"
+                >
+                  {selectMode === "sessions" ? "完成" : "多选"}
+                </button>
+              </div>
+              {!sectionOpen("sessions") ? null : (
+              <>
+              {selectMode === "sessions" && (
+                <div className="side-batch">
+                  <span>已选 {selectedRows.size}</span>
+                  <button
+                    type="button"
+                    onClick={() => void archiveSelectedSessions(true)}
+                    disabled={selectedRows.size === 0}
+                  >
+                    归档
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void removeSelectedSessions()}
+                    disabled={selectedRows.size === 0}
+                  >
+                    删除
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectMode(null);
+                      setSelectedRows(new Set());
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
+              {projectList?.scratch ? (
+                wsLoading[projectList.scratch.root] ? (
+                  <div className="ws-hint">读取会话…</div>
+                ) : (wsSessions[projectList.scratch.root]?.sessions ?? []).length === 0 ? (
+                  <div className="side-empty">还没有临时会话。点上面的 ＋ 新建一段。</div>
+                ) : (
+                  (wsSessions[projectList.scratch.root]?.sessions ?? [])
+                    .filter((item) => {
+                      const meta = sessionMeta[sessionFileKey(item.sessionFile)];
+                      const archived = Boolean(meta?.archived);
+                      return showArchived ? archived : !archived;
+                    })
+                    .map((item) => {
+                      const label =
+                        wsSessions[projectList.scratch.root]?.titles[sessionFileKey(item.sessionFile)] ??
+                        item.sessionId.slice(0, 8);
+                      const picked = selectedRows.has(item.sessionFile);
+                      return (
+                        <div
+                          className={`session ${item.sessionFile === currentFile ? "active" : ""} ${
+                            picked ? "picked" : ""
+                          }`}
+                          key={item.sessionFile}
+                        >
+                          {selectMode === "sessions" && (
+                            <input
+                              type="checkbox"
+                              className="side-check"
+                              checked={picked}
+                              onChange={() => toggleRow(item.sessionFile)}
+                              aria-label={`选择会话 ${label}`}
+                            />
+                          )}
+                          <button
+                            type="button"
+                            className="session-open"
+                            onClick={() =>
+                              selectMode === "sessions"
+                                ? toggleRow(item.sessionFile)
+                                : void loadSession(item.sessionFile)
+                            }
+                            title={item.sessionFile}
+                          >
+                            <span className="sid">{label}</span>
+                            <span className="stamp">{formatRelative(item.updatedAt)}</span>
+                          </button>
+                        </div>
+                      );
+                    })
+                )
+              ) : (
+                <div className="ws-hint">正在准备临时会话目录…</div>
+              )}
+              </>
+              )}
+            </section>
+
           </div>
         ) : (
           <div className="tree-panel">
@@ -2779,7 +3230,7 @@ export default function App() {
         )}
         </div>
 
-        <main className="list" ref={listRef}>
+        <main className="list" ref={listRef} onScroll={onListScroll}>
           {view === "chat" ? (
             <>
           {shownMessages.length === 0 && opening && (
@@ -2886,6 +3337,23 @@ export default function App() {
 
         {view === "chat" && (
         <footer className="composer">
+          {/* 修改四：回到底部。只在自己翻上去、且有内容时出现 */}
+          {!atBottom && shownMessages.length > 0 && (
+            <button
+              type="button"
+              className="scroll-bottom"
+              aria-label="回到底部"
+              title="回到底部"
+              onClick={() => scrollToBottom()}
+            >
+              <span aria-hidden="true">↓</span>
+              {newWhileAway > 0 && (
+                <span className="scroll-bottom-count" aria-hidden="true">
+                  {newWhileAway > 99 ? "99+" : newWhileAway}
+                </span>
+              )}
+            </button>
+          )}
           {!slotReady && (
             <div className="submit-state" role="status">
               <span className="submit-dot" aria-hidden="true" />
@@ -2920,40 +3388,6 @@ export default function App() {
             onRedirect={(i) => void redirectQueued(i)}
             onNewSession={(i) => void queueToNewSession(i)}
           />
-          <div className="cost">
-            {stats ? (
-              <>
-                <span>${stats.cost.toFixed(6)}</span>
-                <span>
-                  {stats.contextUsage
-                    ? `${Math.round(stats.contextUsage.percent ?? 0)}% ctx`
-                    : "ctx —"}
-                </span>
-                <span>{stats.tokens.input + stats.tokens.output} tok</span>
-                <span>
-                  {stats.userMessages}U / {stats.assistantMessages}A
-                </span>
-                {budget && (
-                  <span>
-                    session ${budget.sessionUsd.toFixed(4)}/${budget.sessionLimit} · day $
-                    {budget.dailyUsd.toFixed(4)}/{budget.dailyLimit}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span>cost —</span>
-            )}
-            {policy && (
-              <button
-                type="button"
-                className={`policy-pill ${policy.mode}`}
-                title={`权限模式：${policy.mode}（点击打开权限浮层）`}
-                onClick={() => setOverlay("permissions")}
-              >
-                {POLICY_LABEL[policy.mode]}
-              </button>
-            )}
-          </div>
           {uploading && (
             <div className="upload-progress" role="status">
               <span>
@@ -2974,14 +3408,35 @@ export default function App() {
               {attachments.map((a) => (
                 <span className="attach" key={a.id}>
                   <img src={`data:${a.mimeType};base64,${a.data}`} alt="附件" />
+                  <span className="attach-size">{formatMb(bytesOfBase64(a.data))}</span>
                   <button
                     title="移除"
-                    onClick={() => setAttachments((cur) => cur.filter((x) => x.id !== a.id))}
+                    onClick={() => {
+                      // 同步镜像，避免紧接着的粘贴读到旧列表
+                      const next = attachmentsRef.current.filter((x) => x.id !== a.id);
+                      attachmentsRef.current = next;
+                      setAttachments(next);
+                    }}
                   >
                     ×
                   </button>
                 </span>
               ))}
+              {attachments.length < UPLOAD_IMAGE_MAX_COUNT && (
+                <button
+                  type="button"
+                  className="attach-add"
+                  title="再加一张"
+                  onClick={() => void pickUpload("image")}
+                >
+                  ＋
+                </button>
+              )}
+              <span className="attach-count">
+                {attachments.length}/{UPLOAD_IMAGE_MAX_COUNT} ·{" "}
+                {formatMb(attachments.reduce((sum, a) => sum + bytesOfBase64(a.data), 0))}/
+                {Math.round(UPLOAD_IMAGE_TOTAL_BYTES / 1024 / 1024)} MB
+              </span>
               {!modelSupportsImage && (
                 <span className="attach-hint">当前模型仅文本：图片会先转述再发送</span>
               )}
@@ -3007,10 +3462,20 @@ export default function App() {
               onKeyDown={onKeyDown}
               onBlur={() => setMention(null)}
               onPaste={(e) => {
-                const files = Array.from(e.clipboardData.files ?? []);
-                if (files.some((f) => f.type.startsWith("image/"))) {
+                // 修改一：有些应用粘贴时只有 items 里有图（files 为空），两边都收
+                const picked: File[] = [];
+                for (const item of Array.from(e.clipboardData?.items ?? [])) {
+                  if (item.kind !== "file") continue;
+                  const file = item.getAsFile();
+                  if (file) picked.push(file);
+                }
+                for (const file of Array.from(e.clipboardData?.files ?? [])) {
+                  if (!picked.includes(file)) picked.push(file);
+                }
+                const images = picked.filter((f) => f.type.startsWith("image/"));
+                if (images.length > 0) {
                   e.preventDefault();
-                  void addImageFiles(files);
+                  void addImageFiles(images);
                 }
               }}
               onDrop={(e) => {
@@ -3087,6 +3552,7 @@ export default function App() {
           cost={stats?.cost}
           contextPercent={stats?.contextUsage?.percent ?? undefined}
           policyMode={policy?.mode}
+          budget={budget}
         />
       </div>
       {/* 右坞始终挂载：笔记本只允许存在一份，收起或切页时用 CSS 藏，不卸载 */}

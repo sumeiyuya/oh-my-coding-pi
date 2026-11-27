@@ -32,7 +32,26 @@ function icon(mode: PermissionMode): string {
 export default function PermissionPill() {
   const [state, setState] = useState<PermissionState | null>(null);
   const [open, setOpen] = useState(false);
-  const [asDefault, setAsDefault] = useState(false);
+  /**
+   * 「也作为以后新会话的默认」：按你的选择做成**常驻**——
+   * 勾上就记住（localStorage），不会在切档后自动复位；
+   * 界面上同时写清"当前默认是哪一档"，避免连默认被改了自己不知道。
+   */
+  const [asDefault, setAsDefaultState] = useState(() => {
+    try {
+      return localStorage.getItem("omcp.permissionAsDefault") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setAsDefault = (value: boolean) => {
+    setAsDefaultState(value);
+    try {
+      localStorage.setItem("omcp.permissionAsDefault", value ? "1" : "0");
+    } catch {
+      // 存不下也不影响本次会话
+    }
+  };
   const box = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -46,6 +65,9 @@ export default function PermissionPill() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 修改六 · S4：另一处（权限面板 / 切会话 / 切工作区）改了档，这里同一帧跟上
+  useEffect(() => window.api.onPermissionChanged((next) => setState(next as PermissionState)), []);
 
   useEffect(() => {
     if (!open) return;
@@ -106,7 +128,8 @@ export default function PermissionPill() {
           <label className="perm-pill-default">
             <input type="checkbox" checked={asDefault} onChange={(e) => setAsDefault(e.target.checked)} />
             <span>也作为以后新会话的默认</span>
-            {followingDefault && <span className="perm-pill-hint"> （这一段现在跟着默认）</span>}
+            <span className="perm-pill-hint">（当前默认：{permissionName(state?.default ?? "ask-risky")}）</span>
+            {followingDefault && <span className="perm-pill-hint"> · 这一段跟着默认</span>}
           </label>
 
           <p className="perm-pill-note">

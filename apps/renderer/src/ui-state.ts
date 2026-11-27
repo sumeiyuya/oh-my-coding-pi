@@ -18,6 +18,10 @@ export interface UiState {
   dockOpen: boolean;
   /** 最近工作区分组里展开了哪些（绝对路径） */
   expandedWorkspaces: string[];
+  /** 当前工作区分组折叠了哪些（绝对路径）——修改三：列表头现在可以点 */
+  collapsedWorkspaces: string[];
+  /** 侧栏两段（项目 / 会话）折叠了哪些——修改五续：段头也能点 */
+  collapsedSections: string[];
 }
 
 export const UI_LIMITS = {
@@ -33,6 +37,8 @@ export const UI_DEFAULTS: UiState = {
   dockTab: "files",
   dockOpen: true,
   expandedWorkspaces: [],
+  collapsedWorkspaces: [],
+  collapsedSections: [],
 };
 
 const KEYS = {
@@ -41,6 +47,8 @@ const KEYS = {
   dockTab: "omcp.global.dock-tab",
   dockOpen: "omcp.global.dock-open",
   expandedWorkspaces: "omcp.global.expanded-workspaces",
+  collapsedWorkspaces: "omcp.global.collapsed-workspaces",
+  collapsedSections: "omcp.global.collapsed-sections",
 } as const;
 
 /** 修改3 之前的左栏折叠键：只读一次，读完即删 */
@@ -111,6 +119,8 @@ export function loadUiState(): UiState {
     dockTab,
     dockOpen: readBool(KEYS.dockOpen, legacyDockOpen ?? UI_DEFAULTS.dockOpen),
     expandedWorkspaces: readStringArray(KEYS.expandedWorkspaces),
+    collapsedWorkspaces: readStringArray(KEYS.collapsedWorkspaces),
+    collapsedSections: readStringArray(KEYS.collapsedSections),
   };
 }
 
@@ -126,6 +136,12 @@ export function saveUiState(patch: Partial<UiState>): void {
     if (patch.dockOpen !== undefined) localStorage.setItem(KEYS.dockOpen, patch.dockOpen ? "1" : "0");
     if (patch.expandedWorkspaces !== undefined) {
       localStorage.setItem(KEYS.expandedWorkspaces, JSON.stringify(patch.expandedWorkspaces));
+    }
+    if (patch.collapsedWorkspaces !== undefined) {
+      localStorage.setItem(KEYS.collapsedWorkspaces, JSON.stringify(patch.collapsedWorkspaces));
+    }
+    if (patch.collapsedSections !== undefined) {
+      localStorage.setItem(KEYS.collapsedSections, JSON.stringify(patch.collapsedSections));
     }
   } catch {
     // localStorage 不可用（隐私模式）：不写入，也不阻断界面

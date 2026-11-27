@@ -114,3 +114,35 @@ test("展开的工作区分组可保存/读回", () => {
   s.setItem("omcp.global.expanded-workspaces", "not json");
   assert.deepEqual(loadUiState().expandedWorkspaces, []);
 });
+
+test("修改三：当前工作区的折叠状态可保存/读回，坏数据回落空", () => {
+  const s = freshStorage();
+  saveUiState({ collapsedWorkspaces: ["D:\lab-a"] });
+  assert.deepEqual(loadUiState().collapsedWorkspaces, ["D:\lab-a"]);
+  assert.deepEqual(loadUiState().expandedWorkspaces, [], "两套集合互不污染");
+
+  s.setItem("omcp.global.collapsed-workspaces", "not json");
+  assert.deepEqual(loadUiState().collapsedWorkspaces, []);
+});
+
+test("修改三：没有存过时默认空（当前组默认展开）", () => {
+  freshStorage();
+  assert.deepEqual(loadUiState().collapsedWorkspaces, []);
+  assert.deepEqual(UI_DEFAULTS.collapsedWorkspaces, []);
+});
+
+test("修改五续：侧栏两段（项目 / 会话）的折叠状态可保存/读回", () => {
+  const s = freshStorage();
+  saveUiState({ collapsedSections: ["projects"] });
+  assert.deepEqual(loadUiState().collapsedSections, ["projects"]);
+  saveUiState({ collapsedSections: ["projects", "sessions"] });
+  assert.deepEqual(loadUiState().collapsedSections, ["projects", "sessions"]);
+  s.setItem("omcp.global.collapsed-sections", "not json");
+  assert.deepEqual(loadUiState().collapsedSections, []);
+});
+
+test("修改五续：默认都不折叠（首次打开两段都是展开的）", () => {
+  freshStorage();
+  assert.deepEqual(loadUiState().collapsedSections, []);
+  assert.deepEqual(loadUiState().collapsedWorkspaces, [], "两条折叠轨互不污染");
+});

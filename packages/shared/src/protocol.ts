@@ -594,12 +594,23 @@ export interface PromptResult {
 
 /** 顶栏权限 pill 读到的三档状态（照 DAWN 的「这一段 / 跟随默认」） */
 export interface PermissionState {
-  /** 实际生效的档（会话覆盖 > 应用默认） */
+  /** 实际生效的档（会话覆盖 > 应用默认）；**与真正拦截用的是同一口径** */
   effective: PermissionMode;
   /** 这一段单独设过的档；null = 跟随默认 */
   sessionOverride: PermissionMode | null;
   /** 应用默认 */
   default: PermissionMode;
+}
+
+/**
+ * 权限变更广播（修改六）。
+ *
+ * 顶栏徽标与「权限」面板原本各存一份本地状态、只在挂载/点开时读一次，
+ * 改了一边另一边不刷新。现在由主进程推一条，三处同时更新。
+ */
+export interface PermissionChanged extends PermissionState {
+  /** 这次变化是谁引起的（面板改档 / 切会话 / 切工作区） */
+  source: "user" | "session" | "workspace";
 }
 
 export interface AppSettingsView {
@@ -756,6 +767,27 @@ export interface SessionBoardView {
   slots: SlotView[];
   activeSlotId: string | null;
   maxSlots: number;
+}
+
+/**
+ * 项目（修改五）：侧栏「项目」段的一行。
+ *
+ * 项目 = 用户指定的文件夹工作区；临时会话不算项目（见 `scratch`）。
+ */
+export interface ProjectView {
+  root: string;
+  name: string;
+  createdAt: string;
+  lastOpenedAt?: string;
+  /** 这个文件夹里有多少段会话 */
+  sessionCount: number;
+  lastActiveAt?: string;
+}
+
+export interface ProjectsView {
+  projects: ProjectView[];
+  /** 临时会话的根（「会话」段），不算项目 */
+  scratch: { root: string; sessionCount: number; lastActiveAt?: string };
 }
 
 export interface SessionOpenView {
@@ -1436,6 +1468,7 @@ export interface PreloadApi {
   setModel(provider: string, modelId: string, runtimeId?: string): Promise<SetModelResult>;
   setThinkingLevel(level: ThinkingLevel, runtimeId?: string): Promise<SetModelResult>;
   getPermission(): Promise<PermissionState>;
+  onPermissionChanged(cb: (state: PermissionChanged) => void): () => void;
   setPermission(mode: PermissionMode, asDefault: boolean): Promise<PermissionState>;
   exportHtml(outputPath?: string): Promise<string | null>;
   onEvent(cb: (item: PiStreamItem) => void): () => void;
@@ -1490,6 +1523,15 @@ export interface PreloadApi {
   /** 修改 5 · C5：当前可见会话的权威值（主进程侧） */
   getCurrentSession(): Promise<{ file: string | null; slotId: string | null; workspace: string }>;
   getSessionBoard(): Promise<SessionBoardView>;
+  /** 修改五：项目 + 临时会话（侧栏两段） */
+  listProjects(): Promise<ProjectsView>;
+  renameProject(root: string, name: string): Promise<ProjectView[]>;
+  /** 多选「移出列表」：只改表，不动磁盘 */
+  forgetProjects(roots: string[]): Promise<ProjectView[]>;
+  archiveSessions(files: string[], archived: boolean): Promise<{ ok: number; failed: string[] }>;
+  removeSessions(
+    files: string[],
+  ): Promise<{ ok: number; failed: Array<{ file: string; reason: string }> }>;
   openSession(file: string): Promise<SessionOpenView>;
   closeSession(file: string): Promise<SessionBoardView>;
   onSessionChanged(cb: (board: SessionBoardView) => void): () => void;

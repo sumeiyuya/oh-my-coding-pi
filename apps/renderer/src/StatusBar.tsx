@@ -17,6 +17,7 @@ export default function StatusBar({
   contextPercent,
   policyMode,
   planEnabled,
+  budget,
 }: {
   status: string;
   modelKey: string;
@@ -24,6 +25,8 @@ export default function StatusBar({
   contextPercent?: number;
   policyMode?: string;
   planEnabled?: boolean;
+  /** 修改二：输入框上方那一栏删掉后，预算并到这里（看得见才有用） */
+  budget?: { sessionUsd: number; sessionLimit: number; dailyUsd: number; dailyLimit: number } | null;
 }) {
   const [kernels, setKernels] = useState<KernelStatus[]>([]);
 
@@ -81,6 +84,15 @@ export default function StatusBar({
       <span className="sb-item" title="本次会话成本">
         {typeof cost === "number" ? `$${cost.toFixed(4)}` : "cost —"}
       </span>
+      {budget && (
+        <span
+          className="sb-item"
+          title="预算：本会话 / 每日（超出即拦，可在设置里调整）"
+        >
+          session ${budget.sessionUsd.toFixed(4)}/{budget.sessionLimit} · day $
+          {budget.dailyUsd.toFixed(4)}/{budget.dailyLimit}
+        </span>
+      )}
       {typeof contextPercent === "number" && (
         <span className="sb-item" title="上下文占用">
           {Math.round(contextPercent)}% ctx

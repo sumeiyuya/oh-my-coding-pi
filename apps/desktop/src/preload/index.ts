@@ -81,6 +81,11 @@ contextBridge.exposeInMainWorld("api", {
   addModelProvider: (input: unknown): Promise<unknown> => ipcRenderer.invoke("models:add-provider", input),
   getUsage: (): Promise<unknown> => ipcRenderer.invoke("usage:get"),
   getPermission: (): Promise<PermissionState> => ipcRenderer.invoke("permission:get"),
+  onPermissionChanged: (cb: (state: PermissionState & { source: string }) => void): (() => void) => {
+    const listener = (_event: unknown, state: PermissionState & { source: string }) => cb(state);
+    ipcRenderer.on("permission:changed", listener);
+    return () => ipcRenderer.removeListener("permission:changed", listener);
+  },
   setPermission: (mode: PermissionMode, asDefault: boolean): Promise<PermissionState> =>
     ipcRenderer.invoke("permission:set", mode, asDefault),
   listPlugins: (): Promise<unknown> => ipcRenderer.invoke("plugins:list"),
@@ -225,6 +230,14 @@ contextBridge.exposeInMainWorld("api", {
   closeRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:close", id),
   // 修改 4 · M0：会话级入口
   getSessionBoard: (): Promise<unknown> => ipcRenderer.invoke("session:board"),
+  listProjects: (): Promise<unknown> => ipcRenderer.invoke("projects:list"),
+  renameProject: (root: string, name: string): Promise<unknown> =>
+    ipcRenderer.invoke("projects:rename", root, name),
+  forgetProjects: (roots: string[]): Promise<unknown> => ipcRenderer.invoke("projects:forget", roots),
+  archiveSessions: (files: string[], archived: boolean): Promise<unknown> =>
+    ipcRenderer.invoke("sessions:archive", files, archived),
+  removeSessions: (files: string[]): Promise<unknown> =>
+    ipcRenderer.invoke("sessions:remove", files),
   getCurrentSession: (): Promise<{ file: string | null; slotId: string | null; workspace: string }> =>
     ipcRenderer.invoke("session:current"),
   openSession: (file: string): Promise<unknown> => ipcRenderer.invoke("session:open", file),

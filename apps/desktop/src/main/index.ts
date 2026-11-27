@@ -123,6 +123,13 @@ import { adoptMemory, readMemoryQueue, rejectMemory } from "./memory-store";
 import { SwitchTiming } from "./switch-timing";
 import { sessionsDirOf, workspaceOfSession } from "./session-locate";
 import { SessionIndex } from "./session-index";
+import {
+  forgetProjects,
+  normalizeProjects,
+  renameProject,
+  upsertProject,
+  type ProjectRecord,
+} from "./projects";
 // 插件册只有一份定义（ADR-045）：主进程构建期内联它，扩展侧相对路径导入同一个文件
 import {
   PLUGINS,
@@ -738,26 +745,60 @@ function notebookPath(): string {
 function permissionModeFor(ctx: { runtimeId?: string; sessionKey?: string }): PermissionMode {
   const file =
     ctx.sessionKey ?? (ctx.runtimeId ? runtimeManager.get(ctx.runtimeId)?.sessionFile ?? null : null);
-  if (!file || !workspaceRoot) return appSettings.permissionMode;
+  if (!file) return appSettings.permissionMode;
   const key = sessionMetaKey(file);
-  const override = key ? loadSessionMeta(workspaceRoot).sessions[key]?.permissionMode : undefined;
+  // 修改六 · S3：会话可能住在**另一个工作区**。用视图的 workspaceRoot 去读，
+  // 查不到就回落默认档——那个会话自己的设置等于没生效。
+  const root = resolveSessionWorkspace(file) ?? workspaceRoot;
+  if (!root) return appSettings.permissionMode;
+  const override = key ? loadSessionMeta(root).sessions[key]?.permissionMode : undefined;
   return override ?? appSettings.permissionMode;
 }
 
 /** 当前会话单独设过的权限档；没有 = 跟随应用默认 */
 function sessionPermissionOverride(): PermissionMode | null {
-  if (!workspaceRoot || !currentSessionFile) return null;
+  if (!currentSessionFile) return null;
   const key = sessionMetaKey(currentSessionFile);
   if (!key) return null;
-  return loadSessionMeta(workspaceRoot).sessions[key]?.permissionMode ?? null;
+  const root = resolveSessionWorkspace(currentSessionFile) ?? workspaceRoot;
+  if (!root) return null;
+  return loadSessionMeta(root).sessions[key]?.permissionMode ?? null;
+}
+
+/**
+ * 界面该看到的权限状态（修改六 · S2）。
+ *
+ * `effective` 走 `permissionModeFor()`——**和真正拦截用的是同一个函数**。
+ * 以前这里取 `policyService.info().mode`（一个全局覆盖值），
+ * 视图会话与上次 apply 的会话不一致时，界面会报一个并不生效的档。
+ */
+function permissionState(): PermissionState {
+  return {
+    effective: permissionModeFor({ sessionKey: currentSessionFile ?? undefined }),
+    sessionOverride: sessionPermissionOverride(),
+    default: appSettings.permissionMode,
+  };
+}
+
+let permissionBroadcastTimer: NodeJS.Timeout | null = null;
+
+/** 权限变了就推一条（30 ms 合并：切会话时可能连着 apply 两次） */
+function broadcastPermission(source: "user" | "session" | "workspace"): void {
+  if (permissionBroadcastTimer) return;
+  permissionBroadcastTimer = setTimeout(() => {
+    permissionBroadcastTimer = null;
+    send("permission:changed", { ...permissionState(), source });
+  }, 30);
+  permissionBroadcastTimer.unref?.();
 }
 
 /**
  * 把权限档应用到策略服务：会话覆盖 > 应用默认 > 策略文件。
  * 切换会话、新建会话、改会话档、改默认档都要调一次——档位必须现取。
  */
-function applyPermissionMode(): void {
+function applyPermissionMode(source: "user" | "session" | "workspace" = "session"): void {
   policyService?.setMode(sessionPermissionOverride() ?? appSettings.permissionMode);
+  broadcastPermission(source);
 }
 
 
@@ -1090,6 +1131,8 @@ function writeState(patch: Partial<PersistedState>): void {
 interface WorkspacesState {
   lastWorkspace?: string;
   recent?: string[];
+  /** 修改五：项目表（文件夹工作区）。老文件没有这一段，读取时按 recent 补齐 */
+  projects?: ProjectRecord[];
 }
 
 function readWorkspaces(): WorkspacesState {
@@ -1102,10 +1145,47 @@ function readWorkspaces(): WorkspacesState {
 
 function writeWorkspaces(next: WorkspacesState): void {
   try {
-    writeFileSync(workspacesFile, JSON.stringify(next, null, 2) + "\n", "utf8");
+    // 合并写：调用方只改 lastWorkspace/recent 时不能把 projects 冲掉
+    let current: WorkspacesState = {};
+    try {
+      current = JSON.parse(readFileSync(workspacesFile, "utf8")) as WorkspacesState;
+    } catch {
+      current = {};
+    }
+    writeFileSync(
+      workspacesFile,
+      JSON.stringify({ ...current, ...next }, null, 2) + "\n",
+      "utf8",
+    );
   } catch (err) {
     console.warn("[workspaces] 写入失败：" + (err as Error).message);
   }
+}
+
+/** 临时会话的根（修改五）：应用数据目录下的 scratch，不算项目 */
+function scratchRoot(): string {
+  return join(app.getPath("userData"), "scratch");
+}
+
+function isScratchRoot(root: string): boolean {
+  return sessionKey(root) === sessionKey(scratchRoot());
+}
+
+/** 读项目表：老数据按 recent 补齐，补完落盘一次 */
+function readProjects(): ProjectRecord[] {
+  const state = readWorkspaces();
+  const { projects, changed } = normalizeProjects({
+    ...(state.projects ? { projects: state.projects } : {}),
+    recent: state.recent ?? [],
+    scratchRoot: scratchRoot(),
+    nowIso: new Date().toISOString(),
+  });
+  if (changed || !state.projects) writeWorkspaces({ projects });
+  return projects;
+}
+
+function saveProjects(list: ProjectRecord[]): void {
+  writeWorkspaces({ projects: list });
 }
 
 interface WorkspaceState {
@@ -1206,7 +1286,8 @@ function scheduleKernelPrewarm(): void {
  * 目录当成工作区，后续的文件树、策略、内核全会跟着错。
  */
 function knownWorkspaceRoots(): string[] {
-  const roots = [workspaceRoot, ...(readWorkspaces().recent ?? [])]
+  // 修改五：scratch 也算"登记过"的根——临时会话要能在那里新建/打开
+  const roots = [workspaceRoot, scratchRoot(), ...(readWorkspaces().recent ?? [])]
     .map((root) => String(root ?? "").trim())
     .filter(Boolean);
   return [...new Set(roots)];
@@ -1350,7 +1431,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const wsState = readWorkspaceState();
   const last = wsState.lastSessionFile ?? null;
   currentSessionFile = last && existsSync(last) ? last : null;
-  applyPermissionMode();
+  applyPermissionMode("workspace");
   pointKernelsAt(currentSessionFile);
   scheduleKernelPrewarm();
 
@@ -1393,6 +1474,10 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   const all = readWorkspaces();
   const recent = [resolved, ...(all.recent ?? []).filter((x) => x !== resolved)].slice(0, 8);
   writeWorkspaces({ lastWorkspace: resolved, recent });
+  // 修改五：打开一个文件夹就是一"项目"（scratch 除外）
+  if (!isScratchRoot(resolved)) {
+    saveProjects(upsertProject(readProjects(), resolved, new Date().toISOString()));
+  }
   send("workspace:changed", { root: resolved, recent } satisfies WorkspaceInfo);
 
   setTimeout(() => void resetBudgetBaseline("default"), 1500);
@@ -3080,6 +3165,125 @@ ipcMain.handle("session:delete", (_event, file: string) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* 项目与会话（修改五）                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 侧栏两段的数据：项目（文件夹工作区）与临时会话（scratch）。
+ *
+ * 计数复用 `SessionIndex.summarize`（异步 + 增量 + 30 s 缓存），
+ * 不开新扫描路径。
+ */
+ipcMain.handle("projects:list", async () => {
+  const projects = readProjects();
+  const out: Array<ProjectRecord & { sessionCount: number; lastActiveAt?: string }> = [];
+  for (const project of projects) {
+    const { count, latestMs } = await sessionIndex.summarize(sessionsDirOf(project.root));
+    out.push({
+      ...project,
+      sessionCount: count,
+      ...(latestMs > 0 ? { lastActiveAt: new Date(latestMs).toISOString() } : {}),
+    });
+  }
+  const scratch = scratchRoot();
+  const scratchDir = sessionsDirOf(scratch);
+  try {
+    mkdirSync(scratchDir, { recursive: true });
+  } catch {
+    // 建不出来就让列表报 0，不影响别的
+  }
+  const scratchSummary = await sessionIndex.summarize(scratchDir);
+  return {
+    projects: out,
+    scratch: {
+      root: scratch,
+      sessionCount: scratchSummary.count,
+      ...(scratchSummary.latestMs > 0
+        ? { lastActiveAt: new Date(scratchSummary.latestMs).toISOString() }
+        : {}),
+    },
+  };
+});
+
+ipcMain.handle("projects:rename", (_event, root: string, name: string) => {
+  const next = renameProject(readProjects(), String(root ?? ""), String(name ?? ""));
+  saveProjects(next);
+  return next;
+});
+
+/** 多选里的"移出列表"：只改表，不动磁盘上任何文件 */
+ipcMain.handle("projects:forget", (_event, roots: string[]) => {
+  const list = Array.isArray(roots) ? roots.filter((r): r is string => typeof r === "string") : [];
+  saveProjects(forgetProjects(readProjects(), list));
+  const state = readWorkspaces();
+  const drop = new Set(list.map((r) => sessionKey(r)));
+  writeWorkspaces({ recent: (state.recent ?? []).filter((r) => !drop.has(sessionKey(r))) });
+  invalidateWorkspaceIndex();
+  return readProjects();
+});
+
+/** 批量归档 / 还原：只写各会话所在工作区的 meta，不碰 provider */
+ipcMain.handle("sessions:archive", (_event, files: string[], archived: boolean) => {
+  const list = Array.isArray(files) ? files.filter((f): f is string => typeof f === "string") : [];
+  let ok = 0;
+  const failed: string[] = [];
+  for (const file of list) {
+    const root = resolveSessionWorkspace(file) ?? workspaceRoot;
+    const key = sessionMetaKey(file);
+    if (!root || !key) {
+      failed.push(file);
+      continue;
+    }
+    try {
+      patchSessionMeta(root, key, { archived });
+      ok += 1;
+    } catch {
+      failed.push(file);
+    }
+  }
+  invalidateWorkspaceIndex();
+  sessionListCache.clear();
+  return { ok, failed };
+});
+
+/** 批量删除：挪进各自工作区的 .omcp/trash/sessions；当前会话跳过 */
+ipcMain.handle("sessions:remove", (_event, files: string[]) => {
+  const list = Array.isArray(files) ? files.filter((f): f is string => typeof f === "string") : [];
+  let ok = 0;
+  const failed: Array<{ file: string; reason: string }> = [];
+  for (const file of list) {
+    const root = resolveSessionWorkspace(file) ?? workspaceRoot;
+    const key = sessionMetaKey(file);
+    if (!root || !key) {
+      failed.push({ file, reason: "找不到所属工作区" });
+      continue;
+    }
+    if (currentSessionFile && sessionKey(currentSessionFile) === sessionKey(file)) {
+      failed.push({ file, reason: "当前会话不能删除，先切走" });
+      continue;
+    }
+    const target = join(sessionsDirOf(root), key);
+    if (!existsSync(target)) {
+      failed.push({ file, reason: "文件不存在" });
+      continue;
+    }
+    try {
+      const trash = join(root, ".omcp", "trash", "sessions");
+      mkdirSync(trash, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      renameSync(target, join(trash, `${stamp}-${key}`));
+      sessionIndex.invalidate(sessionsDirOf(root));
+      ok += 1;
+    } catch (err) {
+      failed.push({ file, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  invalidateWorkspaceIndex();
+  sessionListCache.clear();
+  return { ok, failed };
+});
+
+/* ------------------------------------------------------------------ */
 /* 上传（修改1）：工作区内引用、工作区外复制、图片附件                  */
 /* ------------------------------------------------------------------ */
 
@@ -4250,29 +4454,19 @@ ipcMain.handle(
   },
 );
 
-/** 实际生效的三档（策略服务报的是 PolicyMode，旧档名不算） */
-function effectivePermissionMode(): PermissionMode {
-  const mode = policyService?.info().mode;
-  if (mode === "deny-risky" || mode === "ask-risky" || mode === "allow-all") return mode;
-  return appSettings.permissionMode;
-}
-
-ipcMain.handle("permission:get", (): PermissionState => ({
-  effective: effectivePermissionMode(),
-  sessionOverride: sessionPermissionOverride(),
-  default: appSettings.permissionMode,
-}));
+ipcMain.handle("permission:get", (): PermissionState => permissionState());
 
 ipcMain.handle(
   "permission:set",
   (_event, mode: PermissionMode, asDefault: boolean): PermissionState => {
     if (mode !== "deny-risky" && mode !== "ask-risky" && mode !== "allow-all") {
-      return { effective: appSettings.permissionMode, sessionOverride: sessionPermissionOverride(), default: appSettings.permissionMode };
+      return permissionState();
     }
-    // 会话级：写进这一段自己的 meta
-    if (currentSessionFile && workspaceRoot) {
+    // 会话级：写进这一段自己的 meta（**它自己所在的工作区**，不是当前视图的）
+    if (currentSessionFile) {
       const key = sessionMetaKey(currentSessionFile);
-      if (key) patchSessionMeta(workspaceRoot, key, { permissionMode: mode });
+      const root = resolveSessionWorkspace(currentSessionFile) ?? workspaceRoot;
+      if (key && root) patchSessionMeta(root, key, { permissionMode: mode });
     } else {
       // 没有会话（空态屏）：直接改默认
       appSettings.permissionMode = mode;
@@ -4282,8 +4476,8 @@ ipcMain.handle(
       appSettings.permissionMode = mode;
       saveAppSettings();
     }
-    applyPermissionMode();
-    return { effective: effectivePermissionMode(), sessionOverride: sessionPermissionOverride(), default: appSettings.permissionMode };
+    applyPermissionMode("user");
+    return permissionState();
   },
 );
 
@@ -6117,6 +6311,10 @@ async function runSelftestMode(): Promise<void> {
         t.newSessionInB = Boolean(
           cur?.file && sessionKey(cur.file).startsWith(sessionKey(sessionsDirOf(wsB))),
         );
+        // 修改六 · S2：界面读到的档必须等于实际执行用的档
+        const perm = await js<{ effective?: string }>("window.api.getPermission()");
+        const pol = await js<{ mode?: string }>("window.api.getPolicy()");
+        t.permissionInSync = Boolean(perm?.effective && perm.effective === pol?.mode);
         t.ok = Boolean(
           first &&
             second &&
