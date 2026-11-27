@@ -32,7 +32,7 @@ export class RuntimeManager {
   private maxRuntimes: number;
 
   constructor(options: { maxRuntimes?: number } = {}) {
-    this.maxRuntimes = Math.max(1, options.maxRuntimes ?? 2);
+    this.maxRuntimes = Math.max(1, options.maxRuntimes ?? 3);
   }
 
   setMaxRuntimes(value: number): void {

@@ -283,6 +283,8 @@ export interface TurnPhaseDetail {
 export interface TurnPhaseEvent {
   turnId: string;
   phase: TurnPhase;
+  /** 这轮属于哪个槽（修改 5）：阶段要按会话记账，不能算到当前显示的会话头上 */
+  runtimeId?: string;
   /** 墙钟时间，仅用于展示 */
   at: number;
   /** 相对 accepted 的毫秒数 */
@@ -731,6 +733,8 @@ export interface SessionView {
   slotId: string | null;
   running: boolean;
   busy: boolean;
+  /** 修改 5 · D1：这一轮开始的时刻（毫秒）。缺省 = 没在跑 */
+  busySince?: number;
   active: boolean;
   /** 修改 4 · M3：在等名额时的位次（1 = 下一个） */
   queued?: number;
@@ -1334,8 +1338,12 @@ export interface PreloadApi {
   followUp(text: string, runtimeId?: string): Promise<PromptResult>;
   abort(runtimeId?: string): Promise<boolean>;
   restart(): Promise<boolean>;
-  newSession(runtimeId?: string): Promise<boolean>;
+  newSession(runtimeId?: string, workspace?: string): Promise<boolean>;
   getSessions(runtimeId?: string): Promise<SessionSummary[]>;
+  /** 修改 5 · C5：另一个工作区的会话（侧栏展开时拉） */
+  listSessionsIn(
+    workspace: string,
+  ): Promise<{ sessions: SessionSummary[]; titles: Record<string, string> }>;
   getSessionMeta(): Promise<SessionMetaResult>;
   setSessionMeta(sessionFile: string, patch: SessionMetaPatch): Promise<{ ok: boolean; error?: string }>;
   listFiles(path: string): Promise<FileListResult>;
@@ -1479,6 +1487,8 @@ export interface PreloadApi {
   activateRuntime(id: string): Promise<RuntimeView[]>;
   closeRuntime(id: string): Promise<RuntimeView[]>;
   /** 修改 4 · M0：会话级入口（标签 = 会话） */
+  /** 修改 5 · C5：当前可见会话的权威值（主进程侧） */
+  getCurrentSession(): Promise<{ file: string | null; slotId: string | null; workspace: string }>;
   getSessionBoard(): Promise<SessionBoardView>;
   openSession(file: string): Promise<SessionOpenView>;
   closeSession(file: string): Promise<SessionBoardView>;
@@ -1588,6 +1598,9 @@ export type ErrorCode =
   | "E_TOOL_TIMEOUT"
   | "E_TOOL_ERROR"
   | "E_BUDGET"
+  /** 修改 5 · D1：日额度到 80% / 100%（后台会话烧的也算） */
+  | "E_BUDGET_NEAR"
+  | "E_BUDGET_DAILY"
   | "E_KERNEL_START"
   | "E_KERNEL_DEAD"
   | "E_KERNEL_BUSY"

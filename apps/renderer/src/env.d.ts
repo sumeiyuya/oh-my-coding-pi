@@ -130,6 +130,8 @@ type P1Api = Pick<
   | "closeRuntime"
   | "getSessionBoard"
   | "openSession"
+  | "getCurrentSession"
+  | "listSessionsIn"
   | "closeSession"
   | "onSessionChanged"
   | "onSessionOpened"

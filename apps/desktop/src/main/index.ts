@@ -90,7 +90,7 @@ import { SecretStore } from "./secrets";
 import { describeImage, formatDescription } from "./vision";
 import { exportRoute, isValidPlanPath, loadRoute, planAbsPath, saveRoute } from "./route";
 import { PlanGateBook, planDigest, verifyPlanFile, type PlanGateState } from "./plan-approval";
-import { applyCost, budgetStatusOf, shouldAlert } from "./budget-ledger";
+import { applyCost, budgetStatusOf } from "./budget-ledger";
 import {
   buildPiProviders,
   emptyRegistry,
@@ -120,6 +120,9 @@ import { checkForUpdate } from "./updater";
 import { McpService } from "./mcp-service";
 import { buildDiagnosticZip, tailFile } from "./diagnostics";
 import { adoptMemory, readMemoryQueue, rejectMemory } from "./memory-store";
+import { SwitchTiming } from "./switch-timing";
+import { sessionsDirOf, workspaceOfSession } from "./session-locate";
+import { SessionIndex } from "./session-index";
 // 插件册只有一份定义（ADR-045）：主进程构建期内联它，扩展侧相对路径导入同一个文件
 import {
   PLUGINS,
@@ -133,6 +136,10 @@ import {
 app.setName("oh-my-coding-pi");
 
 const PROCESS_STARTED_AT = Date.now();
+/** 修改 5 · S5：切换耗时埋点（logs/timings.jsonl） */
+const switchTiming = new SwitchTiming(() => join(app.getPath("userData"), "logs", "timings.jsonl"));
+/** 修改 5 · C6：会话列表的异步扫描与增量缓存 */
+const sessionIndex = new SessionIndex();
 let firstInteractiveAt = 0;
 
 const SELFTEST = process.env.P1_SELFTEST === "1";
@@ -194,7 +201,7 @@ const appSettings = {
   /** P3c：活跃 runtime 上限与空闲回收分钟 */
   maxRuntimes: Math.max(
     1,
-    Math.min(4, Number(process.env.OMCP_MAX_RUNTIMES ?? 2) || 2),
+    Math.min(4, Number(process.env.OMCP_MAX_RUNTIMES ?? 3) || 3),
   ),
   runtimeIdleMinutes: Math.max(
     1,
@@ -386,6 +393,9 @@ const slotPool = new SlotPool({
     });
     // 修改 4 · M3：后台槽崩溃也要有痕迹（默认槽由它自己的 exit 接线管）
     runtime.supervisor.on("exit", () => markSlotCrash(id));
+    // 修改 5 · C4：会话落在**这个槽自己的工作区**，不靠全局 sessionDir——
+    // 否则在 B 里新建的会话会被写到 A 的目录下。
+    runtime.setSessionDir(sessionsDirOf(workspace));
     // 崩溃后 supervisor 会退避重启；探到就绪就推一次，界面据此把手收回来。
     // 不探的话 ready 永远是 false，输入框会一直显示"pi 正在启动"。
     runtime.supervisor.on("spawn", () => {
@@ -1006,52 +1016,50 @@ function firstUserText(file: string): string | null {
   return null;
 }
 
-function listSessions(
+/**
+ * 列会话（修改 5 · C6）：磁盘扫描交给 `SessionIndex`（异步 + 增量 + 只读头部），
+ * 这里只负责把标题补上。
+ *
+ * 标题补全从热路径里拿出来了：它要读文件找第一句人话，一个没标题的老会话
+ * 就是一次 256 KB 读盘。现在改成"先把列表给出去、后台补、下次刷新就有一个"。
+ */
+async function listSessions(
   dir: string | null = sessionDir,
   root: string = workspaceRoot,
-): SessionSummary[] {
+): Promise<SessionSummary[]> {
   if (!dir) return [];
   mkdirSync(dir, { recursive: true });
-  const out: SessionSummary[] = [];
-  // 老会话没有标题：列表加载时补一次（写进 meta 缓存，重启不重算）
-  const meta = root ? loadSessionMeta(root) : null;
-  const taken = Object.values(meta?.sessions ?? {})
-    .map((e) => e.title)
-    .filter((t): t is string => Boolean(t));
-  const autoTitles: Record<string, string> = {};
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".jsonl")) continue;
-    const file = join(dir, name);
-    let sessionId = name;
-    let updatedAt: string | undefined;
-    try {
-      const first = readFileSync(file, "utf8").split(/\r?\n/, 1)[0];
-      const header = JSON.parse(first) as { id?: string; timestamp?: string };
-      if (header.id) sessionId = header.id;
-      if (header.timestamp) updatedAt = header.timestamp;
-    } catch {
-      // keep filename as id
-    }
-    try {
-      updatedAt = statSync(file).mtime.toISOString();
-    } catch {
-      // ignore
-    }
-    out.push({ sessionId, sessionFile: file, updatedAt });
+  const out = await sessionIndex.list(dir);
+  if (root) void backfillTitles(root, out);
+  return out;
+}
 
-    const known = meta?.sessions[name];
-    if (root && !known?.title && !known?.renamed) {
-      const source = firstUserText(file);
+/** 给还没有标题的老会话补标题（后台、限量），写完进 meta，下次刷新就是它 */
+function backfillTitles(root: string, sessions: SessionSummary[]): void {
+  try {
+    const meta = loadSessionMeta(root);
+    const taken = Object.values(meta.sessions ?? {})
+      .map((e) => e.title)
+      .filter((t): t is string => Boolean(t));
+    const autoTitles: Record<string, string> = {};
+    let budget = 20; // 一次最多读 20 个文件，剩下的下次再说
+    for (const item of sessions) {
+      if (budget <= 0) break;
+      const name = basename(item.sessionFile);
+      const known = meta.sessions?.[name];
+      if (known?.title || known?.renamed) continue;
+      budget -= 1;
+      const source = firstUserText(item.sessionFile);
       const base = source ? briefTitle(source) : null;
-      if (base) {
-        const title = uniqueTitle(base, taken);
-        taken.push(title);
-        autoTitles[name] = title;
-      }
+      if (!base) continue;
+      const title = uniqueTitle(base, taken);
+      taken.push(title);
+      autoTitles[name] = title;
     }
+    if (Object.keys(autoTitles).length) applyAutoTitles(root, autoTitles);
+  } catch {
+    // 补标题失败不影响列表
   }
-  if (root && Object.keys(autoTitles).length) applyAutoTitles(root, autoTitles);
-  return out.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
 
 interface PersistedState {
@@ -1187,7 +1195,125 @@ function scheduleKernelPrewarm(): void {
   prewarmTimer.unref?.();
 }
 
+/* ------------------------------------------------------------------ */
+/* 工作区视图（修改 5 · S1/S2）                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 已知工作区根：当前视图 + 最近打开（去重、保持顺序）。
+ *
+ * 只在这几个根里认会话归属——从任意路径反推工作区，等于把一个没登记过的
+ * 目录当成工作区，后续的文件树、策略、内核全会跟着错。
+ */
+function knownWorkspaceRoots(): string[] {
+  const roots = [workspaceRoot, ...(readWorkspaces().recent ?? [])]
+    .map((root) => String(root ?? "").trim())
+    .filter(Boolean);
+  return [...new Set(roots)];
+}
+
+/**
+ * 会话文件属于哪个工作区（修改 5 · C1）。
+ *
+ * 判据是**目录**而不是文件名：会话文件一定住在 `<工作区>/.omcp/sessions` 下。
+ * 这不是“猜”，是 layout 的硬约束；猜不到就返回 null，由调用方回落当前视图。
+ */
+function resolveSessionWorkspace(file: string | null | undefined): string | null {
+  return workspaceOfSession(normalizeSessionFile(file) ?? file, knownWorkspaceRoots());
+}
+
+/**
+ * 只切视图（修改 5 · D1）：改的是「看哪儿」，不是「谁在跑」。
+ *
+ * 这里**不 stop 任何槽、不关别的工作区的槽、不等进程退出**——
+ * 那三件事原来是 `openWorkspace` 干的，也是「切过去很慢 + 开不了新对话」的根。
+ * 返回是否真的换了工作区（同根重复打开是幂等的）。
+ */
+function activateWorkspaceView(root: string): boolean {
+  const resolved = resolve(root);
+  if (sessionKey(resolved) === sessionKey(workspaceRoot)) return false;
+  workspaceRoot = resolved;
+  sessionDir = sessionsDirOf(resolved);
+  workspaceStateFile = join(resolved, ".omcp", "state.json");
+  policyService?.reload();
+  invalidateWorkspaceIndex();
+  sessionListCache.clear();
+  return true;
+}
+
+/** 默认槽是否就是这个工作区的（cwd 建进程那刻焊死，只能按 workspace 判） */
+function defaultSlotInWorkspace(root: string): boolean {
+  return sessionKey(defaultRuntime.workspace) === sessionKey(root);
+}
+
+/** 等默认槽真的退下去（taskkill 是异步的；不等就会新旧两个进程重叠） */
+async function waitDefaultStop(timeoutMs = 1500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (defaultRuntime.isRunning && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/**
+ * 让默认槽服务于当前视图（修改 5 · S2）。
+ *
+ * - 已在同一工作区：什么都不做（幂等）；
+ * - 在别的工作区但正忙：**不动它**，那个工作区的任务继续跑，
+ *   新建会话交给槽池另起一个槽；
+ * - 在别的工作区且空闲：停掉它、按新工作区重新拉起（会话已落盘，"停"不等于"丢"）。
+ */
+async function ensureDefaultSlotForView(root: string): Promise<void> {
+  if (defaultRuntime.isRunning) {
+    if (defaultSlotInWorkspace(root)) return;
+    if (defaultRuntime.busy) return;
+    defaultRuntime.stop();
+    await waitDefaultStop();
+  }
+  defaultRuntime.setWorkspace(root);
+  defaultRuntime.setSessionDir(sessionsDirOf(root));
+  defaultRuntime.setTrustProject(appSettings.trustProject);
+  defaultRuntime.setSessionFile(currentSessionFile);
+  slotPool.bindSession("default", currentSessionFile);
+  defaultRuntime.start();
+}
+
+/**
+ * 给「新建会话」找一个槽（修改 5 · C4）。
+ *
+ * 新会话还没有文件名，所以不能走 `slotPool.open`（那个入口需要先有文件）。
+ * 顺序：同工作区里就绪且空着的槽 → 同工作区里已挂起且空着的槽 → 新建一个。
+ * 全程不碰别的工作区的槽；满员时由 `spawnFree` 按准入规则挂起最久未用的空闲槽。
+ */
+async function acquireSlotForNewSession(workspace: string): Promise<SessionRuntime> {
+  const sameWorkspace = (slot: SessionRuntime): boolean =>
+    sessionKey(slot.workspace) === sessionKey(workspace);
+  const pool = slotPool
+    .list()
+    .map((info) => slotPool.get(info.id))
+    .filter((slot): slot is SessionRuntime => Boolean(slot) && sameWorkspace(slot as SessionRuntime));
+
+  const ready = pool.find((slot) => slot.isRunning && slot.ready && !slot.sessionFile);
+  const suspended = pool.find((slot) => !slot.isRunning && !slot.sessionFile);
+  const target =
+    ready ??
+    suspended ??
+    slotPool.spawnFree(workspace, { visibleSlotId: slotPool.activeSlotId });
+  if (!target.isRunning) {
+    target.setSessionDir(sessionsDirOf(workspace));
+    target.start();
+  }
+  await target.waitReady(45_000);
+  return target;
+}
+
+/**
+ * 打开（或新加）一个工作区。
+ *
+ * 修改 5 起这是**非破坏性**的：先建目录、再切视图、最后只为这个工作区
+ * 准备一个默认槽。别的槽、别的会话、正在跑的回合一律不受影响。
+ */
 async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
+  const t = switchTiming.begin("workspace-open");
   const resolved = resolve(root);
   mkdirSync(resolved, { recursive: true });
 
@@ -1212,35 +1338,21 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
     writeFileSync(agents, AGENTS_TEMPLATE, "utf8");
   }
 
-  const newSessionDir = join(science, "sessions");
+  const newSessionDir = sessionsDirOf(resolved);
   const migratedSessions = migrateSessions(newSessionDir);
+  if (migratedSessions > 0) sessionIndex.invalidate(newSessionDir);
+  switchTiming.mark(t, "layout");
 
-  defaultRuntime.stop();
-  rpc.detach();
-  // 修改 4 · M3：离开时把这个工作区名下的槽收掉（会话保留，切回来还能打开）。
-  // 此前只停默认槽，后台槽还挂在旧目录上，文件/策略/内核全是指向旧工作区的。
-  // 旧工作区的排队请求也就没意义了，先丢掉（否则 closeSlot 会把它放进来）
-  slotPool.dropQueue();
-  for (const slot of slotPool.list()) {
-    if (slot.id === "default") continue;
-    if (sessionKey(slot.workspace) === sessionKey(resolved)) continue;
-    slotPool.closeSlot(slot.id);
-  }
-  await new Promise((r) => setTimeout(r, 350));
+  // 只换视图指针：不 stop、不关槽、不等 350 ms
+  activateWorkspaceView(resolved);
+  switchTiming.mark(t, "view");
 
-  workspaceRoot = resolved;
-  defaultRuntime.setWorkspace(resolved);
-  defaultRuntime.setTrustProject(appSettings.trustProject);
-  policyService?.reload();
-  grants?.clearSession();
-  planGates.clear();
-  // 内核按会话记（M2）：这里只把可见会话的那对指到新工作区
-  pointKernelsAt(currentSessionFile ?? null);
+  const wsState = readWorkspaceState();
+  const last = wsState.lastSessionFile ?? null;
+  currentSessionFile = last && existsSync(last) ? last : null;
+  applyPermissionMode();
+  pointKernelsAt(currentSessionFile);
   scheduleKernelPrewarm();
-  sessionDir = newSessionDir;
-  invalidateWorkspaceIndex();
-  workspaceStateFile = join(science, "state.json");
-  defaultRuntime.setSessionDir(sessionDir);
 
   let provider = appSettings.provider;
   let model = appSettings.model;
@@ -1265,10 +1377,6 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
     // ignore
   }
 
-  const wsState = readWorkspaceState();
-  const last = wsState.lastSessionFile ?? null;
-  currentSessionFile = last && existsSync(last) ? last : null;
-  bindDefaultSession(currentSessionFile);
   // 每次打开工作区/启动都重建一次 models.json：
   // pi 自己也会写这个文件（远端目录缓存），不重建就可能某天发现我们的条目没了。
   applyRegistryEnv();
@@ -1277,7 +1385,10 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
     const stale = (reg.managed ?? []).filter((id) => !(id in reg.providers));
     syncRegistryToPi(reg, stale);
   }
-  defaultRuntime.start();
+
+  // 默认槽：同一工作区就复用；别的工作区里空闲就重新拉起；正忙就留给它跑
+  await ensureDefaultSlotForView(resolved);
+  switchTiming.mark(t, "default-slot", { running: defaultRuntime.isRunning });
 
   const all = readWorkspaces();
   const recent = [resolved, ...(all.recent ?? []).filter((x) => x !== resolved)].slice(0, 8);
@@ -1285,6 +1396,7 @@ async function openWorkspace(root: string): Promise<WorkspaceOpenResult> {
   send("workspace:changed", { root: resolved, recent } satisfies WorkspaceInfo);
 
   setTimeout(() => void resetBudgetBaseline("default"), 1500);
+  switchTiming.end(t, { migrated: migratedSessions });
   return { root: resolved, initialized: true, migratedSessions };
 }
 
@@ -1528,6 +1640,8 @@ function budgetStatus(cost: number, sessionFile: string | null): BudgetStatus {
 
 /** 已经就"接近上限"提醒过的会话（原来是全局一个 flag） */
 const alertedSessions = new Set<string>();
+/** 日额度提醒的"已报过"标记：`<日期>:<档位>`，跨天由 rollover 清掉 */
+const alertedBands = new Set<string>();
 
 async function refreshBudget(runtimeId = slotPool.activeSlotId ?? "default"): Promise<BudgetStatus> {
   const file = runtimeById(runtimeId)?.sessionFile ?? null;
@@ -1545,6 +1659,43 @@ async function refreshBudget(runtimeId = slotPool.activeSlotId ?? "default"): Pr
  * 日账是账号级的（所有会话共用），所以 `dailySpent` 仍是一个数；
  * 会话账按文件分，这也是 ADR-017 的口径。
  */
+/**
+ * 日额度的两档提醒（修改 5 · D1：后台会话照常烧 token，所以要出声）。
+ *
+ * 三件事刻意这么做：
+ *  - **按档位去重**，不按会话：一天只响两次（80% / 100%），而不是每个会话响一遍；
+ *  - **说出是谁烧的**：切走之后用户看不到那个会话，只知道"额度没了"没法判断；
+ *  - **不自动停槽**：停槽会丢掉正在飞的一轮，停不停是人的决定。
+ */
+function maybeReportDailyBudget(
+  status: BudgetStatus,
+  runtimeId: string,
+  sessionFile: string | null,
+): void {
+  const limit = budget.dailyLimit;
+  if (!(limit > 0)) return;
+  const ratio = status.dailyUsd / limit;
+  const band = ratio >= 1 ? 100 : ratio >= budget.alertRatio ? Math.round(budget.alertRatio * 100) : 0;
+  if (!band) return;
+  const key = `${dailyDate}:${band}`;
+  if (alertedBands.has(key)) return;
+  alertedBands.add(key);
+  const where = sessionFile ? basename(sessionFile) : runtimeId;
+  const visible = Boolean(
+    sessionFile && currentSessionFile && sessionKey(sessionFile) === sessionKey(currentSessionFile),
+  );
+  reportError({
+    code: band >= 100 ? "E_BUDGET_DAILY" : "E_BUDGET_NEAR",
+    severity: band >= 100 ? "error" : "warning",
+    title: band >= 100 ? "今日额度已用完" : `今日额度已用 ${Math.round(ratio * 100)}%`,
+    detail:
+      `今日 $${status.dailyUsd.toFixed(2)}/$${limit} · 这一段来自${visible ? "当前会话" : "后台会话"}（${where}）。` +
+      "后台会话不会自动停，需要时手动停止。",
+    recoverable: true,
+    action: "none",
+  });
+}
+
 async function updateBudget(runtimeId: string): Promise<void> {
   const runtime = runtimeById(runtimeId);
   const sessionFile = runtime?.sessionFile ?? null;
@@ -1560,18 +1711,29 @@ async function updateBudget(runtimeId: string): Promise<void> {
     }
 
     const status = budgetStatus(cost, sessionFile);
-    const alertKey = sessionFile ?? runtimeId;
-    if (!alertedSessions.has(alertKey) && shouldAlert(status, budget)) {
-      alertedSessions.add(alertKey);
+    // 跨天：两套提醒都重新开始
+    if (applied.rollover) {
+      alertedSessions.clear();
+      alertedBands.clear();
+    }
+    // 会话账：这一段自己接近上限（一次会话只提醒一次）
+    if (
+      sessionFile &&
+      !alertedSessions.has(sessionFile) &&
+      status.sessionUsd >= budget.sessionLimit * budget.alertRatio
+    ) {
+      alertedSessions.add(sessionFile);
       reportError({
         code: "E_BUDGET",
         severity: "warning",
-        title: "预算接近上限",
-        detail: `会话 $${status.sessionUsd.toFixed(4)}/$${status.sessionLimit} · 今日 $${status.dailyUsd.toFixed(4)}/$${status.dailyLimit}`,
+        title: "会话预算接近上限",
+        detail: `这段会话 $${status.sessionUsd.toFixed(4)}/$${status.sessionLimit} · 今日 $${status.dailyUsd.toFixed(4)}/$${status.dailyLimit}`,
         recoverable: true,
         action: "none",
       });
     }
+    // 日账：全局一条，80% 与 100% 各一次——后台会话烧的也算进来（修改 5 · D1）
+    maybeReportDailyBudget(status, runtimeId, sessionFile);
   } catch {
     // ignore
   }
@@ -1665,7 +1827,10 @@ function clearAbortTimer(): void {
  */
 function sessionBoard(): SessionBoardView {
   const queued = new Map(slotPool.queuePositions().map((item) => [sessionKey(item.file), item.position]));
-  const sessions = sessionRegistry.list(workspaceRoot || undefined).map((record): SessionView => {
+  // 修改 5 · D1：**不按当前视图过滤**。标签要能显示另一个工作区里还在跑的会话，
+  // 过滤掉的话它会被画成"已挂起"，而它的槽其实活得好好的。
+  // 侧栏按工作区分组是界面自己的事（它走 `sessions:list-in`），不靠这张表。
+  const sessions = sessionRegistry.list().map((record): SessionView => {
     const slot = record.slotId ? slotPool.get(record.slotId) : undefined;
     return {
       key: record.key,
@@ -1673,6 +1838,7 @@ function sessionBoard(): SessionBoardView {
       workspace: record.workspace,
       ...(record.title ? { title: record.title } : {}),
       state: record.state,
+      ...(record.busySince !== undefined ? { busySince: record.busySince } : {}),
       // 未读以转录中枢为准（渲染端刷新后仍准）
       unread: transcriptHub.summary(hubKeyForFile(record.file)).unread,
       slotId: record.slotId,
@@ -1729,7 +1895,8 @@ function markSessionFromEvent(runtimeId: string, busy: boolean): boolean {
   if (!record) return false;
   const next = busy ? "busy" : "idle";
   if (record.state === next) return false;
-  sessionRegistry.setState(file, next);
+  // 修改 5 · D1：顺带记下这一轮的起点，标签据此显示「后台运行中 · 3:12」
+  sessionRegistry.setBusy(file, busy);
   return true;
 }
 
@@ -2479,34 +2646,65 @@ ipcMain.handle("pi:abort", async (_event, runtimeId?: string) => {
   return true;
 });
 
-ipcMain.handle("pi:new-session", async (_event, runtimeId?: string) => {
+ipcMain.handle("pi:new-session", async (_event, runtimeId?: string, workspace?: string) => {
   invalidateStats();
+  const wanted = workspace ? resolve(String(workspace)) : workspaceRoot;
+  if (!wanted) return false;
+  const t = switchTiming.begin("new-session");
+
+  // 修改 5 · D2：允许「在另一个工作区新建会话」——先只切视图，再来一个槽
+  if (sessionKey(wanted) !== sessionKey(workspaceRoot)) {
+    const known = knownWorkspaceRoots();
+    if (!known.some((item) => sessionKey(item) === sessionKey(wanted))) {
+      throw new Error("这个工作区没有登记过");
+    }
+    activateWorkspaceView(wanted);
+    const wsState = readWorkspaceState();
+    const last = wsState.lastSessionFile ?? null;
+    currentSessionFile = last && existsSync(last) ? last : null;
+    applyPermissionMode();
+    pointKernelsAt(currentSessionFile);
+    switchTiming.mark(t, "view-switch");
+  }
+
+  // 传进来的槽必须属于这个工作区，否则忽略它——
+  // 否则会在 A 的槽里给 B 建一个会话（cwd 是 A，文件却归 B）
+  const explicit = runtimeId
+    ? runtimeId !== "default"
+      ? runtimeManager.get(runtimeId)
+      : defaultRuntime
+    : undefined;
   const target =
-    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
+    explicit && sessionKey(explicit.workspace) === sessionKey(wanted)
+      ? explicit
+      : await acquireSlotForNewSession(wanted);
+  switchTiming.mark(t, "slot", { id: target.id });
+
   const res = await target.rpc.request({ type: "new_session" });
   if (res.success) {
-    if (target.id === "default") {
-      invalidateWorkspaceIndex();
-      currentSessionFile = null;
-      applyPermissionMode();
-      bindDefaultSession(null);
-      pointKernelsAt(null);
-      writeWorkspaceState({ lastSessionFile: null });
-      void resetBudgetBaseline(target.id);
-    } else {
-      const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
-      const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
-      slotPool.bindSession(target.id, file);
-    }
+    invalidateWorkspaceIndex();
+    sessionListCache.clear();
+    sessionIndex.invalidate(sessionsDirOf(target.workspace));
+    const state = await target.rpc.request({ type: "get_state" }).catch(() => null);
+    const file = normalizeSessionFile((state?.data as SessionState | undefined)?.sessionFile);
+    currentSessionFile = file;
+    applyPermissionMode();
+    slotPool.bindSession(target.id, file);
+    pointKernelsAt(file);
+    writeWorkspaceState({ lastSessionFile: file });
+    void resetBudgetBaseline(target.id);
     // 新会话沿用“设为默认”的推理档（旧会话各自保留自己的记录）
     await target.rpc
       .request({ type: "set_thinking_level", level: appSettings.thinkingLevel })
       .catch(() => null);
+    switchTiming.end(t, { slot: target.id, created: Boolean(file) });
+  } else {
+    switchTiming.end(t, { failed: true });
   }
   return res.success;
 });
 
-ipcMain.handle("pi:sessions", (_event, runtimeId?: string) => {
+ipcMain.handle("pi:sessions", async (_event, runtimeId?: string) => {
   const target =
     runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
   return listSessions(target.sessionDir ?? sessionDir, target.workspace || workspaceRoot);
@@ -2816,50 +3014,45 @@ ipcMain.handle("workspace:current", () => ({
 /* ------------------------------------------------------------------ */
 
 let workspaceIndexCache: { at: number; data: WorkspaceIndexEntry[] } | null = null;
+/** 别的工作区的会话列表缓存（修改 5 · C5）：侧栏展开时才拉，15 秒内不重复扫盘 */
+const sessionListCache = new Map<
+  string,
+  { at: number; data: { sessions: SessionSummary[]; titles: Record<string, string> } }
+>();
 
 function invalidateWorkspaceIndex(): void {
   workspaceIndexCache = null;
 }
 
-function buildWorkspaceIndex(): WorkspaceIndexEntry[] {
+/**
+ * 侧栏的工作区概览（修改 5 · C6 续）：异步 + 复用 `SessionIndex` 的增量缓存。
+ *
+ * 旧实现在主线程上对**每个最近工作区**做一遍 `readdirSync + statSync`，
+ * 工作区和会话一多，就成了切换时第二处卡顿源。
+ */
+async function buildWorkspaceIndex(): Promise<WorkspaceIndexEntry[]> {
   const roots = [workspaceRoot, ...(readWorkspaces().recent ?? [])]
     .map((r) => String(r ?? "").trim())
     .filter(Boolean);
   const unique = [...new Set(roots)];
   const out: WorkspaceIndexEntry[] = [];
   for (const root of unique) {
-    const dir = join(root, ".omcp", "sessions");
-    let sessionCount = 0;
-    let latest = 0;
-    try {
-      for (const name of readdirSync(dir)) {
-        if (!name.endsWith(".jsonl")) continue;
-        sessionCount += 1;
-        try {
-          const mtime = statSync(join(dir, name)).mtimeMs;
-          if (mtime > latest) latest = mtime;
-        } catch {
-          // 单个文件读不到不影响计数
-        }
-      }
-    } catch {
-      // 目录不存在：0
-    }
+    const { count, latestMs } = await sessionIndex.summarize(sessionsDirOf(root));
     out.push({
       root,
-      sessionCount,
-      ...(latest > 0 ? { updatedAt: new Date(latest).toISOString() } : {}),
+      sessionCount: count,
+      ...(latestMs > 0 ? { updatedAt: new Date(latestMs).toISOString() } : {}),
     });
   }
   return out;
 }
 
-ipcMain.handle("workspace:index", (): WorkspaceIndexEntry[] => {
+ipcMain.handle("workspace:index", async (): Promise<WorkspaceIndexEntry[]> => {
   const now = Date.now();
   if (workspaceIndexCache && now - workspaceIndexCache.at < 30_000) {
     return workspaceIndexCache.data;
   }
-  const data = buildWorkspaceIndex();
+  const data = await buildWorkspaceIndex();
   workspaceIndexCache = { at: now, data };
   return data;
 });
@@ -2879,6 +3072,7 @@ ipcMain.handle("session:delete", (_event, file: string) => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     renameSync(target, join(trash, `${stamp}-${key}`));
     invalidateWorkspaceIndex();
+    sessionIndex.invalidate(sessionDir);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -3629,6 +3823,13 @@ ipcMain.handle("mcp:login", async (_event, name: string) => {
 
 ipcMain.handle("session:board", () => sessionBoard());
 
+/** 当前可见会话的权威值（修改 5 · C5）：新建会话后界面据此把新文件打开 */
+ipcMain.handle("session:current", () => ({
+  file: currentSessionFile,
+  slotId: slotPool.activeSlotId,
+  workspace: workspaceRoot,
+}));
+
 /**
  * 打开一个会话：找槽 / 绑定 / 必要时挂起最久未用的那个 / 否则排队。
  *
@@ -3638,9 +3839,22 @@ ipcMain.handle("session:board", () => sessionBoard());
 ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpenView> => {
   if (!workspaceRoot) throw new Error("请先打开一个工作区");
   const target = normalizeSessionFile(file) ?? file;
-  const outcome = await slotPool.open(target, workspaceRoot, {
+  const t = switchTiming.begin("session-open");
+
+  // 修改 5 · C1：工作区由**会话自己**决定，不再一律用当前视图。
+  // 会话文件住在 <工作区>/.omcp/sessions 下；能反查出来就不该拒绝它。
+  const ownWorkspace = resolveSessionWorkspace(target);
+  if (ownWorkspace && sessionKey(ownWorkspace) !== sessionKey(workspaceRoot)) {
+    activateWorkspaceView(ownWorkspace);
+    applyPermissionMode();
+    switchTiming.mark(t, "view-switch");
+  }
+  const workspace = ownWorkspace ?? workspaceRoot;
+
+  const outcome = await slotPool.open(target, workspace, {
     visibleSlotId: slotPool.activeSlotId,
   });
+  switchTiming.mark(t, "slot-open", { kind: outcome.kind });
   currentSessionFile = target;
   applyPermissionMode();
   pointKernelsAt(target);
@@ -3651,8 +3865,43 @@ ipcMain.handle("session:open", async (_event, file: string): Promise<SessionOpen
     sessionRegistry.setState(target, "idle");
   }
   if (existsSync(target)) writeWorkspaceState({ lastSessionFile: target });
+  switchTiming.end(t, { outcome: outcome.kind });
   return { ...outcome, board: sessionBoard() };
 });
+
+/**
+ * 另一个工作区的会话列表（修改 5 · C5）。
+ *
+ * 侧栏展开某个工作区时才调；只允许**已登记**的根（当前 + 最近），
+ * 不接受任意路径——否则这就是一个扫描本地任意目录的入口。
+ */
+ipcMain.handle(
+  "sessions:list-in",
+  async (
+    _event,
+    root: string,
+  ): Promise<{ sessions: SessionSummary[]; titles: Record<string, string> }> => {
+    const resolved = resolve(String(root ?? "").trim());
+    if (!resolved) return { sessions: [], titles: {} };
+    const known = knownWorkspaceRoots();
+    if (!known.some((item) => sessionKey(item) === sessionKey(resolved))) {
+      throw new Error("这个工作区没有登记过");
+    }
+    const key = sessionKey(resolved);
+    const cached = sessionListCache.get(key);
+    if (cached && Date.now() - cached.at < 15_000) return cached.data;
+    const sessions = await listSessions(sessionsDirOf(resolved), resolved);
+    // 标题跟着一起给：侧栏展开时不能只显示一串 UUID
+    const meta = loadSessionMeta(resolved);
+    const titles: Record<string, string> = {};
+    for (const [name, entry] of Object.entries(meta.sessions ?? {})) {
+      if (entry?.title) titles[name] = entry.title;
+    }
+    const data = { sessions, titles };
+    sessionListCache.set(key, { at: Date.now(), data });
+    return data;
+  },
+);
 
 /**
  * 转写快照（修改 4 · M1）。
@@ -4138,31 +4387,36 @@ ipcMain.handle("audit:export", (): string | null => {
   return file;
 });
 
-ipcMain.handle("pi:switch-session", async (_event, file: string, runtimeId?: string) => {
+/**
+ * 旧入口 `pi:switch-session`（修改 5 · C7）：**降级为槽池的转发**。
+ *
+ * 原来它调 pi 的 `switch_session`——那个动作会**取消在飞的一轮**，
+ * 与「切走不停」直接冲突。现在语义改成「把这段会话放到它自己的槽上」，
+ * 与 `session:open` 同一条路：同一工作区换会话不再杀进程，
+ * 跨工作区也不再要求先把视图切过去。
+ *
+ * 保留这个 handler 只为兼容旧调用方（界面已改走 `session:open`）。
+ */
+ipcMain.handle("pi:switch-session", async (_event, file: string, _runtimeId?: string) => {
   invalidateStats();
   const target = normalizeSessionFile(file) ?? file;
-  const runtime =
-    runtimeId && runtimeId !== "default" ? runtimeManager.require(runtimeId) : defaultRuntime;
-  const res = await runtime.rpc.request({ type: "switch_session", sessionPath: target });
-  const data = res.data as { cancelled?: boolean } | undefined;
-  if (res.success && !data?.cancelled) {
-    if (runtime.id === "default") {
-      currentSessionFile = target;
-      applyPermissionMode();
-      pointKernelsAt(target);
-      defaultRuntime.setSessionFile(target);
-      writeWorkspaceState({ lastSessionFile: target });
-    } else {
-      slotPool.bindSession(runtime.id, target);
-    }
-    void resetBudgetBaseline(runtime.id);
-    const key = sessionMetaKey(target);
-    if (workspaceRoot && key && existsSync(join(sessionDir, key))) {
-      patchSessionMeta(workspaceRoot, key, { lastOpenedAt: new Date().toISOString() });
-    }
-    return true;
+  const workspace = resolveSessionWorkspace(target) ?? workspaceRoot;
+  if (!workspace) return false;
+  if (sessionKey(workspace) !== sessionKey(workspaceRoot)) activateWorkspaceView(workspace);
+  const outcome = await slotPool.open(target, workspace, {
+    visibleSlotId: slotPool.activeSlotId,
+  });
+  if (outcome.kind === "queued") return false;
+  currentSessionFile = target;
+  applyPermissionMode();
+  pointKernelsAt(target);
+  writeWorkspaceState({ lastSessionFile: target });
+  void resetBudgetBaseline(outcome.slotId ?? "default");
+  const key = sessionMetaKey(target);
+  if (sessionKey(workspace) === sessionKey(workspaceRoot) && key && existsSync(join(sessionDir, key))) {
+    patchSessionMeta(workspaceRoot, key, { lastOpenedAt: new Date().toISOString() });
   }
-  return false;
+  return true;
 });
 
 async function runSelftestMode(): Promise<void> {
@@ -5738,6 +5992,8 @@ async function runSelftestMode(): Promise<void> {
 
     if (SELFTEST_MODE === "workspace") {
       const target = "D:\\desktop\\coding\\oh-my-coding-pi\\sandbox";
+      // 自检不能改掉用户的「上次打开」
+      const before = readWorkspaces();
       const res = await js(`window.api.openWorkspace(${JSON.stringify(target)})`);
       await sleep(1500);
       const info = await js("window.api.getWorkspace()");
@@ -5746,6 +6002,138 @@ async function runSelftestMode(): Promise<void> {
         "P1_SELFTEST_WORKSPACE " +
           JSON.stringify({ res, info, sessions: sessions.length }),
       );
+      if (before.lastWorkspace) activateWorkspaceView(before.lastWorkspace);
+      writeWorkspaces({ lastWorkspace: before.lastWorkspace, recent: before.recent ?? [] });
+    }
+
+    if (SELFTEST_MODE === "multiws") {
+      // 修改 5 · C5：跨工作区会话列表的端到端验证（不启 pi，只验定位与列表）
+      const root = join(app.getPath("temp"), "omcp-selftest-ws");
+      // 自检不能改掉用户的「上次打开」
+      const before = readWorkspaces();
+      mkdirSync(root, { recursive: true });
+      const opened = await js(`window.api.openWorkspace(${JSON.stringify(root)})`);
+      await sleep(300);
+      const dir = join(root, ".omcp", "sessions");
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "2026-11-25T00-00-00-000Z_selftest.jsonl");
+      if (!existsSync(file)) {
+        writeFileSync(
+          file,
+          JSON.stringify({ id: "selftest-0001", timestamp: new Date().toISOString() }) + "\n",
+          "utf8",
+        );
+      }
+      const listed = await js<{ sessions?: unknown[]; titles?: Record<string, string> }>(
+        `window.api.listSessionsIn(${JSON.stringify(root)})`,
+      );
+      let rejected = false;
+      try {
+        await js(`window.api.listSessionsIn(${JSON.stringify("C:\\Windows")})`);
+      } catch {
+        rejected = true;
+      }
+      const current = await js<{ file?: string | null; workspace?: string }>(
+        "window.api.getCurrentSession()",
+      );
+      console.log(
+        "P1_SELFTEST_MULTIWS " +
+          JSON.stringify({
+            opened: Boolean(opened),
+            count: listed?.sessions?.length ?? 0,
+            titles: Object.keys(listed?.titles ?? {}).length,
+            rejected,
+            workspace: current?.workspace === root,
+          }),
+      );
+      if (before.lastWorkspace) activateWorkspaceView(before.lastWorkspace);
+      writeWorkspaces({ lastWorkspace: before.lastWorkspace, recent: before.recent ?? [] });
+    }
+
+    if (SELFTEST_MODE === "m5") {
+      /**
+       * 修改 5 的端到端验证（不需要模型）：
+       *  ① 同一工作区连开两段会话 → 两个槽；
+       *  ② 切到另一个（空）工作区 → ②里的槽**不被杀**；
+       *  ③ 在新工作区新建会话 → 走 slotPool，新文件落在新工作区。
+       * 跑完还原用户的 workspaces.json。
+       */
+      const t: Record<string, unknown> = {};
+      const before = readWorkspaces();
+      for (let i = 0; i < 200; i++) {
+        if (await js<boolean>("window.api.isPiReady()")) {
+          t.ready = true;
+          break;
+        }
+        await sleep(250);
+      }
+      const sessions = await js<{ sessionFile: string }[]>("window.api.getSessions()");
+      t.sessions = sessions.length;
+      if (sessions.length >= 2) {
+        const t0 = Date.now();
+        const first = await js(`window.api.openSession(${JSON.stringify(sessions[0].sessionFile)})`);
+        t.openFirstMs = Date.now() - t0;
+        const t1 = Date.now();
+        const second = await js(`window.api.openSession(${JSON.stringify(sessions[1].sessionFile)})`);
+        t.openSecondMs = Date.now() - t1;
+        const board1 = await js<{
+          slots: { id: string; running: boolean; sessionFile: string | null }[];
+          sessions: { file: string; running: boolean; slotId: string | null }[];
+        }>("window.api.getSessionBoard()");
+        const runningAfterOpen = board1.slots.filter((s) => s.running).length;
+        t.slotsAfterOpen = runningAfterOpen;
+        // 挑一段绑在**非默认槽**上的会话：默认槽是"视图独占"的，切走时会被换去新工作区，
+        // 拿它断言"没被杀"没有意义；要证明的是别的槽不受影响。
+        const nonDefault = board1.sessions.find(
+          (item) => item.slotId && item.slotId !== "default" && item.running,
+        );
+
+        const wsB = join(app.getPath("temp"), "omcp-m5-ws");
+        mkdirSync(wsB, { recursive: true });
+        const t2 = Date.now();
+        await js(`window.api.openWorkspace(${JSON.stringify(wsB)})`);
+        t.switchMs = Date.now() - t2;
+        const board2 = await js<{
+          slots: { id: string; running: boolean; sessionFile: string | null }[];
+          sessions: { file: string; running: boolean; busy: boolean; state: string }[];
+        }>("window.api.getSessionBoard()");
+        const kept = nonDefault
+          ? board2.sessions.find((item) => sessionKey(item.file) === sessionKey(nonDefault.file))
+          : undefined;
+        t.oldSlotStillRunning = Boolean(kept?.running);
+        t.keptFile = kept ? basename(kept.file) : (nonDefault ? null : "没有非默认槽可验");
+        t.slotsAfterSwitch = board2.slots.filter((s) => s.running).length;
+
+
+        const t3 = Date.now();
+        const created = await js<boolean>(
+          `window.api.newSession(undefined, ${JSON.stringify(wsB)})`,
+        );
+        t.newSessionMs = Date.now() - t3;
+        const cur = await js<{ file?: string | null; workspace?: string }>(
+          "window.api.getCurrentSession()",
+        );
+        t.newSessionOk = Boolean(created);
+        t.newSessionInB = Boolean(
+          cur?.file && sessionKey(cur.file).startsWith(sessionKey(sessionsDirOf(wsB))),
+        );
+        t.ok = Boolean(
+          first &&
+            second &&
+            runningAfterOpen >= 2 &&
+            kept?.running &&
+            t.newSessionOk &&
+            t.newSessionInB,
+        );
+        console.log(
+          "P1_SELFTEST_M5 " +
+            JSON.stringify({ ...t, first: Boolean(first), second: Boolean(second) }),
+        );
+      } else {
+        console.log("P1_SELFTEST_M5 " + JSON.stringify({ ...t, skip: "需要至少 2 段会话" }));
+      }
+      if (before.lastWorkspace) activateWorkspaceView(before.lastWorkspace);
+      writeWorkspaces({ lastWorkspace: before.lastWorkspace, recent: before.recent ?? [] });
     }
 
     if (SELFTEST_MODE === "fork2") {
@@ -6052,7 +6440,7 @@ app.whenReady().then(async () => {
   applyPermissionMode();
   await createWindow();
 
-  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "perflong", "ready", "kernelbench", "uploadcheck", "layoutcheck", "sidebarcheck", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
+  if (SELFTEST && ["tool", "stop", "switch", "fork2", "workspace", "multiws", "m5", "kernel", "notebook", "rnotebook", "a1", "a3", "grant", "readonly", "timeout", "abort", "readonly-notebook", "p40", "a4", "p42", "perf", "perflong", "ready", "kernelbench", "uploadcheck", "layoutcheck", "sidebarcheck", "a2a5", "p50", "p51", "p52", "p53", "p54", "rc", "piinfo", "piiso", "policy", "stability"].includes(SELFTEST_MODE)) {
     setTimeout(() => void runSelftestMode(), 3200);
   }
 

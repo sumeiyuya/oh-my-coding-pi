@@ -31,6 +31,13 @@ export interface SessionRecord {
   state: SessionState;
   /** 未读数：M0 仍由渲染端累加，这里先接住，M1 改成权威值 */
   unread: number;
+  /**
+   * 这一轮从什么时候开始跑的（毫秒时间戳）。**只在 busy 时存在**。
+   *
+   * 修改 5 · D1：切走的会话在后台继续跑，标签上要能说出「跑了多久」——
+   * 没有起点就只能显示一个转圈，用户不知道它是不是卡住了。
+   */
+  busySince?: number;
   /** 绑定的槽；null = 没有进程在跑（挂起或从未打开） */
   slotId: string | null;
   lastActiveAt: number;
@@ -136,9 +143,12 @@ export class SessionRegistry {
     if (previous && previous.key !== record.key) {
       previous.slotId = null;
       previous.state = "suspended";
+      // 换绑之后这个槽跑的是别人；旧记录不该还挂着"从 X 点跑到 Y 点"
+      delete previous.busySince;
     }
     record.slotId = slotId;
     record.state = record.state === "busy" ? "busy" : "idle";
+    if (record.state !== "busy") delete record.busySince;
     record.lastActiveAt = this.now();
     return record;
   }
@@ -153,7 +163,28 @@ export class SessionRegistry {
 
   setState(file: string, state: SessionState): void {
     const record = this.get(file);
-    if (record) record.state = state;
+    if (!record) return;
+    record.state = state;
+    // 不在跑就不该留着起点：标签会照它算时长
+    if (state !== "busy") delete record.busySince;
+  }
+
+  /**
+   * 标记这段会话「在跑 / 不跑了」，并记下起点（修改 5 · D1）。
+   *
+   * 已经在跑时不重置起点——否则每次 tool 事件都会把计时清零。
+   */
+  setBusy(file: string, busy: boolean, now: number = this.now()): void {
+    const record = this.get(file);
+    if (!record) return;
+    if (busy) {
+      record.state = "busy";
+      if (record.busySince === undefined) record.busySince = now;
+      record.lastActiveAt = now;
+      return;
+    }
+    record.state = "idle";
+    delete record.busySince;
   }
 
   markActive(file: string): void {

@@ -72,3 +72,41 @@ test("崩溃标注：有回合在飞 → interrupted，空闲 → idle，且两�
   assert.match(idle.note, /自动重启/);
   assert.notEqual(busy.note, idle.note);
 });
+
+/* ------------- 修改 5 · D1：标签上的「跑了多久」 ------------- */
+
+test("setBusy(true) 记下起点；重复调用不把计时清零", () => {
+  const clock = { t: 1000 };
+  const registry = new SessionRegistry({ now: () => clock.t });
+  registry.upsert({ file: "D:/p/a.jsonl", workspace: "D:/p" });
+  registry.setBusy("D:/p/a.jsonl", true);
+  assert.equal(registry.get("D:/p/a.jsonl")?.state, "busy");
+  assert.equal(registry.get("D:/p/a.jsonl")?.busySince, 1000);
+
+  clock.t = 5000;
+  registry.setBusy("D:/p/a.jsonl", true); // 每个 tool 事件都会走到这里
+  assert.equal(registry.get("D:/p/a.jsonl")?.busySince, 1000, "起点不能被后来的事件重置");
+});
+
+test("setBusy(false) 与 setState(idle) 都会清掉起点", () => {
+  const registry = new SessionRegistry({ now: () => 1000 });
+  registry.upsert({ file: "D:/p/a.jsonl", workspace: "D:/p" });
+  registry.setBusy("D:/p/a.jsonl", true);
+  registry.setBusy("D:/p/a.jsonl", false);
+  assert.equal(registry.get("D:/p/a.jsonl")?.busySince, undefined);
+
+  registry.setBusy("D:/p/a.jsonl", true);
+  registry.setState("D:/p/a.jsonl", "idle");
+  assert.equal(registry.get("D:/p/a.jsonl")?.busySince, undefined);
+});
+
+test("换绑到另一段会话时，旧会话的起点跟着清掉（不带着别人的时长）", () => {
+  const registry = new SessionRegistry({ now: () => 1000 });
+  registry.upsert({ file: "D:/p/a.jsonl", workspace: "D:/p" });
+  registry.upsert({ file: "D:/p/b.jsonl", workspace: "D:/p" });
+  registry.bind("D:/p/a.jsonl", "slot-1");
+  registry.setBusy("D:/p/a.jsonl", true);
+  registry.bind("D:/p/b.jsonl", "slot-1");
+  assert.equal(registry.get("D:/p/a.jsonl")?.busySince, undefined);
+  assert.equal(registry.get("D:/p/a.jsonl")?.state, "suspended");
+});

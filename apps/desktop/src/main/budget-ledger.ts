@@ -76,7 +76,13 @@ export function applyCost(input: {
   };
 }
 
-/** 该不该就"接近上限"提醒一次（按会话判，避免一个会话提醒后别的会话被静默） */
+/**
+ * 「任一上限超过比例」的通用判断。
+ *
+ * 修改 5 · D1 起，日账的提醒改成按档位（80% / 100%）在 `maybeReportDailyBudget`
+ * 里单独处理——因为后台会话也在烧钱，日账提醒不该按会话各响一遍。
+ * 这个函数保留给需要"任一超线"判断的调用方与单测。
+ */
 export function shouldAlert(
   status: BudgetStatus,
   limits: BudgetLimits,

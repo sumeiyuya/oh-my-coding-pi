@@ -3992,3 +3992,12 @@ body.sash-dragging {
   margin-left: 4px; font-size: 9.5px; color: var(--muted);
   border: 1px solid var(--line); border-radius: 99px; padding: 0 5px;
 }
+/* 修改 5 · D1：这一轮跑了多久；后台跑的那些用强调色标出来 */
+.session-tab .tab-running {
+  margin-left: 4px; font-size: 9.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 99px; padding: 0 5px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.session-tab .tab-running[data-bg="1"] {
+  color: var(--accent); border-color: var(--accent);
+}

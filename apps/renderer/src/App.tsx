@@ -33,6 +33,8 @@ import ToolGroup from "./ToolGroup";
 import { applyPiEvent, messagesFromAgent } from "./tool-rebuild";
 import { groupAdjacent, type ToolItem } from "./tool-summary";
 import { copyText } from "./clipboard";
+import { pickMessages } from "./chat-preview";
+import { formatElapsed } from "./time-format";
 import { describeModelError, modelErrorLine, type ModelErrorInfo } from "./model-error";
 import ErrorBanner from "./ErrorBanner";
 import { presentAppError, presentModelError } from "./error-view";
@@ -110,7 +112,7 @@ type Msg = { id?: string } & (
 );
 
 /** 提交阶段：只覆盖“用户按下发送 → 模型开始出字”这一段，出字后交给 busy/流式 */
-type SubmitPhase = "idle" | "submitting" | "accepted" | "preparing" | "running" | "streaming";
+import { phaseFor, sendBlockReason, type SubmitPhase } from "./submit-gate";
 
 const SUBMIT_LABEL: Record<SubmitPhase, string> = {
   idle: "",
@@ -276,6 +278,21 @@ export default function App() {
   const [messagesByRuntime, setMessagesByRuntime] = useState<Record<string, Msg[]>>({});
   const [activeRuntimeId, setActiveRuntimeId] = useState("default");
   const activeRuntimeRef = useRef("default");
+  /** 修改 5 · S5b：正在打开的会话（二段式：历史先到、输入后解锁） */
+  const [opening, setOpening] = useState<{ file: string; queued?: boolean } | null>(null);
+  /** 给"排队轮到"的回调用：它注册在只跑一次的 effect 里，读不到最新的 state */
+  const openingRef = useRef<{ file: string; queued?: boolean } | null>(null);
+  openingRef.current = opening;
+  /** 打开期间先画的那份中枢快照；槽就绪后被真内容接管 */
+  const [transcriptPreview, setTranscriptPreview] = useState<{
+    file: string;
+    items: ChatItem[];
+  } | null>(null);
+  const loadSeq = useRef(0);
+  /** 同上：排队回调要能在最新一次渲染的闭包里调 loadSession */
+  const loadSessionRef = useRef<
+    ((file: string, opts?: { force?: boolean }) => Promise<void>) | null
+  >(null);
   const messages = messagesByRuntime[activeRuntimeId] ?? [];
 
   function setMessagesFor(
@@ -342,6 +359,11 @@ export default function App() {
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
     () => new Set(loadUiState().expandedWorkspaces),
   );
+  /** 修改 5 · C5：别的工作区的会话（按根缓存，展开时才拉） */
+  const [wsSessions, setWsSessions] = useState<
+    Record<string, { sessions: SessionSummary[]; titles: Record<string, string> }>
+  >({});
+  const [wsLoading, setWsLoading] = useState<Record<string, boolean>>({});
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [sessionMeta, setSessionMeta] = useState<Record<string, SessionMetaEntry>>({});
   const [metaIgnored, setMetaIgnored] = useState(false);
@@ -351,6 +373,13 @@ export default function App() {
   /** Esc 取消时输入框卸载会触发 blur，用标记拦住那次误提交 */
   const renameCancelled = useRef(false);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
+  /**
+   * 界面上真正显示的那份消息（修改 5 · S5b）。
+   *
+   * 打开会话时先画中枢快照（只读主进程内存、不动 pi 进程），
+   * 槽就绪后 `activateRuntime` 会把真内容写进桶，预览随之撤掉。
+   */
+  const shownMessages = pickMessages(transcriptPreview, currentFile, messages) as Msg[];
   /** 事件回调里要读"此刻打开的是哪个会话"，state 在这里是过期的 */
   const currentFileRef = useRef<string | null>(null);
   useEffect(() => {
@@ -396,14 +425,48 @@ export default function App() {
   function setBusy(value: boolean): void {
     setBusyFor(activeRuntimeRef.current, value);
   }
-  /** 提交阶段：发送锁与“准备中”文案都看它 */
-  const [submitPhase, setSubmitPhase] = useState<SubmitPhase>("idle");
-  /** 本轮待确认的用户消息：失败时标记未送达并回填输入框 */
-  const pendingUser = useRef<{
-    id: string;
-    text: string;
-    attachments: Array<{ id: string; data: string; mimeType: string }>;
-  } | null>(null);
+  /**
+   * 提交阶段：发送锁与"准备中"文案都看它。
+   *
+   * **按 runtime 记，不是一个全局值**。全局值的后果：A 会话在后台流式输出时，
+   * 它的 `agent_settled` 只发给 A 的桶（事件按 runtime 分流），于是这个值永远停在
+   * "streaming"，切到 B 后发送按钮就是灰的——「别的会话在跑，这里发不出去」。
+   */
+  const [submitPhaseByRuntime, setSubmitPhaseByRuntime] = useState<Record<string, SubmitPhase>>({});
+  const submitPhase = phaseFor(submitPhaseByRuntime, activeRuntimeId);
+
+  function setSubmitPhaseFor(
+    runtimeId: string,
+    next: SubmitPhase | ((prev: SubmitPhase) => SubmitPhase),
+  ): void {
+    setSubmitPhaseByRuntime((prev) => {
+      const current = prev[runtimeId] ?? "idle";
+      const value = typeof next === "function" ? next(current) : next;
+      if (value === current) return prev;
+      if (value === "idle") {
+        const { [runtimeId]: _dropped, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [runtimeId]: value };
+    });
+  }
+
+  /** 当前会话的 setter；事件回调用 `setSubmitPhaseFor(runtimeId, …)` */
+  function setSubmitPhase(next: SubmitPhase | ((prev: SubmitPhase) => SubmitPhase)): void {
+    setSubmitPhaseFor(activeRuntimeRef.current, next);
+  }
+
+  /** 本轮待确认的用户消息：失败时标记未送达并回填输入框（同样按 runtime 分开存） */
+  const pendingUser = useRef<
+    Record<
+      string,
+      {
+        id: string;
+        text: string;
+        attachments: Array<{ id: string; data: string; mimeType: string }>;
+      }
+    >
+  >({});
   const [status, setStatus] = useState<BridgeStatus>("starting");
   /** pi 进程已启动但可能仍在初始化；只有 RPC 真正响应过才允许发送 */
   const [piReady, setPiReady] = useState(false);
@@ -423,13 +486,30 @@ export default function App() {
   const runtimesRef = useRef<RuntimeView[]>([]);
   /** 修改 4 · M0：会话 + 槽的权威表（主进程给） */
   const [board, setBoard] = useState<SessionBoardView | null>(null);
+
+  /**
+   * 修改 5 · D1：标签上的「跑了多久」。
+   *
+   * 只在有会话在跑时开一个 1 秒的定时器——没有任务时不该有常驻定时器。
+   * 起点由主进程给（`busySince`），不是渲染端自己记的，刷新/切回来都准。
+   */
+  const anyBusy = (board?.sessions ?? []).some((item) => item.busy);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyBusy) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [anyBusy]);
   /**
    * 修改 4 · M0：可发送与否要看**当前这个槽**。
    * `piReady` 只反映默认槽（它是启动时的那个进程）；后台槽挂起/恢复时
    * 不能拿它当全局开关，否则切到后台标签会被误判成"pi 正在启动"。
    */
   const activeSlotInfo = board?.slots.find((item) => item.id === activeRuntimeId);
-  const slotReady = activeRuntimeId === "default" ? piReady : Boolean(activeSlotInfo?.ready);
+  // 修改 5 · S5b：正在打开时一律不算就绪——此时 activeRuntime 还是上一个槽，
+  // 放行会把这句话发给错的会话
+  const slotReady =
+    !opening && (activeRuntimeId === "default" ? piReady : Boolean(activeSlotInfo?.ready));
 
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [appError, setAppError] = useState<AppError | null>(null);
@@ -518,6 +598,35 @@ export default function App() {
       setWorkspaceIndex([]);
     }
   }, []);
+
+  /** 拉某个工作区的会话列表（展开分组时调；主进程那边 15 秒缓存 + 只认已登记的根） */
+  const loadWsSessions = useCallback(async (root: string) => {
+    setWsLoading((prev) => ({ ...prev, [root]: true }));
+    try {
+      const data = (await window.api.listSessionsIn(root)) as {
+        sessions?: SessionSummary[];
+        titles?: Record<string, string>;
+      };
+      setWsSessions((prev) => ({
+        ...prev,
+        [root]: {
+          sessions: Array.isArray(data?.sessions) ? data.sessions : [],
+          titles: data?.titles ?? {},
+        },
+      }));
+    } catch {
+      setWsSessions((prev) => ({ ...prev, [root]: { sessions: [], titles: {} } }));
+    } finally {
+      setWsLoading((prev) => ({ ...prev, [root]: false }));
+    }
+  }, []);
+
+  useEffect(() => {
+    for (const root of expandedWorkspaces) {
+      if (wsSessions[root]) continue;
+      void loadWsSessions(root);
+    }
+  }, [expandedWorkspaces, wsSessions, loadWsSessions]);
 
   useEffect(() => {
     void refreshWorkspaceIndex();
@@ -722,7 +831,12 @@ export default function App() {
     });
     const offOpen = window.api.onSessionOpened((payload) => {
       const file = (payload as { file?: string }).file;
-      if (file) setNotice(`排队的会话已空出位置并打开：${file.split(/[\/]/).pop() ?? file}`);
+      if (!file) return;
+      setNotice(`排队的会话已空出位置：${file.split(/[\/]/).pop() ?? file}`);
+      // 轮到它了：真要把它打开（此时才会有槽），而不是只弹一句提示
+      if (openingRef.current?.queued && openingRef.current.file === file) {
+        void loadSessionRef.current?.(file, { force: true });
+      }
     });
     // 修改 4 · M3：崩溃中断、内核回收这类系统提示，主进程会同时推进中枢与界面；
     // 正在看着这段会话的人应当马上看到，不必切走再回来。
@@ -820,8 +934,13 @@ export default function App() {
       // P2a：其他 runtime 的事件先丢掉，避免污染默认会话；P2b 会按 activeRuntimeId 分流
       const runtimeId = (raw as unknown as { runtimeId?: unknown }).runtimeId;
       const ev = raw as PiEvent;
-      if (typeof runtimeId === "string" && runtimeId !== activeRuntimeRef.current) {
-        applyBackgroundEvent(runtimeId, ev);
+      const evRuntime =
+        typeof runtimeId === "string" && runtimeId ? runtimeId : activeRuntimeRef.current;
+      if (evRuntime !== activeRuntimeRef.current) {
+        // 后台会话的阶段记在它自己名下：切回去时才是对的，也不会污染当前会话的发送锁
+        if (ev.type === "agent_start") setSubmitPhaseFor(evRuntime, "running");
+        else if (ev.type === "agent_settled") setSubmitPhaseFor(evRuntime, "idle");
+        applyBackgroundEvent(evRuntime, ev);
         return;
       }
 
@@ -831,13 +950,13 @@ export default function App() {
           return;
         case "agent_start":
           setBusy(true);
-          setSubmitPhase("running");
+          setSubmitPhaseFor(evRuntime, "running");
           startClientPerf();
           return;
         case "agent_settled": {
           stopClientPerf();
           setBusy(false);
-          setSubmitPhase("idle");
+          setSubmitPhaseFor(evRuntime, "idle");
           toolUpdateAt.current = {};
           const intent = newSessionIntent.current;
           if (intent) {
@@ -974,26 +1093,28 @@ export default function App() {
     });
 
     const offTurn = window.api.onTurnPhase((ev) => {
+      // 主进程在每条 pi:turn 上都带了 runtimeId；没有就当成当前会话
+      const rid = (ev as { runtimeId?: string }).runtimeId ?? activeRuntimeRef.current;
       switch (ev.phase) {
         case "accepted":
-          setSubmitPhase((p) => (p === "idle" ? p : "accepted"));
+          setSubmitPhaseFor(rid, (p) => (p === "idle" ? p : "accepted"));
           return;
         case "preparing":
-          setSubmitPhase((p) => (p === "idle" ? p : "preparing"));
+          setSubmitPhaseFor(rid, (p) => (p === "idle" ? p : "preparing"));
           return;
         case "started":
-          setSubmitPhase("running");
-          setBusy(true);
+          setSubmitPhaseFor(rid, "running");
+          if (rid === activeRuntimeRef.current) setBusy(true);
           return;
         case "first_token":
-          setSubmitPhase("streaming");
+          setSubmitPhaseFor(rid, "streaming");
           return;
         case "settled":
-          setSubmitPhase("idle");
+          setSubmitPhaseFor(rid, "idle");
           return;
         case "failed":
           // 具体原因由 prompt 返回值收尾（未送达标记 + 输入恢复）；这里只解除锁定
-          setSubmitPhase("idle");
+          setSubmitPhaseFor(rid, "idle");
           return;
         default:
           return;
@@ -1244,7 +1365,7 @@ export default function App() {
       return;
     }
     el.scrollTop = el.scrollHeight;
-  }, [messages, currentFile]);
+  }, [shownMessages, currentFile]);
 
   useEffect(() => {
     if (!imagePreview) return;
@@ -1311,26 +1432,55 @@ export default function App() {
   }
 
   /** 失败收尾：标记未送达、把文字放回输入框；预检失败时不再重复追加系统消息 */
-  function failSend(detail: string, hint = "", addSystem = true) {
-    const pending = pendingUser.current;
-    pendingUser.current = null;
-    setSubmitPhase("idle");
+  function failSend(
+    detail: string,
+    hint = "",
+    addSystem = true,
+    runtimeId: string = activeRuntimeRef.current,
+  ) {
+    const pending = pendingUser.current[runtimeId];
+    delete pendingUser.current[runtimeId];
+    setSubmitPhaseFor(runtimeId, "idle");
+    // 失败的那句话写回**它自己的**那份转录；只有它正显示着才回填输入框
+    const visible = runtimeId === activeRuntimeRef.current;
     if (pending) {
-      setMessages((prev) =>
+      setMessagesFor(runtimeId, (prev) =>
         prev.map((m) => (m.kind === "user" && m.id === pending.id ? { ...m, failed: true } : m)),
       );
-      setInput((prev) => joinTakeBack([pending.text], prev));
-      if (currentFile) draftsRef.current[currentFile] = pending.text;
-      if (pending.attachments.length) setAttachments(pending.attachments);
+      if (visible) {
+        setInput((prev) => joinTakeBack([pending.text], prev));
+        if (currentFile) draftsRef.current[currentFile] = pending.text;
+        if (pending.attachments.length) setAttachments(pending.attachments);
+      }
     }
-    if (addSystem) setMessages((prev) => [...prev, { kind: "system", text: detail + hint }]);
+    if (addSystem) {
+      setMessagesFor(runtimeId, (prev) => [...prev, { kind: "system", text: detail + hint }]);
+    }
   }
 
   async function send(mode: "prompt" | "steer" | "followUp") {
     const text = input.trim();
-    if (!text) return;
-    if (!slotReady) {
-      setNotice("这个会话的 pi 正在启动，请稍候再发送");
+    const blocked = sendBlockReason({
+      text,
+      phase: submitPhase,
+      busy,
+      slotReady,
+      queued: Boolean(opening?.queued),
+      opening: Boolean(opening) && !opening?.queued,
+    });
+    if (blocked === "empty") return;
+    if (blocked) {
+      setNotice(
+        blocked === "queued"
+          ? "这段会话还在排队等名额，轮到了会自动打开"
+          : blocked === "opening"
+            ? "这个会话还在连接，稍等一下再发送"
+            : blocked === "in-flight"
+              ? "这段会话自己的上一轮还没结束，等它收尾再发"
+              : blocked === "busy"
+                ? "这段会话正在跑一轮，可以用「排队」或「追加」"
+                : "这个会话的 pi 正在启动，请稍候再发送",
+      );
       return;
     }
     if (!modelKey) {
@@ -1345,14 +1495,14 @@ export default function App() {
       return;
     }
     const isPrompt = mode === "prompt";
-    // 提交期间锁住发送：连续点击会让 pi 报 “Agent is already processing”
-    if (isPrompt && (submitPhase !== "idle" || busy)) return;
 
+    // 这一句话归哪个槽，从这里开始就定死：预检要 await，期间用户可能切走
+    const runtimeId = activeRuntimeRef.current;
     const msgId = nextMsgId();
     const pendingAttachments = attachments;
     if (isPrompt) {
-      pendingUser.current = { id: msgId, text, attachments: pendingAttachments };
-      setSubmitPhase("submitting");
+      pendingUser.current[runtimeId] = { id: msgId, text, attachments: pendingAttachments };
+      setSubmitPhaseFor(runtimeId, "submitting");
     }
     setMessages((prev) => [
       ...prev,
@@ -1391,22 +1541,22 @@ export default function App() {
             setNotice(pf.message);
             modelSelectRef.current?.focus();
           }
-          failSend(pf.message, "", false);
+          failSend(pf.message, "", false, runtimeId);
           return;
         }
       } catch {
         // 预检自身失败不阻断发送：pi 那边还有一道真实校验
       }
       setModelError(null);
-      setSubmitPhase("accepted");
+      setSubmitPhaseFor(runtimeId, "accepted");
     }
 
     try {
       const res =
         mode === "steer"
-          ? await window.api.steer(text, activeRuntimeRef.current)
+          ? await window.api.steer(text, runtimeId)
           : mode === "followUp"
-            ? await window.api.followUp(text, activeRuntimeRef.current)
+            ? await window.api.followUp(text, runtimeId)
             : await window.api.prompt(
                 text,
                 pendingAttachments.length
@@ -1417,7 +1567,7 @@ export default function App() {
                     }))
                   : undefined,
                 undefined,
-                activeRuntimeRef.current,
+                runtimeId,
               );
       if (!res.ok) {
         // pi 的拒绝原因要原样给出来（例如缺密钥、未知 provider），
@@ -1430,13 +1580,13 @@ export default function App() {
             ? `
 提示：pi 不认识这个 provider/模型，去「设置 → 模型注册表」确认已保存并同步到 models.json。`
             : "";
-        if (isPrompt) failSend(`消息未被接受：${detail}`, hint);
+        if (isPrompt) failSend(`消息未被接受：${detail}`, hint, true, runtimeId);
         else setMessages((prev) => [...prev, { kind: "system", text: `消息未被接受：${detail}${hint}` }]);
         return;
       }
-      if (isPrompt) pendingUser.current = null;
+      if (isPrompt) delete pendingUser.current[runtimeId];
     } catch {
-      if (isPrompt) failSend("发送失败，请检查 pi 状态");
+      if (isPrompt) failSend("发送失败，请检查 pi 状态", "", true, runtimeId);
       else setMessages((prev) => [...prev, { kind: "system", text: "发送失败，请检查 pi 状态" }]);
     }
   }
@@ -1526,35 +1676,64 @@ export default function App() {
   }
 
   /**
-   * 切到一个会话（修改 4 · M0）。
+   * 切到一个会话（修改 4 · M0；修改 5 · S5 改成两段式）。
    *
-   * 不再走 `switch_session`——那是在**同一个进程里换会话**，pi 会中断在飞的回合，
-   * 所以旧代码只能在"不忙"的时候切。现在每个会话有自己的槽：切过去就是把那个槽
-   * 叫醒/绑定，别的槽照跑。
+   * **第一段（立即）**：标签切过去、把中枢里的转写快照直接画出来。
+   * 这一步只读主进程内存，不动 pi 进程，所以点击即响应。
+   *
+   * **第二段（后台）**：`openSession` 去叫醒/新建槽，可能要 spawn 并等就绪。
+   * 这期间历史已经在了（只能读），输入框锁着——否则会发给上一个会话。
+   *
+   * 远端不再走 `switch_session`（它会中断在飞的回合），见 `session:open`。
    */
-  async function loadSession(file: string) {
-    if (file === currentFile) return;
+  async function loadSession(file: string, opts: { force?: boolean } = {}) {
+    if (file === currentFile && !opts.force) return;
     if (currentFile) {
       draftsRef.current[currentFile] = input;
       scrollRef.current[currentFile] = listRef.current?.scrollTop ?? 0;
     }
+    const seq = ++loadSeq.current;
+
+    // 一段：先把视图切过去，并尝试用中枢快照立刻出内容
+    ensureTab(file);
+    setCurrentFile(file);
+    setOpening({ file });
+    let early: { items?: ChatItem[]; cold?: boolean } | null = null;
+    try {
+      early = (await window.api.getTranscript(file)) as {
+        items?: ChatItem[];
+        cold?: boolean;
+      } | null;
+    } catch {
+      early = null;
+    }
+    if (seq !== loadSeq.current) return;
+    const earlyItems = Array.isArray(early?.items) ? early!.items! : [];
+    if (early && !early.cold && earlyItems.length) setTranscriptPreview({ file, items: earlyItems });
+    else setTranscriptPreview(null);
+
+    // 二段：真正打开（可能要 spawn + 等 ready）
     let result: SessionOpenView;
     try {
       result = (await window.api.openSession(file)) as SessionOpenView;
     } catch (error) {
-      setNotice(`打不开这个会话：${error instanceof Error ? error.message : String(error)}`);
+      if (seq === loadSeq.current) {
+        setOpening(null);
+        setNotice(`打不开这个会话：${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
+    if (seq !== loadSeq.current) return;
     if (result?.board) setBoard(result.board);
     if (result?.kind === "queued") {
+      // 关键：这里**不能**把 opening 清掉。activeRuntime 还停在上一个槽上，
+      // 清了就会解锁输入框，而发出去的消息会落到上一个会话里。
+      setOpening({ file, queued: true });
       setNotice(
-        `同时运行的会话已达上限，已排队（第 ${result.position ?? 1} 位）；有空位时会自动打开。`,
+        `同时运行的会话已达上限，已排队（第 ${result.position ?? 1} 位）；空出名额会自动打开，先别在这段里发送。`,
       );
-      ensureTab(file);
       return;
     }
-    ensureTab(file);
-    setCurrentFile(file);
     if (result?.slotId) {
       // 复用已有的一整套加载（消息 / 模型 / 统计 / 会话列表），它按 runtimeId 取数
       await activateRuntime(result.slotId);
@@ -1562,14 +1741,33 @@ export default function App() {
       // 它包含后台期间发生的全部事件（工具卡片、流式文本、系统提示），
       // 而 pi 的 get_messages 只给消息，展示态要重算一遍。
       await applyHubTranscript(result.slotId, file);
+      // 槽里若还是空的（冷启时 get_messages 失败/无内容），把预览这份留下，别闪成空白
+      if (earlyItems.length) {
+        setMessagesByRuntime((prev) =>
+          prev[result.slotId!]?.length ? prev : { ...prev, [result.slotId!]: earlyItems as unknown as Msg[] },
+        );
+      }
     } else {
       await refreshSession();
     }
+    // 槽没在跑 → 这一段不该残留"流式中"这类阶段（老版本全局阶段串台的兜底）
+    if (result?.slotId) {
+      const slotBusy = result.board?.slots.find((slot) => slot.id === result.slotId)?.busy;
+      if (!slotBusy) setSubmitPhaseFor(result.slotId, "idle");
+    }
+    setTranscriptPreview(null);
+    setOpening(null);
+    // 修改 5 · C1：这段会话可能属于另一个工作区——视图已被主进程换过去，
+    // 这里把工作区信息与文件树跟上，否则侧栏还写着旧工作区
+    await refreshWorkspace();
+    void refreshTree();
     // 只在有存过的位置时接管滚动，否则让它滚到底
     if (file in scrollRef.current) pendingScroll.current = { file, top: scrollRef.current[file] };
     await refreshSessions();
     setInput(draftsRef.current[file] ?? "");
   }
+  // 每次渲染都指向最新闭包（排队轮到时会从只注册一次的 effect 里调它）
+  loadSessionRef.current = loadSession;
 
   /**
    * 用转录中枢的快照覆盖某个槽的消息列表（修改 4 · M1）。
@@ -1701,6 +1899,42 @@ export default function App() {
     }
   }
 
+  /**
+   * 在另一个工作区新建会话（修改 5 · D2）。
+   *
+   * 先把视图切过去（主进程只改指针，不停任何槽），再在那个工作区里要一个槽。
+   * 新会话的文件名由 pi 建完后回报，这里统一走 `loadSession`，
+   * 避免再写一份“加载会话”的逻辑。
+   */
+  async function newSessionIn(root: string) {
+    if (busy) return;
+    let ok = false;
+    try {
+      ok = await window.api.newSession(undefined, root);
+    } catch (error) {
+      setNotice(`新建会话失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!ok) {
+      setNotice("新建会话失败：pi 没有接上");
+      return;
+    }
+    discardPendingText();
+    setMessages([]);
+    setStats(null);
+    setCurrentFile(null);
+    await refreshWorkspace();
+    await refreshSessions();
+    try {
+      const current = (await window.api.getCurrentSession()) as { file?: string | null } | null;
+      if (current?.file) await loadSession(current.file);
+    } catch {
+      // 拿不到就保持空会话，用户发一句话就会落盘
+    }
+    void refreshTree();
+    void refreshBudget();
+  }
+
   async function cloneCurrent() {
     if (busy) return;
     const r = await window.api.clone(activeRuntimeRef.current).catch(() => ({ cancelled: true }));
@@ -1742,20 +1976,6 @@ export default function App() {
     await refreshSessions();
     await refreshTree();
     await refreshBudget();
-  }
-
-  async function openWorkspacePath(root: string) {
-    if (!root) return;
-    try {
-      await window.api.openWorkspace(root);
-      await refreshWorkspace();
-      await refreshSession();
-      await refreshSessions();
-      await refreshTree();
-      await refreshBudget();
-    } catch {
-      setNotice("工作区打开失败");
-    }
   }
 
   const modelSupportsImage = (() => {
@@ -2288,13 +2508,36 @@ export default function App() {
                       <button
                         type="button"
                         className="ws-switch"
-                        onClick={() => void openWorkspacePath(entry.root)}
+                        onClick={() => void newSessionIn(entry.root)}
                       >
-                        切换到此工作区
+                        在此新建会话
                       </button>
-                      <div className="ws-hint">
-                        {entry.updatedAt ? `最近 ${formatRelative(entry.updatedAt)}` : "切换后加载会话"}
-                      </div>
+                      {wsLoading[entry.root] ? (
+                        <div className="ws-hint">读取会话…</div>
+                      ) : (wsSessions[entry.root]?.sessions ?? []).length === 0 ? (
+                        <div className="ws-hint">
+                          {entry.sessionCount > 0 ? "会话列表没读到" : "这个工作区还没有会话"}
+                        </div>
+                      ) : (
+                        (wsSessions[entry.root]?.sessions ?? []).slice(0, 50).map((item) => {
+                          const label =
+                            wsSessions[entry.root]?.titles[sessionFileKey(item.sessionFile)] ??
+                            item.sessionId.slice(0, 8);
+                          return (
+                            <div className="session" key={item.sessionFile}>
+                              <button
+                                type="button"
+                                className="session-open"
+                                onClick={() => void loadSession(item.sessionFile)}
+                                title={item.sessionFile}
+                              >
+                                <span className="sid">{label}</span>
+                                <span className="stamp">{formatRelative(item.updatedAt)}</span>
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
                   )}
                 </div>
@@ -2402,6 +2645,7 @@ export default function App() {
               const unread = info?.unread ?? 0;
               const crashed = info?.state === "interrupted";
               const queued = info?.queued ?? 0;
+              const elapsed = tabBusy && info?.busySince ? formatElapsed(nowMs - info.busySince) : "";
               return (
                 <div
                   key={file}
@@ -2419,7 +2663,9 @@ export default function App() {
                         : crashed
                           ? "上一轮被中断（pi 进程异常退出），可直接重发"
                           : tabBusy
-                            ? "运行中"
+                            ? active
+                              ? `运行中 · ${elapsed}`
+                              : `后台运行中 · ${elapsed}（这个会话在另一个槽里继续跑）`
                             : running
                               ? "空闲"
                               : "已挂起（切回会自动恢复）",
@@ -2434,6 +2680,16 @@ export default function App() {
                       data-queued={queued ? "1" : undefined}
                     />
                     {label}
+                    {elapsed && (
+                      <span
+                        className="tab-running"
+                        data-bg={active ? undefined : "1"}
+                        title={active ? "运行中" : "后台运行中"}
+                      >
+                        {active ? "" : "后台 · "}
+                        {elapsed}
+                      </span>
+                    )}
                     {queued > 0 && <span className="tab-queued">排队 {queued}</span>}
                     {unread > 0 && <span className="tab-unread">{unread}</span>}
                   </button>
@@ -2526,7 +2782,10 @@ export default function App() {
         <main className="list" ref={listRef}>
           {view === "chat" ? (
             <>
-          {messages.length === 0 && (
+          {shownMessages.length === 0 && opening && (
+            <div className="empty">正在读取这段会话的历史…</div>
+          )}
+          {shownMessages.length === 0 && !opening && (
             !modelKey ? (
               <div className="empty">
                 <div>还没有配置模型</div>
@@ -2542,7 +2801,7 @@ export default function App() {
             )
           )}
           {groupAdjacent(
-            messages,
+            shownMessages,
             (m) => m.kind === "tool",
             (m) => (m.kind === "tool" ? m.id : String(m.kind)),
           ).map((block) => {
@@ -2630,7 +2889,13 @@ export default function App() {
           {!slotReady && (
             <div className="submit-state" role="status">
               <span className="submit-dot" aria-hidden="true" />
-              <span>这个会话的 pi 正在启动…（首次启动可能需要几十秒）</span>
+              <span>
+                {opening?.queued
+                  ? "排队中：同时运行的会话已达上限，轮到时会自动打开"
+                  : opening
+                    ? "正在连接这个会话…（历史已显示，可先阅读；就绪后即可发送）"
+                    : "这个会话的 pi 正在启动…（首次启动可能需要几十秒）"}
+              </span>
             </div>
           )}
           {slotReady && (submitPhase === "submitting" || submitPhase === "accepted" || submitPhase === "preparing") && (
@@ -2728,9 +2993,11 @@ export default function App() {
               ref={textareaRef}
               value={input}
               placeholder={
-                busy
-                  ? "pi 正在工作；Enter 插入，Shift+Enter 换行"
-                  : "输入消息，Enter 发送；可粘贴图片，＋ 上传文件，@ 补全路径"
+                !slotReady
+                  ? "正在连接这个会话…（历史可先阅读）"
+                  : busy
+                    ? "pi 正在工作；Enter 插入，Shift+Enter 换行"
+                    : "输入消息，Enter 发送；可粘贴图片，＋ 上传文件，@ 补全路径"
               }
               onChange={(e) => {
                 const value = e.target.value;

@@ -45,7 +45,8 @@ contextBridge.exposeInMainWorld("api", {
   followUp: (text: string, runtimeId?: string): Promise<PromptResult> => ipcRenderer.invoke("pi:follow-up", text, runtimeId),
   abort: (runtimeId?: string): Promise<boolean> => ipcRenderer.invoke("pi:abort", runtimeId),
   restart: (): Promise<boolean> => ipcRenderer.invoke("pi:restart"),
-  newSession: (runtimeId?: string): Promise<boolean> => ipcRenderer.invoke("pi:new-session", runtimeId),
+  newSession: (runtimeId?: string, workspace?: string): Promise<boolean> =>
+    ipcRenderer.invoke("pi:new-session", runtimeId, workspace),
   getSessions: (runtimeId?: string): Promise<SessionSummary[]> =>
     ipcRenderer.invoke("pi:sessions", runtimeId),
   getSessionMeta: (): Promise<SessionMetaResult> => ipcRenderer.invoke("session-meta:get"),
@@ -110,6 +111,10 @@ contextBridge.exposeInMainWorld("api", {
   getBudget: (): Promise<BudgetStatus> => ipcRenderer.invoke("pi:budget"),
   getWorkspace: (): Promise<WorkspaceInfo> => ipcRenderer.invoke("workspace:current"),
   getWorkspaceIndex: (): Promise<WorkspaceIndexEntry[]> => ipcRenderer.invoke("workspace:index"),
+  listSessionsIn: (
+    workspace: string,
+  ): Promise<{ sessions: SessionSummary[]; titles: Record<string, string> }> =>
+    ipcRenderer.invoke("sessions:list-in", workspace),
   deleteSession: (sessionFile: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("session:delete", sessionFile),
   pickWorkspace: (): Promise<WorkspaceOpenResult | null> => ipcRenderer.invoke("workspace:pick"),
@@ -220,6 +225,8 @@ contextBridge.exposeInMainWorld("api", {
   closeRuntime: (id: string): Promise<unknown> => ipcRenderer.invoke("runtime:close", id),
   // 修改 4 · M0：会话级入口
   getSessionBoard: (): Promise<unknown> => ipcRenderer.invoke("session:board"),
+  getCurrentSession: (): Promise<{ file: string | null; slotId: string | null; workspace: string }> =>
+    ipcRenderer.invoke("session:current"),
   openSession: (file: string): Promise<unknown> => ipcRenderer.invoke("session:open", file),
   closeSession: (file: string): Promise<unknown> => ipcRenderer.invoke("session:close", file),
   onSessionChanged: (cb: (board: unknown) => void): (() => void) => {

@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>修改 5 · 多工作区并行与秒切 — 可视化方案</title>
+<style>
+  :root{
+    --ink:#16181d; --muted:#5b6472; --line:#dfe3ea; --bg:#f5f6f8; --card:#fff;
+    --accent:#1f6feb; --accent-soft:#e8f0fe; --warn:#b42318; --warn-soft:#fdecea;
+    --ok:#067647; --ok-soft:#e7f6ee; --amber:#b54708; --amber-soft:#fff4e5;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:15px/1.75 "Microsoft YaHei","Segoe UI",-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 28px 80px}
+  header.top{
+    background:linear-gradient(135deg,#101418,#1b2634 55%,#1f3550);
+    color:#fff;border-radius:18px;padding:34px 38px;margin-bottom:26px;
+  }
+  header.top .kicker{font-size:12px;letter-spacing:.18em;color:#8fb3e0;text-transform:uppercase}
+  header.top h1{margin:8px 0 10px;font-size:30px;line-height:1.3;font-weight:700}
+  header.top p{margin:0;color:#c2cedd;font-size:14px}
+  header.top .meta{margin-top:16px;display:flex;gap:26px;flex-wrap:wrap;font-size:12.5px;color:#9fb0c4}
+  header.top .meta b{color:#e8eef7;font-weight:600}
+
+  section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 30px;margin-bottom:22px}
+  h2{font-size:20px;margin:0 0 6px;display:flex;align-items:center;gap:10px}
+  h2 .no{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:26px;height:26px;border-radius:8px;background:var(--accent-soft);color:var(--accent);
+    font-size:13px;font-weight:700;flex:0 0 auto;
+  }
+  h3{font-size:15px;margin:24px 0 8px;color:#26303d}
+  .sub{color:var(--muted);font-size:13.5px;margin:0 0 20px}
+  p{margin:10px 0}
+  code{font:12.5px/1.6 "Cascadia Mono",Consolas,monospace;background:#f2f4f7;border:1px solid #e6e9ef;border-radius:5px;padding:1px 5px}
+  pre{margin:12px 0;background:#0f141b;color:#d7e2ef;border-radius:10px;padding:16px 18px;overflow-x:auto;font:12.5px/1.65 "Cascadia Mono",Consolas,monospace}
+  pre .c{color:#7e8b9c}
+  pre .k{color:#79b8ff}
+  pre .s{color:#a5d6a7}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;color:#3a4453;font-weight:600;font-size:12.5px;letter-spacing:.02em}
+  tr:last-child td{border-bottom:none}
+  td.mono{font-family:"Cascadia Mono",Consolas,monospace;font-size:12px;color:#3a4453;white-space:nowrap}
+
+  .callout{border-radius:12px;padding:16px 20px;margin:18px 0;font-size:14px}
+  .callout.bad{background:var(--warn-soft);border-left:4px solid var(--warn)}
+  .callout.good{background:var(--ok-soft);border-left:4px solid var(--ok)}
+  .callout.warn{background:var(--amber-soft);border-left:4px solid var(--amber)}
+  .callout b{font-weight:700}
+
+  .diagram{background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:10px;margin:14px 0}
+  .diagram svg{display:block;width:100%;height:auto}
+  .cap{font-size:12.5px;color:var(--muted);margin:4px 6px 2px}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media (max-width:900px){.grid2{grid-template-columns:1fr}}
+
+  .pill{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent);margin-right:6px}
+  .pill.r{background:var(--warn-soft);color:var(--warn)}
+  .pill.g{background:var(--ok-soft);color:var(--ok)}
+  .pill.a{background:var(--amber-soft);color:var(--amber)}
+
+  .bars{margin:14px 0 6px}
+  .bar{display:grid;grid-template-columns:190px 1fr 92px;gap:12px;align-items:center;margin:9px 0;font-size:13px}
+  .track{height:12px;background:#eceff4;border-radius:999px;overflow:hidden}
+  .fill{height:100%;border-radius:999px;background:var(--accent)}
+  .fill.g{background:var(--ok)}
+  .fill.a{background:var(--amber)}
+  .fill.r{background:var(--warn)}
+  .num{text-align:right;font-family:"Cascadia Mono",Consolas,monospace;font-size:12px;color:#3a4453}
+
+  ol.steps{counter-reset:s;list-style:none;padding-left:0;margin:12px 0}
+  ol.steps li{counter-increment:s;position:relative;padding-left:38px;margin:10px 0}
+  ol.steps li::before{
+    content:counter(s);position:absolute;left:0;top:2px;width:24px;height:24px;border-radius:7px;
+    background:#eef2f7;color:#3a4453;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;
+  }
+  ul.tight{margin:8px 0;padding-left:22px}
+  ul.tight li{margin:5px 0}
+
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}
+  @media (max-width:900px){.kpi{grid-template-columns:repeat(2,1fr)}}
+  .kpi div{background:#fafbfc;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .kpi .k{font-size:11.5px;color:var(--muted)}
+  .kpi .v{font-size:20px;font-weight:700;margin-top:2px;font-family:"Cascadia Mono",Consolas,monospace}
+  .kpi .u{font-size:11.5px;color:var(--muted);margin-left:3px;font-weight:400;font-family:inherit}
+
+  footer{color:var(--muted);font-size:12.5px;text-align:center;margin-top:10px}
+  @media print{
+    body{background:#fff}
+    .wrap{max-width:none;padding:0}
+    section,header.top{break-inside:avoid;border-radius:8px}
+    a{color:inherit;text-decoration:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="kicker">oh-my-coding-pi · 修改 5</div>
+  <h1>多工作区并行 + 秒切<br />对齐 DAWN 的「会话—运行时」模型</h1>
+  <p>症状：一个工作区在跑任务时，切到另一个工作区很慢，而且切过去开不了新对话。<br />
+     结论：这不是加载慢，是<strong>切工作区被实现成了进程级重启</strong>。DAWN 里根本没有这个动作。</p>
+  <div class="meta">
+    <span>依据：DAWN 打包主进程 <b>dist/electron/main.js</b>（逐行核对）</span>
+    <span>对照：<b>apps/desktop/src/main/index.ts</b></span>
+    <span>状态：<b>S1/S2 第一批已实施（见 §10）</b></span>
+    <span>已定：<b>视图切换 · 跨工作区侧栏 · 上限 3–4</b></span>
+  </div>
+</header>
+
+<!-- ============ 0. 一句话 ============ -->
+<section>
+  <h2><span class="no">0</span>先把「切工作区」这个词拆开</h2>
+  <p class="sub">同一个词，在两种架构里指的是两件完全不同的事。</p>
+
+  <table>
+    <tr>
+      <th style="width:22%">动作</th><th style="width:39%">OMCP 现状</th><th style="width:39%">DAWN</th>
+    </tr>
+    <tr>
+      <td><b>切到另一个工作区</b></td>
+      <td><span class="pill r">进程级重启</span>停默认槽 → 关别的槽 → 硬等 350&nbsp;ms → 改 5 个全局指针 → 冷启 pi → 重拉 5 次数据</td>
+      <td><span class="pill g">没有这个动作</span>工作区只是会话的一个属性；侧栏换个筛选，点哪个会话就开哪个</td>
+    </tr>
+    <tr>
+      <td><b>同工作区换会话</b></td>
+      <td><span class="pill a">半成品</span>已有槽池（session:open），但旧路径 <code>pi:switch-session</code> 还在，且会中断在跑的一轮</td>
+      <td>换会话 = 换观察者（attach/detach），进程不动、回合不断</td>
+    </tr>
+    <tr>
+      <td><b>开新对话</b></td>
+      <td><span class="pill r">只能开在当前工作区</span><code>pi:new-session</code> 只认默认槽 + 全局 sessionDir</td>
+      <td>新会话就是一条新记录 + 一个新运行时，工作区随会话走</td>
+    </tr>
+  </table>
+
+  <div class="callout bad">
+    <b>因果链（你测到的两件事是同一个根因）：</b><br />
+    切工作区 = 杀掉唯一能接活的槽 → 冷启需要时间（Node 启动 + 扩展加载 + MCP 握手）→
+    这段时间里既没有可用的槽、也没有就绪的会话目录，所以「慢」和「开不了新对话」同时出现；
+    被切走的那个工作区里正在跑的任务，也一并被杀掉。
+  </div>
+</section>
+
+<!-- ============ 1. DAWN 证据 ============ -->
+<section>
+  <h2><span class="no">1</span>DAWN 的实现：工作区不是模式，是属性</h2>
+  <p class="sub">以下行号均为 <code>dist/electron/main.js</code>，可直接对照。</p>
+
+  <table>
+    <tr><th style="width:26%">机制</th><th style="width:19%">源码位置</th><th>做法与为什么快</th></tr>
+    <tr>
+      <td><b>会话是主键，运行时可换</b></td>
+      <td class="mono">206084 · 206110</td>
+      <td><code>bound: Map&lt;sessionId, runtime&gt;</code>；<code>create()</code> 先把记录落库（含 <code>workspace / sessionDir / state</code>），再交给对应 runtime 启动。身份与执行者解耦。</td>
+    </tr>
+    <tr>
+      <td><b>重复打开幂等</b></td>
+      <td class="mono">206269 resume()</td>
+      <td>已绑定（还活着）直接返回原记录，<b>不掐断重来</b>；正在启动的用 <code>resuming</code> Map 去重，连点两下也只会起一份。</td>
+    </tr>
+    <tr>
+      <td><b>同进程多会话</b></td>
+      <td class="mono">218358 · 219419 · 219700</td>
+      <td><code>sessions = new Map()</code>，每会话一个 <code>createAgentSession()</code>；模型运行时、MCP 池、凭据在进程内共享。所以第 N 个会话不付第 N 份冷启成本。</td>
+    </tr>
+    <tr>
+      <td><b>事件从源头带会话号</b></td>
+      <td class="mono">219732 · 219947</td>
+      <td><code>session.subscribe(raw =&gt; this.translate(sessionId, raw))</code>。UI 靠 <code>sessionId</code> 分流，不靠「当前是哪个会话」这种全局状态——这是并行的前提。</td>
+    </tr>
+    <tr>
+      <td><b>切视图 = 换观察者</b></td>
+      <td class="mono">220074 attach()</td>
+      <td><code>attach(sessionId, sink)</code> 返回一个退订函数。切标签只是 detach/attach，<b>全程没有 stop</b>。</td>
+    </tr>
+    <tr>
+      <td><b>内核按会话</b></td>
+      <td class="mono">225667 · 226390 abort</td>
+      <td><code>KernelRuntime.sessions</code> 按会话索引；<code>abort()</code> 只打断当前那段代码，<b>不杀内核</b>。切工作区不会让变量蒸发。</td>
+    </tr>
+    <tr>
+      <td><b>转录中枢</b></td>
+      <td class="mono">239789 SessionTranscripts</td>
+      <td><code>revision</code> + 全量快照 + <code>subscribe/peek</code>，内容活在主进程内存里。切回一个会话是「要一份快照」，不是「重读一遍 JSONL」。</td>
+    </tr>
+    <tr>
+      <td><b>工作区在库里，不在内存里</b></td>
+      <td class="mono">196517 · 196530</td>
+      <td><code>sessions(id, workspace, session_dir, state, pid)</code>；<code>projects.workspace UNIQUE</code>（同一目录只对应一个项目，不会把历史切碎）。列表是一次查询，不是「切模式」。</td>
+    </tr>
+    <tr>
+      <td><b>停只在关闭时发生</b></td>
+      <td class="mono">206714 stop() · 206671 rehome()</td>
+      <td><code>stop(sessionId)</code> 只在关会话/删会话/搬目录时调用。搬目录是「停 → 搬 → 改库 → 重拉」<b>单条会话</b>，不是整机。</td>
+    </tr>
+    <tr>
+      <td><b>启动不恢复全部</b></td>
+      <td class="mono">242286</td>
+      <td><code>reconcileOnStartup()</code>：上次活着的会话一律标 <code>exited</code>，点开才 <code>resume</code>。冷启动因此与历史长度无关。</td>
+    </tr>
+  </table>
+
+  <h3>三段关键代码</h3>
+  <div class="grid2">
+    <div>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 6px">DAWN · 打开会话是幂等的（206269）</p>
+<pre><span class="c">// 本进程内活动的会话 → 它绑定的 runtime</span>
+bound = <span class="k">new</span> Map();
+resuming = <span class="k">new</span> Map();
+
+<span class="k">async</span> resume(sessionId) {
+  <span class="k">const</span> pending = <span class="k">this</span>.resuming.get(sessionId);
+  <span class="k">if</span> (pending) <span class="k">return</span> pending;      <span class="c">// 正在起 → 复用</span>
+  <span class="k">if</span> (<span class="k">this</span>.bound.has(sessionId)) {    <span class="c">// 已活着 → 直接回</span>
+    <span class="k">return</span> <span class="k">this</span>.store.get(sessionId);  <span class="c">// 不掐断重来</span>
+  }
+  ...
+}</pre>
+    </div>
+    <div>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 6px">DAWN · 会话/事件都按 id（219700 / 219732）</p>
+<pre><span class="k">const</span> { session } = <span class="k">await</span> createAgentSession({
+  cwd: spec.workspace,        <span class="c">// 工作区属于这段会话</span>
+  sessionManager, ...
+});
+<span class="k">const</span> unsubscribe = session.subscribe(
+  raw =&gt; <span class="k">this</span>.translate(spec.sessionId, raw)
+);</pre>
+    </div>
+  </div>
+
+  <div class="callout good">
+    <b>一句话：</b>DAWN 的「快」不是某个优化，而是<b>没有重启这条路</b>——
+    打开已有会话是 Map 查找 + 一次快照；打开挂起会话只冷启<b>那一条</b>，其余会话与工作区完全不受影响。
+  </div>
+</section>
+
+<!-- ============ 2. 现状热路径 ============ -->
+<section>
+  <h2><span class="no">2</span>现状：切一次工作区要走七步，而且中间不能做别的</h2>
+  <p class="sub">全部在 <code>index.ts: openWorkspace()</code>（1190–1290）。</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1100 400" role="img" aria-label="现状架构：一个全局工作区与一个默认槽">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+        <marker id="arR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#b42318"/>
+        </marker>
+      </defs>
+
+      <!-- renderer -->
+      <rect x="30" y="14" width="1040" height="72" rx="10" fill="#fff" stroke="#c9d2de"/>
+      <text x="52" y="40" font-size="13" font-weight="700" fill="#26303d">渲染进程</text>
+      <rect x="150" y="28" width="300" height="22" rx="5" fill="#eef2f7"/>
+      <text x="164" y="44" font-size="11.5" fill="#3a4453">会话列表（只列当前工作区）</text>
+      <rect x="464" y="28" width="230" height="22" rx="5" fill="#eef2f7"/>
+      <text x="478" y="44" font-size="11.5" fill="#3a4453">messages（全局一份）</text>
+      <rect x="708" y="28" width="340" height="22" rx="5" fill="#fdecea"/>
+      <text x="722" y="44" font-size="11.5" fill="#b42318">切换 = 整页重拉（5 次串行 IPC）</text>
+      <text x="52" y="72" font-size="11.5" fill="#5b6472">同一时刻只看得见一个工作区</text>
+
+      <line x1="550" y1="86" x2="550" y2="112" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="566" y="105" font-size="11.5" fill="#5b6472">IPC</text>
+
+      <!-- main -->
+      <rect x="30" y="114" width="1040" height="182" rx="10" fill="#fff" stroke="#c9d2de"/>
+      <text x="52" y="140" font-size="13" font-weight="700" fill="#26303d">主进程</text>
+
+      <rect x="46" y="152" width="430" height="128" rx="8" fill="#fbfcfd" stroke="#e2e7ee"/>
+      <text x="62" y="174" font-size="11.5" font-weight="700" fill="#5b6472">全局单例（切工作区时一起改写）</text>
+      <rect x="60" y="184" width="196" height="22" rx="5" fill="#fff4e5"/><text x="72" y="200" font-size="11.5" fill="#b54708">workspaceRoot</text>
+      <rect x="264" y="184" width="196" height="22" rx="5" fill="#fff4e5"/><text x="276" y="200" font-size="11.5" fill="#b54708">sessionDir</text>
+      <rect x="60" y="212" width="196" height="22" rx="5" fill="#fff4e5"/><text x="72" y="228" font-size="11.5" fill="#b54708">currentSessionFile</text>
+      <rect x="264" y="212" width="196" height="22" rx="5" fill="#fff4e5"/><text x="276" y="228" font-size="11.5" fill="#b54708">planGates / 预算 / 审批表</text>
+      <rect x="60" y="240" width="400" height="22" rx="5" fill="#fdecea"/><text x="72" y="256" font-size="11.5" fill="#b42318">slotPool.dropQueue() · 关掉其他工作区的槽</text>
+
+      <rect x="496" y="152" width="558" height="128" rx="8" fill="#fbfcfd" stroke="#e2e7ee"/>
+      <text x="512" y="174" font-size="11.5" font-weight="700" fill="#5b6472">默认槽 defaultRuntime（唯一能接活的进程）</text>
+      <rect x="512" y="184" width="255" height="44" rx="6" fill="#e8f0fe" stroke="#b9cdf5"/>
+      <text x="524" y="202" font-size="11.5" fill="#1f4f9e">pi 子进程（Node 冷启 + 扩展 + MCP）</text>
+      <text x="524" y="219" font-size="11" fill="#5b6472">RPC / EventPump 各一份</text>
+      <rect x="781" y="184" width="255" height="44" rx="6" fill="#e8f0fe" stroke="#b9cdf5"/>
+      <text x="793" y="202" font-size="11.5" fill="#1f4f9e">Python / R 内核</text>
+      <text x="793" y="219" font-size="11" fill="#5b6472">指向当前工作区</text>
+      <text x="512" y="252" font-size="11.5" fill="#b42318">stop() → 硬等 350 ms → start()　：这段时间没有可用槽</text>
+
+      <!-- workspaces -->
+      <rect x="120" y="322" width="330" height="58" rx="8" fill="#fff" stroke="#c9d2de"/>
+      <text x="136" y="346" font-size="12.5" font-weight="700" fill="#26303d">工作区 A</text>
+      <text x="136" y="365" font-size="11.5" fill="#5b6472">会话、内核变量、审计都在这里</text>
+      <rect x="650" y="322" width="330" height="58" rx="8" fill="#fff" stroke="#c9d2de" stroke-dasharray="5 4"/>
+      <text x="666" y="346" font-size="12.5" font-weight="700" fill="#5b6472">工作区 B</text>
+      <text x="666" y="365" font-size="11.5" fill="#b42318">想进去 → 只能把 A 全停掉</text>
+      <line x1="450" y1="351" x2="648" y2="351" stroke="#b42318" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#arR)"/>
+      <text x="470" y="342" font-size="11.5" fill="#b42318">切过去 = 重启</text>
+    </svg>
+    <div class="cap">图 1 · 现状：工作区是「模式」，全局变量是它的载体，进程是它的囚徒。</div>
+  </div>
+
+  <table>
+    <tr><th style="width:5%">步</th><th style="width:40%">代码</th><th>代价</th></tr>
+    <tr><td>1</td><td class="mono">index.ts:1218 defaultRuntime.stop()</td><td>Windows 走 <code>taskkill /T /F</code> 整组杀；正在飞的一轮直接没了</td></tr>
+    <tr><td>2</td><td class="mono">index.ts:1223–1227 dropQueue + closeSlot</td><td>别的工作区的槽一并杀掉（虽然它们与本次切换无关）</td></tr>
+    <tr><td>3</td><td class="mono">index.ts:1229 await 350 ms</td><td>硬等，只为等进程死透；这 350 ms 里主进程什么也做不了</td></tr>
+    <tr><td>4</td><td class="mono">index.ts:1231–1247 改写全局</td><td>workspaceRoot / sessionDir / 状态文件 / 方案期门全部重置</td></tr>
+    <tr><td>5</td><td class="mono">index.ts:1280 defaultRuntime.start()</td><td>冷启：Node + pi 包 + 扩展 + MCP；会话越多、扩展越多越慢</td></tr>
+    <tr><td>6</td><td class="mono">App.tsx:1747 五个 refresh 串行</td><td>列表 / 会话 / 目录树 / 预算逐个重拉，任一慢就全慢</td></tr>
+    <tr><td>7</td><td class="mono">index.ts:1009 listSessions（同步）</td><td>主线程 <code>readdir + stat + 读首行</code>：会话一多，连别的 IPC 一起卡</td></tr>
+  </table>
+
+  <div class="callout warn">
+    <b>为什么「开不了新对话」：</b><code>pi:new-session</code>（<code>index.ts:2482</code>）只会找默认槽，
+    而默认槽此刻正在被杀 / 冷启 / 等就绪（<code>waitReady</code> 最长 45 s）。
+    会话目录 <code>sessionDir</code> 也刚被换掉，于是新对话既没有进程接，也没有确定的落点。
+  </div>
+</section>
+
+<!-- ============ 3. 目标架构 ============ -->
+<section>
+  <h2><span class="no">3</span>目标：把「切换」从重启降级为一条 Map 查询</h2>
+  <p class="sub">改变的不是性能技巧，而是身份模型：<b>工作区属于会话，槽属于工作区，标签属于视图。</b></p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1100 470" role="img" aria-label="目标架构：槽池、会话登记表、转录中枢与多工作区">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#1f6feb"/>
+        </marker>
+        <marker id="arG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#067647"/>
+        </marker>
+      </defs>
+
+      <!-- renderer -->
+      <rect x="30" y="12" width="1040" height="86" rx="10" fill="#fff" stroke="#c9d2de"/>
+      <text x="52" y="36" font-size="13" font-weight="700" fill="#26303d">渲染进程 · 标签即视图</text>
+      <g font-size="11.5">
+        <rect x="52" y="46" width="228" height="40" rx="7" fill="#e7f6ee" stroke="#b7e3c9"/>
+        <text x="64" y="63" fill="#067647">A / 会话 A1</text><text x="64" y="78" fill="#3a4453">运行中 · 12 步前</text>
+        <rect x="292" y="46" width="228" height="40" rx="7" fill="#fff4e5" stroke="#f5d3ab"/>
+        <text x="304" y="63" fill="#b54708">B / 会话 B1</text><text x="304" y="78" fill="#3a4453">等审批 · 来自工作区 B</text>
+        <rect x="532" y="46" width="228" height="40" rx="7" fill="#eef2f7" stroke="#d6dde7"/>
+        <text x="544" y="63" fill="#3a4453">A / 会话 A2</text><text x="544" y="78" fill="#5b6472">空闲 · 内核保留</text>
+        <rect x="772" y="46" width="248" height="40" rx="7" fill="#fff" stroke="#d6dde7" stroke-dasharray="4 4"/>
+        <text x="784" y="63" fill="#5b6472">+ 新会话（任意工作区）</text><text x="784" y="78" fill="#5b6472">不占用别人的槽</text>
+      </g>
+
+      <line x1="550" y1="98" x2="550" y2="118" stroke="#1f6feb" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+      <!-- main services -->
+      <rect x="30" y="120" width="1040" height="120" rx="10" fill="#fff" stroke="#c9d2de"/>
+      <text x="52" y="144" font-size="13" font-weight="700" fill="#26303d">主进程 · 全局服务（共享，不跟工作区走）</text>
+      <g font-size="11.5">
+        <rect x="46" y="156" width="238" height="66" rx="7" fill="#e8f0fe" stroke="#b9cdf5"/>
+        <text x="60" y="176" fill="#1f4f9e" font-weight="700">SlotPool</text>
+        <text x="60" y="193" fill="#3a4453">准入：已绑定 → 复用 → 挂起换绑</text>
+        <text x="60" y="210" fill="#3a4453">→ 新建 → 抢占 → 排队</text>
+
+        <rect x="296" y="156" width="238" height="66" rx="7" fill="#f4f7fb" stroke="#d6dde7"/>
+        <text x="310" y="176" fill="#26303d" font-weight="700">SessionRegistry</text>
+        <text x="310" y="193" fill="#3a4453">会话键 → 槽 / 工作区 / 未读</text>
+        <text x="310" y="210" fill="#3a4453">标签、预算、内核都按会话记账</text>
+
+        <rect x="546" y="156" width="238" height="66" rx="7" fill="#f4f7fb" stroke="#d6dde7"/>
+        <text x="560" y="176" fill="#26303d" font-weight="700">TranscriptHub</text>
+        <text x="560" y="193" fill="#3a4453">revision + 快照 + 订阅</text>
+        <text x="560" y="210" fill="#3a4453">切回是取快照，不是重读文件</text>
+
+        <rect x="796" y="156" width="258" height="66" rx="7" fill="#f4f7fb" stroke="#d6dde7"/>
+        <text x="810" y="176" fill="#26303d" font-weight="700">KernelManager / ServiceHub</text>
+        <text x="810" y="193" fill="#3a4453">内核按（会话, 语言）索引</text>
+        <text x="810" y="210" fill="#3a4453">token → runtimeId 路由</text>
+      </g>
+
+      <line x1="550" y1="240" x2="550" y2="262" stroke="#067647" stroke-width="1.4" marker-end="url(#arG)"/>
+
+      <!-- slots -->
+      <rect x="30" y="264" width="1040" height="176" rx="10" fill="#fff" stroke="#c9d2de"/>
+      <text x="52" y="288" font-size="13" font-weight="700" fill="#26303d">槽 = 一个 pi 进程，绑定一个工作区（cwd 焊死）</text>
+
+      <g font-size="11.5">
+        <rect x="46" y="300" width="322" height="124" rx="8" fill="#fbfcfd" stroke="#b7e3c9"/>
+        <text x="60" y="320" fill="#067647" font-weight="700">槽 1 · 工作区 A</text>
+        <text x="60" y="337" fill="#3a4453">会话 A1 · 运行中</text>
+        <rect x="60" y="346" width="292" height="30" rx="5" fill="#e7f6ee"/>
+        <text x="72" y="366" fill="#3a4453">pi 进程 · RPC · EventPump</text>
+        <rect x="60" y="382" width="140" height="28" rx="5" fill="#eef2f7"/><text x="72" y="401" fill="#3a4453">Python 内核</text>
+        <rect x="212" y="382" width="140" height="28" rx="5" fill="#eef2f7"/><text x="224" y="401" fill="#3a4453">R 内核</text>
+
+        <rect x="388" y="300" width="322" height="124" rx="8" fill="#fbfcfd" stroke="#d6dde7"/>
+        <text x="402" y="320" fill="#3a4453" font-weight="700">槽 2 · 工作区 A</text>
+        <text x="402" y="337" fill="#5b6472">会话 A2 · 空闲（挂起可复用）</text>
+        <rect x="402" y="346" width="292" height="30" rx="5" fill="#eef2f7"/>
+        <text x="414" y="366" fill="#3a4453">pi 进程 · RPC · EventPump</text>
+        <rect x="402" y="382" width="292" height="28" rx="5" fill="#eef2f7"/><text x="414" y="401" fill="#3a4453">内核按会话懒启动，挂起即收</text>
+
+        <rect x="730" y="300" width="324" height="124" rx="8" fill="#fbfcfd" stroke="#f5d3ab"/>
+        <text x="744" y="320" fill="#b54708" font-weight="700">槽 3 · 工作区 B</text>
+        <text x="744" y="337" fill="#3a4453">会话 B1 · 等审批（不停）</text>
+        <rect x="744" y="346" width="294" height="30" rx="5" fill="#fff4e5"/>
+        <text x="756" y="366" fill="#3a4453">pi 进程 · RPC · EventPump</text>
+        <rect x="744" y="382" width="294" height="28" rx="5" fill="#eef2f7"/><text x="756" y="401" fill="#3a4453">审批卡带来源（工作区 / 会话）</text>
+      </g>
+    </svg>
+    <div class="cap">图 2 · 目标：一个槽池，N 个工作区，每个会话一条槽；切换只是把视图指过去。</div>
+  </div>
+
+  <div class="kpi">
+    <div><div class="k">切到已打开的工作区</div><div class="v">≤100<span class="u">ms</span></div></div>
+    <div><div class="k">切到挂起会话（见历史）</div><div class="v">≤400<span class="u">ms</span></div></div>
+    <div><div class="k">冷启一条会话可输入</div><div class="v">≤3<span class="u">s</span></div></div>
+    <div><div class="k">其他会话受影响</div><div class="v">0<span class="u">次中断</span></div></div>
+  </div>
+  <p style="font-size:12.5px;color:var(--muted)">上表是<b>设计目标</b>，不是实测值；实测由第 6 节的埋点产出，验收看 P50/P95。</p>
+</section>
+
+<!-- ============ 4. 时序对比 ============ -->
+<section>
+  <h2><span class="no">4</span>时序对比：一次「切过去」到底经过谁</h2>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1100 430" role="img" aria-label="现状与目标的切换时序对比">
+      <defs>
+        <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+        <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#067647"/>
+        </marker>
+      </defs>
+
+      <!-- left -->
+      <rect x="14" y="10" width="524" height="406" rx="10" fill="#fffafa" stroke="#f3cbc6"/>
+      <text x="34" y="36" font-size="13" font-weight="700" fill="#b42318">现状：切工作区（阻塞）</text>
+
+      <g font-size="11.5" fill="#3a4453">
+        <rect x="34" y="50" width="484" height="26" rx="5" fill="#fdecea"/><text x="46" y="68" fill="#b42318">① 点「切换到此工作区」（App.tsx:2291）</text>
+        <rect x="34" y="84" width="484" height="26" rx="5" fill="#fff4e5"/><text x="46" y="102">② defaultRuntime.stop()：整组杀 pi</text>
+        <rect x="34" y="118" width="484" height="26" rx="5" fill="#fff4e5"/><text x="46" y="136">③ 关掉其他工作区的槽 + 清空队列</text>
+        <rect x="34" y="152" width="484" height="26" rx="5" fill="#fdecea"/><text x="46" y="170" fill="#b42318">④ 硬等 350 ms</text>
+        <rect x="34" y="186" width="484" height="26" rx="5" fill="#fff4e5"/><text x="46" y="204">⑤ 改写 workspaceRoot / sessionDir 等 5 处全局</text>
+        <rect x="34" y="220" width="484" height="26" rx="5" fill="#fdecea"/><text x="46" y="238" fill="#b42318">⑥ start()：Node 冷启 + 扩展 + MCP 握手</text>
+        <rect x="34" y="254" width="484" height="26" rx="5" fill="#fff4e5"/><text x="46" y="272">⑦ 渲染端串行重拉 ×5（列表同步扫盘）</text>
+      </g>
+
+      <line x1="34" y1="296" x2="518" y2="296" stroke="#b42318" stroke-width="1.4" stroke-dasharray="5 4"/>
+      <text x="34" y="316" font-size="11.5" fill="#b42318">这段时间：A 的任务被杀；新对话没有可用槽；A 的备案全丢</text>
+      <rect x="34" y="330" width="484" height="30" rx="6" fill="#fff" stroke="#f3cbc6"/>
+      <text x="46" y="350" font-size="11.5" fill="#3a4453">耗时 ≈ ① 杀进程 + 350 ms + 冷启 + 列表扫描（以埋点为准）</text>
+      <text x="34" y="382" font-size="11.5" fill="#5b6472">体验：点一下 → 界面空白 → 等 → 已经在跑的东西没了</text>
+
+      <!-- right -->
+      <rect x="562" y="10" width="524" height="406" rx="10" fill="#f8fdfa" stroke="#bfe3cd"/>
+      <text x="582" y="36" font-size="13" font-weight="700" fill="#067647">目标：打开一个会话（非阻塞）</text>
+
+      <g font-size="11.5" fill="#3a4453">
+        <rect x="582" y="50" width="484" height="26" rx="5" fill="#eef2f7"/><text x="594" y="68">① 点侧栏里的会话（任意工作区）</text>
+        <rect x="582" y="84" width="484" height="26" rx="5" fill="#e7f6ee"/><text x="594" y="102" fill="#067647">② 由会话反查工作区 → 槽池定位（Map 查询）</text>
+        <rect x="582" y="118" width="484" height="26" rx="5" fill="#e7f6ee"/><text x="594" y="136" fill="#067647">③ 立刻渲染 transcript 快照（≤1 帧）</text>
+        <rect x="582" y="152" width="484" height="26" rx="5" fill="#fff4e5"/><text x="594" y="170">④ 后台：复用 / 拉起 / 新建该槽（只这一条）</text>
+        <rect x="582" y="186" width="484" height="26" rx="5" fill="#e7f6ee"/><text x="594" y="204" fill="#067647">⑤ ready 后解锁输入框（徽标「连接中」）</text>
+      </g>
+
+      <line x1="582" y1="226" x2="1066" y2="226" stroke="#067647" stroke-width="1.4" stroke-dasharray="5 4"/>
+      <text x="582" y="246" font-size="11.5" fill="#067647">不忍断任何东西：A1 继续跑，B1 继续等审批</text>
+
+      <rect x="582" y="260" width="484" height="88" rx="6" fill="#fff" stroke="#bfe3cd"/>
+      <text x="594" y="280" font-size="11.5" fill="#3a4453">三条分支的代价不同，但都不阻塞界面：</text>
+      <text x="594" y="300" font-size="11.5" fill="#3a4453">・已打开 → 一次 attach，≈ 0</text>
+      <text x="594" y="318" font-size="11.5" fill="#3a4453">・挂起 → 拉起该槽 + 快照先到</text>
+      <text x="594" y="336" font-size="11.5" fill="#3a4453">・从未打开 → spawn 一条，其余照旧</text>
+
+      <text x="582" y="378" font-size="11.5" fill="#067647">体验：点一下就有内容，能立刻继续打字</text>
+    </svg>
+    <div class="cap">图 3 · 左边是「重启」，右边是「换观察者」。两者差的不是毫秒，是有没有把别的东西一起停掉。</div>
+  </div>
+</section>
+
+<!-- ============ 5. 身份与状态 ============ -->
+<section>
+  <h2><span class="no">5</span>四个身份，一种状态机</h2>
+  <p class="sub">并行出错，九成是身份混了：把「标签」当「会话」、把「槽」当「会话」、把「工作区」当「模式」。</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1100 210" role="img" aria-label="四个身份的关系">
+      <defs>
+        <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+      </defs>
+      <g font-size="11.5">
+        <rect x="26" y="52" width="212" height="76" rx="9" fill="#f4f7fb" stroke="#c9d2de"/>
+        <text x="42" y="76" font-size="12.5" font-weight="700" fill="#26303d">WorkspaceKey</text>
+        <text x="42" y="96" fill="#5b6472">工作区根目录</text>
+        <text x="42" y="113" fill="#5b6472">「能在哪儿干活」</text>
+
+        <rect x="310" y="52" width="212" height="76" rx="9" fill="#e8f0fe" stroke="#b9cdf5"/>
+        <text x="326" y="76" font-size="12.5" font-weight="700" fill="#1f4f9e">SessionKey</text>
+        <text x="326" y="96" fill="#3a4453">会话文件绝对路径</text>
+        <text x="326" y="113" fill="#3a4453">「这是哪段对话」</text>
+
+        <rect x="594" y="52" width="212" height="76" rx="9" fill="#e7f6ee" stroke="#b7e3c9"/>
+        <text x="610" y="76" font-size="12.5" font-weight="700" fill="#067647">SlotId</text>
+        <text x="610" y="96" fill="#3a4453">一个 pi 子进程</text>
+        <text x="610" y="113" fill="#3a4453">「谁在干活」</text>
+
+        <rect x="878" y="52" width="200" height="76" rx="9" fill="#fff4e5" stroke="#f5d3ab"/>
+        <text x="894" y="76" font-size="12.5" font-weight="700" fill="#b54708">TabId</text>
+        <text x="894" y="96" fill="#3a4453">界面上的一格视图</text>
+        <text x="894" y="113" fill="#3a4453">「我现在看谁」</text>
+      </g>
+      <line x1="238" y1="90" x2="306" y2="90" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar5)"/>
+      <text x="240" y="80" font-size="11" fill="#5b6472">1 : n</text>
+      <line x1="522" y1="90" x2="590" y2="90" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar5)"/>
+      <text x="524" y="80" font-size="11" fill="#5b6472">0..1</text>
+      <line x1="806" y1="90" x2="874" y2="90" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar5)"/>
+      <text x="808" y="80" font-size="11" fill="#5b6472">n : 1</text>
+      <text x="26" y="160" font-size="11.5" fill="#5b6472">· 一个工作区可以有多个会话；一个会话最多占一个槽；多个标签可以看同一个会话。</text>
+      <text x="26" y="182" font-size="11.5" fill="#5b6472">· 槽属于工作区（pi 的 cwd 建进程那刻焊死），跨工作区的会话不能共用一个槽。</text>
+    </svg>
+    <div class="cap">图 4 · 身份四元组。修复的关键就一句：<b>由会话决定工作区，而不是由全局变量决定会话能用哪个工作区。</b></div>
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1100 250" role="img" aria-label="会话与槽的状态机">
+      <defs>
+        <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+        </marker>
+      </defs>
+      <g font-size="11.5">
+        <rect x="30" y="90" width="150" height="56" rx="9" fill="#f4f7fb" stroke="#c9d2de"/>
+        <text x="50" y="114" font-weight="700" fill="#26303d">closed</text>
+        <text x="50" y="133" fill="#5b6472">没有槽</text>
+
+        <rect x="250" y="90" width="170" height="56" rx="9" fill="#fff4e5" stroke="#f5d3ab"/>
+        <text x="270" y="114" font-weight="700" fill="#b54708">opening</text>
+        <text x="270" y="133" fill="#5b6472">spawn + 等 ready</text>
+
+        <rect x="490" y="90" width="150" height="56" rx="9" fill="#e7f6ee" stroke="#b7e3c9"/>
+        <text x="510" y="114" font-weight="700" fill="#067647">idle</text>
+        <text x="510" y="133" fill="#5b6472">可接新回合</text>
+
+        <rect x="710" y="90" width="150" height="56" rx="9" fill="#e8f0fe" stroke="#b9cdf5"/>
+        <text x="730" y="114" font-weight="700" fill="#1f4f9e">busy</text>
+        <text x="730" y="133" fill="#3a4453">一轮在飞</text>
+
+        <rect x="490" y="186" width="150" height="48" rx="9" fill="#f4f7fb" stroke="#c9d2de"/>
+        <text x="510" y="207" font-weight="700" fill="#3a4453">suspended</text>
+        <text x="510" y="224" fill="#5b6472">进程停、会话留</text>
+
+        <rect x="710" y="186" width="150" height="48" rx="9" fill="#fdecea" stroke="#f3cbc6"/>
+        <text x="730" y="207" font-weight="700" fill="#b42318">interrupted</text>
+        <text x="730" y="224" fill="#5b6472">崩了，标出来</text>
+      </g>
+
+      <line x1="180" y1="118" x2="246" y2="118" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="186" y="110" font-size="10.5" fill="#5b6472">打开</text>
+      <line x1="420" y1="118" x2="486" y2="118" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="426" y="110" font-size="10.5" fill="#5b6472">ready</text>
+      <line x1="640" y1="112" x2="706" y2="112" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="646" y="104" font-size="10.5" fill="#5b6472">写</text>
+      <line x1="706" y1="130" x2="640" y2="130" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="646" y="146" font-size="10.5" fill="#5b6472">settled</text>
+      <line x1="515" y1="148" x2="515" y2="182" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="521" y="172" font-size="10.5" fill="#5b6472">空闲回收</text>
+      <line x1="600" y1="182" x2="600" y2="148" stroke="#067647" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="606" y="172" font-size="10.5" fill="#067647">激活</text>
+      <line x1="785" y1="146" x2="785" y2="182" stroke="#b42318" stroke-width="1.4" marker-end="url(#ar6)"/>
+      <text x="791" y="168" font-size="10.5" fill="#b42318">进程异常退出</text>
+      <text x="30" y="222" font-size="11.5" fill="#5b6472">停只在 suspended / closed 两端发生；切标签、换工作区都不是停的理由。</text>
+    </svg>
+    <div class="cap">图 5 · 会话状态机。现状把「切工作区」错误地放进了 busy → closed 这条边上。</div>
+  </div>
+</section>
+
+<!-- ============ 6. 改造清单 ============ -->
+<section>
+  <h2><span class="no">6</span>改造清单：七处改动，按风险从低到高</h2>
+  <p class="sub">槽池（SlotPool）已经具备「跨工作区建槽」的能力，缺的是上层别拦着它。</p>
+
+  <table>
+    <tr><th style="width:4%">#</th><th style="width:30%">改哪儿</th><th style="width:36%">改成什么</th><th>为什么</th></tr>
+    <tr>
+      <td>C1</td>
+      <td class="mono">index.ts:3638 session:open</td>
+      <td><code>slotPool.open(target, workspaceOf(target))</code>；工作区由会话文件反查（登记表 / 工作区索引），查不到才回落全局</td>
+      <td>现在硬编码 <code>workspaceRoot</code>，别的工作区的会话根本打不开</td>
+    </tr>
+    <tr>
+      <td>C2</td>
+      <td class="mono">index.ts:1190 openWorkspace</td>
+      <td>拆成 <code>workspace:add</code>（登记 + 建目录 + 写 recent）与 <code>workspace:activate</code>（只切视图指针）；删掉 stop / dropQueue / 350 ms / closeSlot 循环</td>
+      <td>这一处是「慢 + 断」的直接来源</td>
+    </tr>
+    <tr>
+      <td>C3</td>
+      <td class="mono">index.ts:1231–1247 全局</td>
+      <td><code>workspaceRoot</code> 收敛为 <code>viewWorkspace</code>（只影响新建会话、文件树、默认目录）；会话归属从登记表取</td>
+      <td>全局指针是「模式」心智的载体</td>
+    </tr>
+    <tr>
+      <td>C4</td>
+      <td class="mono">index.ts:2482 pi:new-session</td>
+      <td>改成 <code>session:new(workspace)</code> → 槽池按 ④/⑤ 准入建一条新会话，再在该槽上 <code>new_session</code></td>
+      <td>新对话不该依赖「当前默认槽」</td>
+    </tr>
+    <tr>
+      <td>C5</td>
+      <td class="mono">App.tsx 侧栏 / 标签</td>
+      <td>侧栏按工作区分组列出<b>全部</b>会话；点任意一条直接 <code>session:open</code>；「切换到此工作区」改成「在此新建会话」</td>
+      <td>DAWN 的侧栏就是这个形态；也是「能开新对话」的入口</td>
+    </tr>
+    <tr>
+      <td>C6</td>
+      <td class="mono">index.ts:1009 listSessions</td>
+      <td>异步 + 增量索引（路径 / mtime / 标题落一份缓存，目录监听失效），主线程不再同步 <code>stat</code></td>
+      <td>列表扫描会和所有 IPC 抢主线程</td>
+    </tr>
+    <tr>
+      <td>C7</td>
+      <td class="mono">index.ts:4141 pi:switch-session</td>
+      <td>降级为内部兼容入口；UI 一律走 <code>session:open</code>（同工作区换会话也不再 <code>switch_session</code>）</td>
+      <td><code>switch_session</code> 会取消在飞的一轮，与「切走不停」直接冲突</td>
+    </tr>
+  </table>
+
+  <h3>秒开的两段式（C5 + 现有 transcriptHub）</h3>
+  <ol class="steps">
+    <li><b>先给内容</b>：<code>transcript:snapshot</code> 有快照就直接画；<code>cold</code> 时用磁盘 transcript 先画一版（标「历史，连接中」），不等进程。</li>
+    <li><b>再给输入</b>：槽 <code>ready</code> 之后解锁输入框；未 ready 时输入框可打字但发送排队（<code>queued</code> 已在槽池里）。</li>
+    <li><b>失败要出声</b>：spawn 失败 / 超时 → 标签上标红并给「重试」，不静默留白。</li>
+  </ol>
+</section>
+
+<!-- ============ 7. 预算与验收 ============ -->
+<section>
+  <h2><span class="no">7</span>时间预算与验收：别用感觉验收</h2>
+  <p class="sub">先埋点，再优化；每个数字都要能指到一条日志。</p>
+
+  <h3>七段埋点（统一前缀 <code>[switch]</code>，写进现有 logs/app.jsonl）</h3>
+  <table>
+    <tr><th style="width:16%">checkpoint</th><th style="width:44%">起点 → 终点</th><th>用途</th></tr>
+    <tr><td class="mono">t0→t1</td><td>点击 → IPC 到主进程</td><td>区分「界面慢」还是「主进程慢」</td></tr>
+    <tr><td class="mono">t1→t2</td><td>反查工作区 + 槽池定位</td><td>应 &lt; 5 ms（纯 Map）</td></tr>
+    <tr><td class="mono">t2→t3</td><td>transcript 快照就绪</td><td>首屏内容时间</td></tr>
+    <tr><td class="mono">t3→t4</td><td>槽 spawn（冷启才发生）</td><td>冷启成本，按模型/扩展分档统计</td></tr>
+    <tr><td class="mono">t4→t5</td><td>spawn → ready（get_state 成功）</td><td>扩展加载、MCP 握手</td></tr>
+    <tr><td class="mono">t5→t6</td><td>列表 / 目录树刷新</td><td>发现同步扫盘劣化</td></tr>
+    <tr><td class="mono">t6→t7</td><td>输入框可用</td><td>用户真正在意的那个数</td></tr>
+  </table>
+
+  <h3>目标（P50 / P95，20 次取分位）</h3>
+  <div class="bars">
+    <div class="bar"><span>切到已打开的工作区</span><div class="track"><div class="fill g" style="width:8%"></div></div><span class="num">≤100 ms</span></div>
+    <div class="bar"><span>切到挂起会话（见历史）</span><div class="track"><div class="fill g" style="width:22%"></div></div><span class="num">≤400 ms</span></div>
+    <div class="bar"><span>冷启会话 → 可输入</span><div class="track"><div class="fill a" style="width:52%"></div></div><span class="num">≤3 s</span></div>
+    <div class="bar"><span>跨工作区会话列表（缓存命中）</span><div class="track"><div class="fill g" style="width:5%"></div></div><span class="num">≤50 ms</span></div>
+    <div class="bar"><span>新建会话（有空闲槽）</span><div class="track"><div class="fill g" style="width:12%"></div></div><span class="num">≤500 ms</span></div>
+    <div class="bar"><span>切换期间其他会话中断次数</span><div class="track"><div class="fill g" style="width:1%"></div></div><span class="num">0</span></div>
+  </div>
+
+  <h3>三条硬验收（缺一条都算没修好）</h3>
+  <table>
+    <tr><th style="width:38%">场景</th><th style="width:32%">动作</th><th>必须成立</th></tr>
+    <tr><td>A 工作区跑 5 分钟长任务</td><td>切到 B 工作区、在 B 里新建会话、发一条消息</td><td>A 的任务不中断、A 的槽不被杀、B 能在 3 s 内可输入</td></tr>
+    <tr><td>A 工作区有 200 个会话</td><td>连续在 A/B 之间来回切 20 次</td><td>P95 列表 ≤ 50 ms；主进程无 &gt;200 ms 的主线程阻塞</td></tr>
+    <tr><td>崩溃 / 强杀</td><td>杀 A 的槽</td><td>只有 A 标 <code>interrupted</code>，B 不受影响；A 可直接重发</td></tr>
+  </table>
+</section>
+
+<!-- ============ 8. 分期 ============ -->
+<section>
+  <h2><span class="no">8</span>分期：先能并行，再谈快</h2>
+
+  <table>
+    <tr><th style="width:8%">期</th><th style="width:40%">内容</th><th style="width:14%">预估</th><th>完成判据</th></tr>
+    <tr>
+      <td><b>S1</b></td>
+      <td>C1 会话定位 + C5 侧栏跨工作区列会话（只读，先不删旧路径）</td>
+      <td>0.5–1 天</td>
+      <td>能从侧栏直接打开另一个工作区的会话，且当前工作区的任务不中断</td>
+    </tr>
+    <tr>
+      <td><b>S2</b></td>
+      <td>C2 拆 <code>workspace:add / activate</code>，删 stop + 350 ms + 关槽循环；C3 全局收敛</td>
+      <td>1–1.5 天</td>
+      <td>切工作区不再触发任何 <code>stop()</code>；日志里看不到 350 ms</td>
+    </tr>
+    <tr>
+      <td><b>S3</b></td>
+      <td>C4 新建会话进槽池（任意工作区）</td>
+      <td>0.5 天</td>
+      <td>在一个工作区里同时开两个新会话，各自独立</td>
+    </tr>
+    <tr>
+      <td><b>S4</b></td>
+      <td>C6 列表异步 + 增量索引；C7 旧入口降级</td>
+      <td>1 天</td>
+      <td>200 会话下 P95 列表 ≤ 50 ms，主线程无长阻塞</td>
+    </tr>
+    <tr>
+      <td><b>S5</b></td>
+      <td>埋点 + 两段式首屏（快照先到、ready 再解锁）</td>
+      <td>0.5–1 天</td>
+      <td>三条硬验收全过，P95 达标</td>
+    </tr>
+  </table>
+
+  <p style="font-size:13px;color:var(--muted)">合计约 <b>3.5–5 人日</b>。S1/S2 是主线；S5 的埋点建议先做（半天），否则后面无法证明「变快了」。</p>
+</section>
+
+<!-- ============ 9. 已定决策与风险 ============ -->
+<section>
+  <h2><span class="no">9</span>已定决策与风险</h2>
+
+  <h3>三条决策（2026-11-24 确认，直接入实现）</h3>
+  <table>
+    <tr><th style="width:6%">#</th><th style="width:34%">决策</th><th>落地含义</th></tr>
+    <tr>
+      <td><b>D1</b></td>
+      <td><b>切工作区只切视图，后台继续跑</b></td>
+      <td><code>workspace:activate</code> 只改 <code>viewWorkspace</code>，不 stop 任何槽；后台会话照常烧 token，所以标签要显示「后台运行中」，并在每日额度到 80% 时出声</td>
+    </tr>
+    <tr>
+      <td><b>D2</b></td>
+      <td><b>侧栏 = 按工作区分组的全部会话，直接点开</b></td>
+      <td>C5 成为主路径；「切换到此工作区」改为「在此新建会话」；跨工作区 <code>session:open</code>（C1）必须与 C5 同批落地，否则点了没反应</td>
+    </tr>
+    <tr>
+      <td><b>D3</b></td>
+      <td><b>活跃槽上限 3–4</b></td>
+      <td><code>maxSlots</code> 默认 <b>3</b>，设置里可调 1–4（硬顶 4）；超限仍走「挂起最久未用的空闲槽」；满配内存约 0.75–1.6 GB（3 槽 × pi 250 MB + 内核 300 MB）</td>
+    </tr>
+  </table>
+
+  <div class="callout good">
+    <b>三条决策合起来的一句话：</b>工作区退化为视图属性，会话是唯一的活动主体；资源约束从「一个工作区只能一个进程」变成「同时最多 3–4 条会话在跑」。
+    于是 S1（会话定位）与 S2（拆 add/activate）必须先做——它们是 D1/D2 的技术前提，而不是可选项。
+  </div>
+
+  <h3>风险</h3>
+  <table>
+    <tr><th style="width:30%">风险</th><th style="width:34%">说明</th><th>缓解</th></tr>
+    <tr>
+      <td>同一工作区多槽写同一目录</td><td>两个会话同时改一个文件，谁赢说不准</td>
+      <td>同工作区默认允许多槽，但写操作按会话记审计；后续可加 DAWN 式的按会话租约（<code>LeaseManager</code>）</td>
+    </tr>
+    <tr>
+      <td>内存</td><td>每个 pi 进程 100–250 MB，内核 100–300 MB；3 槽满配约 0.75–1.6 GB</td>
+      <td><code>maxSlots</code> 默认 3（可调 1–4，硬顶 4）+ 空闲回收；挂起的槽不占运行额度；状态栏显示已用槽数</td>
+    </tr>
+    <tr>
+      <td>后台继续烧 token</td><td>D1 的代价：切走的会话仍在跑、仍计费</td>
+      <td>标签显示运行中/计时；每日额度 80% 与 100% 各提示一次；预算按会话记账而不是全局</td>
+    </tr>
+    <tr>
+      <td>审批串台</td><td>后台会话弹审批，用户不知道来自哪</td>
+      <td>审批卡带工作区 + 会话标题；按会话排队，切标签不取消</td>
+    </tr>
+    <tr>
+      <td>MCP 连接数</td><td>每个槽各连一份 MCP（stdio 会多进程）</td>
+      <td>短期接受并在设置里提示；中期做共享池</td>
+    </tr>
+    <tr>
+      <td>租约/写权</td><td>多标签看同一会话时可能同时写</td>
+      <td>同一 <code>SessionKey</code> 只允许一个槽（槽池已有 0..1 约束），多标签共享同一个槽</td>
+    </tr>
+  </table>
+
+  <div class="callout warn">
+    <b>剩余两处细节（不阻塞开工，实现时按默认值走即可）：</b>
+    <ol style="margin:8px 0 0 18px;padding:0">
+      <li>后台会话的额度提示：默认「80% 提醒一次、100% 再提醒一次」，不自动停槽（停槽会丢在飞的一轮）。</li>
+      <li><code>maxSlots</code> 默认 3，设置页先只读显示实际值；等 P95 数据出来再决定是否开放到 4。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ 10. 实施记录 ============ -->
+<section>
+  <h2><span class="no">10</span>实施记录（第一批 · 2026-11-25）</h2>
+
+  <table>
+    <tr><th style="width:30%">位置</th><th>改了什么</th></tr>
+    <tr><td class="mono">index.ts openWorkspace</td><td>改为非破坏性：只切视图指针（<code>activateWorkspaceView</code>），删掉 stop / 关别的工作区的槽 / dropQueue / 350&nbsp;ms 硬等；默认槽同工作区复用，别的工作区且空闲才重拉，<b>正忙就不动它</b>（<code>ensureDefaultSlotForView</code>）</td></tr>
+    <tr><td class="mono">index.ts session:open</td><td>工作区由会话反查（<code>workspaceOfSession</code>），跨工作区会话可直接打开；打开即打 <code>[switch]</code> 埋点</td></tr>
+    <tr><td class="mono">index.ts pi:new-session</td><td>支持 <code>workspace</code> 参数，经槽池取槽（就绪空闲槽 → 挂起槽 → 新建）；传入的槽不属于目标工作区就忽略，免得在 A 的槽里给 B 建会话</td></tr>
+    <tr><td class="mono">index.ts createSlot</td><td>每个槽设自己的 <code>sessionDir</code>（原来只靠全局，B 的新会话会落到 A 的目录）</td></tr>
+    <tr><td class="mono">index.ts（新增 IPC）</td><td><code>sessions:list-in</code>（只认已登记工作区，15&nbsp;s 缓存）与 <code>session:current</code></td></tr>
+    <tr><td class="mono">session-locate.ts</td><td>新模块：<code>sessionsDirOf</code> / <code>workspaceOfSession</code>，纯函数，10 条单测</td></tr>
+    <tr><td class="mono">switch-timing.ts</td><td>新模块：<code>logs/timings.jsonl</code>，每次切换一行（label / ms / marks），4&nbsp;MB 轮转</td></tr>
+    <tr><td class="mono">App.tsx</td><td>侧栏工作区分组展开即列出会话、点开即打开；「切换到此工作区」→「在此新建会话」；打开跨工作区会话后同步工作区信息与文件树</td></tr>
+  </table>
+
+  <h3>实测（本机 Windows，sandbox 工作区）</h3>
+<pre>[switch] workspace-open 25.9ms layout:0.5 view:0.6 default-slot:25.3
+[switch] workspace-open 1.2ms  layout:0.4 view:0.4 default-slot:0.9</pre>
+  <p>旧路径的固定成本是 <b>350&nbsp;ms 硬等 + taskkill + 冷启 + 5 次串行重拉</b>，且会杀掉别的工作区的槽；现在切视图本身是 1–26&nbsp;ms 的指针改写。
+     <code>typecheck</code> / <code>build</code> 通过，全量单测 <b>379 通过</b>（含新增 10 条）。</p>
+
+  <h3>怎么复验</h3>
+<pre># 切换耗时（另见 %APPDATA%/oh-my-coding-pi/logs/timings.jsonl）
+P1_SELFTEST=1 P1_SELFTEST_MODE=workspace   ./apps/desktop/node_modules/.bin/electron apps/desktop/out/main/index.js
+
+# 跨工作区会话列表 + 未登记工作区被拒（不启 pi）
+P1_SELFTEST=1 P1_SELFTEST_MODE=multiws   ./apps/desktop/node_modules/.bin/electron apps/desktop/out/main/index.js
+# → P1_SELFTEST_MULTIWS {"opened":true,"count":1,"rejected":true,"workspace":true}</pre>
+  <p>手工验「切走不停」：工作区 A 里发一条要跑几分钟的任务 → 展开工作区 B → 点 B 的会话或「在此新建会话」→ 回来看 A 的回合是否还在跑、标签状态点是否仍是运行中。</p>
+
+  <h3>第二批（S4 · 同日）：C6 + C7</h3>
+  <table>
+    <tr><th style="width:22%">项</th><th>内容</th></tr>
+    <tr>
+      <td><b>C6</b> 会话列表</td>
+      <td>新模块 <code>session-index.ts</code>：<code>readdir/stat/open</code> 全异步；按 <b>mtime + size</b> 增量，没变的文件只 stat；首行只读 4&nbsp;KB；补标题移出热路径（后台、一次最多 20 个）</td>
+    </tr>
+    <tr>
+      <td><b>C7</b> 旧入口</td>
+      <td><code>pi:switch-session</code> 不再调 pi 的 <code>switch_session</code>（它会取消在飞的一轮），改为槽池转发，与 <code>session:open</code> 同一条路</td>
+    </tr>
+  </table>
+
+  <p style="font-size:13px;color:var(--muted)">合成基准：400 个会话文件（每份约 2&nbsp;KB，本机 SSD）——旧实现每次 <b>194&nbsp;ms</b> 且阻塞主线程；新实现冷扫 198&nbsp;ms（不阻塞）、热扫 <b>13&nbsp;ms</b>。</p>
+
+  <h3>第三批：两段式首屏（S5b）</h3>
+  <table>
+    <tr><th style="width:16%">段</th><th style="width:52%">做什么</th><th>代价</th></tr>
+    <tr><td><b>一</b></td><td>切标签 + 取转录中枢快照直接画（只读主进程内存，不动 pi 进程）</td><td>一次 IPC，毫秒级</td></tr>
+    <tr><td><b>二</b></td><td><code>openSession</code> 叫醒/新建槽（可能 spawn + 等 ready），完成后用真内容接管</td><td>冷启几秒，<b>不再挡界面</b></td></tr>
+  </table>
+  <ul class="tight">
+    <li><b>输入锁</b>：<code>slotReady = !opening &amp;&amp; 槽就绪</code>——否则这句话会发给上一个会话；输入框可打字，发送被拦并提示。</li>
+    <li><b>不闪空白</b>：槽拿到内容前预览一直留着；冷启后 <code>get_messages</code> 为空时把预览写进该槽的桶。</li>
+    <li><b>不串台</b>：<code>pickMessages(preview, currentFile, bucket)</code>，预览属于别的文件 / 为空 / 无当前文件都回落，5 条单测钉住。</li>
+  </ul>
+
+  <h3>第四批：后台会话的可见性（D1 的兜底）</h3>
+  <table>
+    <tr><th style="width:24%">项</th><th>做法</th></tr>
+    <tr>
+      <td><b>日额度按档位提醒</b></td>
+      <td>旧：任一超线就按<b>会话</b>去重 → 多会话时响很多遍，还看不出是谁烧的。新：会话账照旧（<code>E_BUDGET</code>）；日账按 <b>80% / 100% 两档</b>各一次（<code>E_BUDGET_NEAR</code> / <code>E_BUDGET_DAILY</code>），detail 写明「来自当前会话 / 后台会话（文件名）」，并说明<b>不会自动停槽</b>；跨天重置</td>
+    </tr>
+    <tr>
+      <td><b>标签计时</b></td>
+      <td>主进程在登记表记 <code>busySince</code>（agent_start 置位；settled / 崩溃 / 换绑清掉；<b>重复置位不重置起点</b>）。当前标签显示 <code>3:12</code>，后台标签显示 <code>后台 · 3:12</code>（强调色）；只有存在 busy 会话时才开 1 秒定时器</td>
+    </tr>
+  </table>
+  <p style="font-size:13px;color:var(--muted)">新增 3 条 registry 测试当场抓到一处真 bug：换绑会话时旧记录的 <code>busySince</code> 没清，标签会把别人的时长算到它头上。全量单测 <b>400 通过</b>。</p>
+
+  <h3>端到端测试（真实路径，不需要模型）</h3>
+  <p style="font-size:13.5px"><code>P1_SELFTEST_MODE=m5</code>：真 spawn pi、真切工作区、真建槽。</p>
+<pre>P1_SELFTEST_M5 {"ready":true,"sessions":2,"openFirstMs":685,"openSecondMs":2,
+ "slotsAfterOpen":2,"switchMs":32,"oldSlotStillRunning":true,
+ "slotsAfterSwitch":2,"newSessionMs":1575,"newSessionOk":true,
+ "newSessionInB":true,"ok":true}</pre>
+  <table>
+    <tr><th style="width:52%">断言</th><th>结果</th></tr>
+    <tr><td>同一工作区连开两段会话 → 两个槽</td><td>✅ 2 个运行槽</td></tr>
+    <tr><td>切到另一个工作区</td><td>✅ <b>32 ms</b></td></tr>
+    <tr><td>切走后，非默认槽里的会话</td><td>✅ <b>仍然 running</b>（没被杀）</td></tr>
+    <tr><td>在新工作区新建会话</td><td>✅ 1.6 s（含 spawn+等就绪），文件落在新工作区</td></tr>
+  </table>
+  <div class="callout good">
+    <b>测试抓到两个真问题：</b>
+    ① <code>sessionBoard()</code> 按当前视图过滤 → 切到 B 后 A 的会话查不到，标签会画成「已挂起」而槽还活着；已改为不按视图过滤。
+    ② 断言写错了（拿默认槽的会话验「没被杀」）——默认槽是"视图独占"的，切走时换绑是设计如此，正忙才不动。测试改成验非默认槽。
+  </div>
+
+  <div class="callout warn">
+    <b>还没做：</b>
+    ① 带模型的忙碌切换压测（需一个可用模型跑长任务）；
+    ② 标签「后台运行中」的字号/颜色建议实机看一眼再定。
+  </div>
+</section>
+
+<footer>
+  修改 5 · 方案 2026-11-24 · 第一批实施（2026-11-25） · 依据 DAWN <code>dist/electron/main.js</code> 与 OMCP 0.7.1 源码逐行核对。
+</footer>
+
+</div>
+</body>
+</html>

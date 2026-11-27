@@ -342,7 +342,7 @@ export default function Settings({
       <section className="perm-card">
         <div className="perm-head">
           <b>多会话</b>
-          <span className="perm-note">默认 2 个活跃 runtime</span>
+          <span className="perm-note">默认 3 个活跃 runtime（上限 4）</span>
         </div>
         <div className="perm-form">
           <label>
